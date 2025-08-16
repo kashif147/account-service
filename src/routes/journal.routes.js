@@ -12,10 +12,10 @@ import { limiterSensitive } from "../config/rateLimiters.js";
  */
 const router = express.Router();
 
+router.get("/", listJournals);   
 router.post("/invoice", limiterSensitive, invoiceRules, validate, invoice);
 router.post("/credit-note", limiterSensitive, invoiceRules, validate, creditNote);
 router.post("/receipt", limiterSensitive, receiptRules, validate, receipt);
 router.post("/claim-credit", claimApplicationCredit);
-router.get("/", listJournals);   
 
 export default router;
