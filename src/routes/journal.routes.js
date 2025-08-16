@@ -16,6 +16,6 @@ router.get("/", listJournals);
 router.post("/invoice", limiterSensitive, invoiceRules, validate, invoice);
 router.post("/credit-note", limiterSensitive, invoiceRules, validate, creditNote);
 router.post("/receipt", limiterSensitive, receiptRules, validate, receipt);
-router.post("/claim-credit", claimApplicationCredit);
+router.post("/claim-credit", validate, claimApplicationCredit);
 
 export default router;
