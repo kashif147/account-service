@@ -1,0 +1,230 @@
+{
+  "info": {
+    "name": "Accounts Service — API (ESM)",
+    "_postman_id": "accounts-svc-esm-2025",
+    "description": "Accounts microservice (MongoDB + RabbitMQ). ESM, controllers/routes/models. Includes journals, settlements, reports, balances, health, and Swagger docs.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": { "method": "GET", "url": "{{baseUrl}}/health" }
+        },
+        {
+          "name": "GET /ready",
+          "request": { "method": "GET", "url": "{{baseUrl}}/ready" }
+        },
+        {
+          "name": "GET /api/docs",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/docs" }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "GET /api/admin/coa",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/admin/coa" }
+        },
+        {
+          "name": "POST /api/admin/coa/seed",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/admin/coa/seed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Journal",
+      "item": [
+        {
+          "name": "POST /api/journal/invoice",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-01-01\",\n  \"docNo\": \"INV-2026-00001\",\n  \"memberId\": \"M001\",\n  \"amount\": 299.0,\n  \"incomeCode\": \"4000\",\n  \"revenueSubType\": \"fee\",\n  \"periodBucket\": \"current\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/invoice"
+          }
+        },
+        {
+          "name": "POST /api/journal/credit-note",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-10-01\",\n  \"docNo\": \"CRN-2025-00101\",\n  \"memberId\": \"M001\",\n  \"amount\": 49.84,\n  \"adjSubType\": \"discount\",\n  \"periodBucket\": \"current\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/credit-note"
+          }
+        },
+        {
+          "name": "POST /api/journal/receipt (Card → 1220 & 2020)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-08-01\",\n  \"docNo\": \"RCPT-2025-00015\",\n  \"memberId\": \"M003\",\n  \"amount\": 24.92,\n  \"clearingCode\": \"1220\",\n  \"bucket\": \"current\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/receipt"
+          }
+        },
+        {
+          "name": "POST /api/journal/receipt (Cheque → 1210 & 2020)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-09-02\",\n  \"docNo\": \"RCPT-2025-00021\",\n  \"memberId\": \"M003\",\n  \"amount\": 120.0,\n  \"clearingCode\": \"1210\",\n  \"bucket\": \"current\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/receipt"
+          }
+        },
+        {
+          "name": "POST /api/journal/receipt (Payroll → 1230 & 2020)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-11-01\",\n  \"docNo\": \"PAY-2025-00045\",\n  \"memberId\": \"M001\",\n  \"amount\": 24.92,\n  \"clearingCode\": \"1230\",\n  \"bucket\": \"current\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/receipt"
+          }
+        },
+        {
+          "name": "POST /api/journal/allocation (2020 → 1400)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-09-03\",\n  \"docNo\": \"ALLOC-2025-00001\",\n  \"memberId\": \"M003\",\n  \"amount\": 13.68,\n  \"bucket\": \"current\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/allocation"
+          }
+        },
+        {
+          "name": "POST /api/journal/transfer (2020 → 2020, M003 → M001)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-09-01\",\n  \"docNo\": \"XFER-2025-0002\",\n  \"fromMemberId\": \"M003\",\n  \"toMemberId\": \"M001\",\n  \"amount\": 24.92,\n  \"bucket\": \"current\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/transfer"
+          }
+        },
+        {
+          "name": "POST /api/journal/rebucket (current → advance)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-01-01\",\n  \"docNo\": \"ROLL-2026-ADV-003\",\n  \"memberId\": \"M003\",\n  \"amount\": 36.32,\n  \"fromBucket\": \"current\",\n  \"toBucket\": \"advance\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/rebucket"
+          }
+        },
+        {
+          "name": "POST /api/journal/rebucket (advance → arrears)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-01-01\",\n  \"docNo\": \"ROLL-2026-ARR-003\",\n  \"memberId\": \"M003\",\n  \"amount\": 133.68,\n  \"fromBucket\": \"advance\",\n  \"toBucket\": \"arrears\"\n}"
+            },
+            "url": "{{baseUrl}}/api/journal/rebucket"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Settlements",
+      "item": [
+        {
+          "name": "POST /api/settlements/stripe (VAT split)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2025-08-31\",\n  \"docNo\": \"SET-AUG-STRIPE\",\n  \"receipts\": [{ \"amount\": 24.92 }],\n  \"vatSplitEnabled\": true\n}"
+            },
+            "url": "{{baseUrl}}/api/settlements/stripe"
+          }
+        },
+        {
+          "name": "POST /api/settlements/deposit/cheques (1210 → 1200)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"date\": \"2025-09-30\",\n  \"docNo\": \"SET-SEP-CHK\",\n  \"amount\": 120.0\n}" },
+            "url": "{{baseUrl}}/api/settlements/deposit/cheques"
+          }
+        },
+        {
+          "name": "POST /api/settlements/deposit/payroll (1230 → 1200)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"date\": \"2025-11-30\",\n  \"docNo\": \"SET-NOV-PAYROLL\",\n  \"amount\": 24.92\n}" },
+            "url": "{{baseUrl}}/api/settlements/deposit/payroll"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reports",
+      "item": [
+        {
+          "name": "GET /api/reports/member/:memberId/statement",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/reports/member/M001/statement?from=2025-01-01&to=2026-12-31"
+          }
+        },
+        {
+          "name": "GET /api/reports/control",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/reports/control?asOf=2026-01-01" }
+        },
+        {
+          "name": "GET /api/reports/debtors",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/reports/debtors?asOf=2026-01-01" }
+        },
+        {
+          "name": "GET /api/reports/creditors",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/reports/creditors?asOf=2026-01-01" }
+        },
+        {
+          "name": "GET /api/reports/income",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/reports/income?from=2026-01-01&to=2026-12-31" }
+        },
+        {
+          "name": "GET /api/reports/balances (materialized)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/reports/balances?includeMembers=true&memberLimit=1000"
+          }
+        }
+      ]
+    }
+  ]
+}
