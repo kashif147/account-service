@@ -1,9 +1,9 @@
 // src/controllers/journal.controller.js
 import CoA from "../models/coa.model.js";
-import GLTransaction from "../models/glTransaction.model.js";
+import GL from "../models/glTransaction.model.js";
 import dayjs from "dayjs";
 // import { calculateProRataFee } from "../helpers/prorata.js";
-import { prorataFromJoinToYearEnd, yearBoundsFrom } from "../helpers/prorata.js";
+import { prorataFromJoinToYearEnd, yearBoundsFrom, prorataForPeriod } from "../helpers/prorata.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 
 function sum(arr, sel) {
@@ -51,12 +51,12 @@ export async function postBalancedJournal({ date, docType, docNo, memo, lines })
   
 
   // idempotency on docNo
-  const exists = await GLTransaction.findOne({ docNo }).lean();
+  const exists = await GL.findOne({ docNo }).lean();
   if (exists) return exists;
 
   // strip helper and persist
   const entries = enriched.map(({ _a, ...rest }) => rest);
-  const txn = await GLTransaction.create({ date, docType, docNo, memo, entries });
+  const txn = await GL.create({ date, docType, docNo, memo, entries });
 
   // add a friendly label in the response
   const obj = txn.toObject();
@@ -68,21 +68,85 @@ export async function postBalancedJournal({ date, docType, docNo, memo, lines })
 }
 
 // Invoice → 1400 (AR) debit, income credit
+// export async function invoice(req, res, next) {
+//   try {
+//     const {
+//       date,
+//       docNo,
+//       memberId,
+//       annualFee,
+//       incomeCode,                      // e.g., "4000"
+//       revenueSubType = "fee",
+//       periodBucket,                    // optional override
+//       joinDate,                        // optional; when present we compute pro-rata
+//       yearEndDate                      // optional; if omitted we infer from joinDate
+//     } = req.body;
+
+//     const invoiceDate = dayjs(date);
+//     const join = joinDate ? dayjs(joinDate) : null;
+
+//     // If join is in a future calendar year relative to invoice date, default AR to 'advance'
+//     const inferredBucket =
+//       periodBucket ||
+//       (join && invoiceDate.year() < join.year() ? "advance" : "current");
+
+//     const journals = [];
+
+//     // 1) Always post the full annual fee
+//     const fullInvoice = await postBalancedJournal({
+//       date,
+//       docType: "Invoice",
+//       docNo,
+//       memo: "Member invoice (annual)",
+//       lines: [
+//         { accountCode: "1400", dc: "D", amount: annualFee, memberId, periodBucket: inferredBucket },
+//         { accountCode: incomeCode, dc: "C", amount: annualFee, revenueSubType }
+//       ]
+//     });
+//     journals.push(fullInvoice);
+
+//     // 2) If joinDate present, post the pro-rata credit (difference)
+//     if (joinDate) {
+//       const { daysRemaining, totalDays, prorataFee } =
+//         calculateProRataFee(joinDate, yearEndDate, annualFee);
+
+//       if (prorataFee < annualFee) {
+//         const reduction = Number((annualFee - prorataFee).toFixed(2));
+//         if (reduction > 0) {
+//           const prorataCredit = await postBalancedJournal({
+//             date,
+//             docType: "CreditNote",
+//             docNo: `${docNo}-PRORATA`,
+//             memo: `Pro-rata adjustment (${daysRemaining}/${totalDays} days)`,
+//             lines: [
+//               { accountCode: "4900", dc: "D", amount: reduction, adjSubType: "prorata" },
+//               { accountCode: "1400", dc: "C", amount: reduction, memberId, periodBucket: inferredBucket }
+//             ]
+//           });
+//           journals.push(prorataCredit);
+//         }
+//       }
+//     }
+
+//     res.status(201).json(journals);
+//   } catch (e) {
+//     next(e);
+//   }
+// }
 export async function invoice(req, res, next) {
   try {
     const {
-      date,               // ISO
+      date,                // invoice date
       docNo,
       memberId,
       annualFee,
-      incomeCode,         // e.g. "4000"
-      categoryName,       // e.g. "General All Grades"
+      incomeCode,          // e.g. "4000"
+      categoryName,        // e.g. "General All Grades"
       periodBucket = "current",
-      joinDate            // optional ISO for mid-year join
+      joinDate             // optional for mid-year join (ISO)
     } = req.body;
 
-    const year = new Date(date).getFullYear();
-    const memoBase = `Subscription ${year} – ${categoryName}`;
+    const memoBase = `Subscription ${new Date(date).getFullYear()} – ${categoryName}`;
 
     // 1) Full-year invoice
     const inv = await postBalancedJournal({
@@ -95,20 +159,21 @@ export async function invoice(req, res, next) {
         { accountCode: incomeCode, dc: "C", amount: annualFee, revenueSubType: "fee", categoryName }
       ]
     });
+
     const out = [inv];
 
-    // 2) Daily pro-rata credit if joinDate given
+    // 2) Daily pro-rata credit note if join mid-year
     if (joinDate) {
-      const due = prorataFromJoinToYearEnd(annualFee, joinDate); // uses daysInYear() inside
-      const reduction = Math.round(((annualFee - due) + Number.EPSILON) * 100) / 100;
-
+      const { end } = yearBoundsFrom(joinDate);
+      // Amount due for join→year end
+      const due = prorataFromJoinToYearEnd(annualFee, joinDate);
+      const reduction = Number((annualFee - due).toFixed(2));
       if (reduction > 0) {
-        const { endISO } = yearBoundsFrom(joinDate);
         const cn = await postBalancedJournal({
           date,
           docType: "CreditNote",
           docNo: `${docNo}-PRORATA`,
-          memo: `Credit note – Pro-rata (${categoryName}) ${joinDate} → ${endISO}`,
+          memo: `Credit note – Pro-rata (${categoryName}) ${joinDate} to ${end.format("YYYY-MM-DD")}`,
           lines: [
             { accountCode: "4900", dc: "D", amount: reduction, adjSubType: "prorata", categoryName },
             { accountCode: "1400", dc: "C", amount: reduction, memberId, periodBucket }
@@ -128,39 +193,38 @@ export async function changeCategory(req, res, next) {
       date, docNoBase, memberId,
       oldIncomeCode, oldCategoryName, oldAnnualFee,
       newIncomeCode, newCategoryName, newAnnualFee,
-      changeDate,                  // ISO (within target year)
+      changeDate,               // ISO, within the target year
       periodBucket = "current"
     } = req.body;
 
-    const { startISO, endISO, year } = yearBoundsFrom(changeDate);
-    // pre-change ends the day before change
-    const changeMinusISO = new Date(new Date(changeDate).getTime() - 24*3600*1000)
-      .toISOString().slice(0,10);
+    const { start, end } = yearBoundsFrom(changeDate);
+    const changeMinus1 = new Date(new Date(changeDate).getTime() - 24*3600*1000);
+    const changeMinusISO = changeMinus1.toISOString().slice(0,10);
 
-    const isUpgrade = Number(newAnnualFee) > Number(oldAnnualFee);
+    const isUpgrade = newAnnualFee > oldAnnualFee;
 
     const results = [];
 
-    // 1) New category full-year invoice
+    // 1) New plan full-year invoice
     results.push(await postBalancedJournal({
       date,
       docType: "Invoice",
       docNo: `${docNoBase}-INVNEW`,
-      memo: `Subscription ${year} – ${newCategoryName}`,
+      memo: `Subscription ${start.year()} – ${newCategoryName}`,
       lines: [
         { accountCode: "1400", dc: "D", amount: newAnnualFee, memberId, periodBucket },
         { accountCode: newIncomeCode, dc: "C", amount: newAnnualFee, revenueSubType: "fee", categoryName: newCategoryName }
       ]
     }));
 
-    // 2) Credit unused portion of OLD category: changeDate → year end (explicit daysInYear)
-    const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, endISO);
+    // 2) Credit unused old category: changeDate → year end
+    const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, end.format("YYYY-MM-DD"));
     if (creditOldUnused > 0) {
       results.push(await postBalancedJournal({
         date,
         docType: "CreditNote",
         docNo: `${docNoBase}-COLD`,
-        memo: `Credit note – Unused period (${oldCategoryName}) ${changeDate} → ${endISO}`,
+        memo: `Credit note – Unused period (${oldCategoryName}) ${changeDate} to ${end.format("YYYY-MM-DD")}`,
         lines: [
           { accountCode: "4900", dc: "D", amount: creditOldUnused,
             adjSubType: isUpgrade ? "fee-increase-credit" : "downgrade", categoryName: oldCategoryName },
@@ -169,14 +233,14 @@ export async function changeCategory(req, res, next) {
       }));
     }
 
-    // 3) Credit pre-change portion of NEW category: year start → (changeDate − 1)
-    const creditNewPre = prorataForPeriod(newAnnualFee, startISO, changeMinusISO);
+    // 3) Credit pre-change portion of new category: year start → changeDate-1
+    const creditNewPre = prorataForPeriod(newAnnualFee, start.format("YYYY-MM-DD"), changeMinusISO);
     if (creditNewPre > 0) {
       results.push(await postBalancedJournal({
         date,
         docType: "CreditNote",
         docNo: `${docNoBase}-CNEW`,
-        memo: `Credit note – Pre-change portion (${newCategoryName}) ${startISO} → ${changeMinusISO}`,
+        memo: `Credit note – Pre-change portion (${newCategoryName}) ${start.format("YYYY-MM-DD")} to ${changeMinusISO}`,
         lines: [
           { accountCode: "4900", dc: "D", amount: creditNewPre, adjSubType: "prorata", categoryName: newCategoryName },
           { accountCode: "1400", dc: "C", amount: creditNewPre, memberId, periodBucket }
@@ -189,6 +253,22 @@ export async function changeCategory(req, res, next) {
 }
 
 
+// Credit note / discount → 4900 debit, 1400 credit
+// export async function creditNote(req, res, next) {
+//   try {
+//     const { date, docNo, memberId, amount, periodBucket = "current" } = req.body;
+
+//     const lines = [
+//       { accountCode: "4900", dc: "D", amount, adjSubType: "discount" },
+//       { accountCode: "1400", dc: "C", amount, memberId, periodBucket }
+//     ];
+
+//     const out = await postBalancedJournal({
+//       date, docType: "CreditNote", docNo, memo: "Credit note", lines
+//     });
+//     res.status(201).json(out);
+//   } catch (e) { next(e); }
+// }
 export async function creditNote(req, res, next) {
   try {
     const { date, docNo, memberId, amount, periodBucket = "current", adjSubType = "discount", categoryName } = req.body;
@@ -206,6 +286,27 @@ export async function creditNote(req, res, next) {
 
 
 // // Receipt (unlinked money-in) → 12xx clearing debit, 2020 credit
+// export async function receipt(req, res, next) {
+//   try {
+//     const { date, docNo, memberId, applicationId, amount, clearingCode, bucket = "current" } = req.body;
+
+//     // derive a pseudo-member for application-held money
+//     const effectiveMemberId = memberId || (applicationId ? `app:${applicationId}` : null);
+//     if (!effectiveMemberId) {
+//       throw new Error("memberId or applicationId is required");
+//     }
+
+//     const lines = [
+//       { accountCode: clearingCode, dc: "D", amount }, // 1210/1220/1230/1240/1250
+//       { accountCode: "2020", dc: "C", amount, memberId: effectiveMemberId, periodBucket: bucket }
+//     ];
+
+//     const out = await postBalancedJournal({
+//       date, docType: "Receipt", docNo, memo: applicationId ? `Unlinked receipt (app ${applicationId})` : "Unlinked receipt", lines
+//     });
+//     res.status(201).json(out);
+//   } catch (e) { next(e); }
+// }
 
 export async function receipt(req, res, next) {
   try {
@@ -233,51 +334,28 @@ export async function receipt(req, res, next) {
   } catch (e) { next(e); }
 }
 
-// “claim credit” endpoint (transfer 2020 from app → member)
+
+//  “claim credit” endpoint (transfer 2020 from app → member)
 export async function claimApplicationCredit(req, res, next) {
   try {
-    const { date, docNo, applicationId, memberId, bucket = "current" } = req.body;
-    if (!applicationId || !memberId) {
-      throw new Error("applicationId and memberId are required");
-    }
+    const { date, docNo, applicationId, memberId, amount, bucket = "current" } = req.body;
+    if (!applicationId || !memberId || !amount) throw new Error("applicationId, memberId and amount are required");
 
-    const appMember = applicationId;
-
-    // Find the credit entry for this application
-    const creditEntry = await GLTransaction.aggregate([
-      { $unwind: "$entries" },
-      { $match: { "entries.memberId": appMember, "entries.accountCode": "2020", "entries.dc": "C" } },
-      { $limit: 1 }
-    ]);
-
-    if (!creditEntry.length) {
-      throw new Error(`No credit entry found for application ${applicationId}`);
-    }
-
-    const amount = creditEntry[0].entries.amount;
-    if (!amount || amount <= 0) {
-      throw new Error(`Invalid credit amount for application ${applicationId}`);
-    }
+    const appMember = `app:${applicationId}`;
 
     const lines = [
+      // reduce app-held credit
       { accountCode: "2020", dc: "D", amount, memberId: appMember, periodBucket: bucket },
-      { accountCode: "2020", dc: "C", amount, memberId, periodBucket: bucket }
+      // assign credit to real member
+      { accountCode: "2020", dc: "C", amount, memberId,        periodBucket: bucket }
     ];
 
     const out = await postBalancedJournal({
-      date,
-      docType: "Claim",
-      docNo,
-      memo: `Claim app credit ${applicationId} → ${memberId}`,
-      lines
+      date, docType: "Claim", docNo, memo: `Claim app credit ${applicationId} → ${memberId}`, lines
     });
-
     res.status(201).json(out);
-  } catch (e) {
-    next(e);
-  }
+  } catch (e) { next(e); }
 }
-
 
 export async function writeOff(req, res, next) {
   try {
@@ -320,12 +398,12 @@ export async function listJournals(req, res, next) {
     const offset = Math.max(parseInt(skip, 10) || 0, 0);
 
     const [items, total] = await Promise.all([
-      GLTransaction.find(query)
+      GL.find(query)
         .sort({ date: -1, createdAt: -1 })
         .skip(offset)
         .limit(pageSize)
         .lean(),
-      GLTransaction.countDocuments(query)
+      GL.countDocuments(query)
     ]);
 
     res.json({

@@ -9,9 +9,19 @@ autoIndex: process.env.NODE_ENV !== "production" });
   return mongoose.connection;
 }
 
+// // If you want to force index sync at boot (helpful in dev/staging):
+// await Promise.all([
+//   (await import("../models/coa.model.js")).default.init(),
+//   (await import("../models/glTransaction.model.js")).default.init(),
+//   (await import("../models/materializedBalance.model.js")).default.init()
+// ]);
+
 export async function disconnectDB() {
   if (mongoose.connection.readyState !== 0) {
     await mongoose.connection.close();
     logger.info("Mongo disconnected");
   }
 }
+
+
+

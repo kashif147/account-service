@@ -12,4 +12,6 @@ const CoASchema = new mongoose.Schema({
   isContraRevenue: { type: Boolean, default: false }
 }, { timestamps: true });
 
+CoASchema.index({ type: 1, code: 1 });
+
 export default mongoose.model("CoA", CoASchema);
