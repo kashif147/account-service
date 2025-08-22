@@ -26,7 +26,11 @@ export function getChannel() {
 }
 
 export async function closeRabbit() {
-  try { await ch?.close(); } catch {}
-  try { await conn?.close(); } catch {}
+  try {
+    await ch?.close();
+  } catch {}
+  try {
+    await conn?.close();
+  } catch {}
   logger.info("RabbitMQ disconnected");
 }
