@@ -34,7 +34,7 @@ app.use(requestId);
 app.use(limiterGeneral);
 
 // health
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/Server is running", (req, res) => res.json({ ok: true }));
 app.get("/ready", (req, res) => res.json({ ok: true }));
 
 // swagger
