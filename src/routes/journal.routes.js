@@ -5,7 +5,7 @@ import {
 import { invoice, creditNote, receipt, listJournals, claimApplicationCredit, writeOff, changeCategory } from "../controllers/journal.controller.js";
 import router from "./reports.routes.js";
 import validate from "../middlewares/validate.js";
-import verifyJWT from "../middlewares/verifyJWT.js";
+import verifyJWT from "../middlewares/verifyJWT.js"
 
 router.get("/", verifyJWT, listJournalsRules, listJournals);
 router.post("/invoice",verifyJWT, invoiceRules, validate, invoice);
