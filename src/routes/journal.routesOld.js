@@ -3,6 +3,7 @@ import { invoice, creditNote, receipt, listJournals, claimApplicationCredit } fr
 import validate from "../middlewares/validate.js";
 import { invoiceRules, receiptRules } from "../validators/journal.validatorsOld.js";
 import { limiterSensitive } from "../config/rateLimiters.js";
+import verifyJWT from "../middlewares/verifyJWT.js";
 
 /**
  * @openapi
@@ -13,11 +14,11 @@ import { limiterSensitive } from "../config/rateLimiters.js";
 const router = express.Router();
 
 router.get("/", listJournals);   
-router.post("/invoice", limiterSensitive, invoiceRules, validate, invoice);
-router.post("/receipt", limiterSensitive, receiptRules, validate, receipt);
-router.post("/credit-note", limiterSensitive, invoiceRules, validate, creditNote);
-router.post("/writeoff", writeOffRules, validate, writeOff);
-router.post("/change-category", changeCategoryRules, validate, changeCategory);
-router.post("/claim-credit", validate, claimApplicationCredit);
+router.post("/invoice", verifyJWT, limiterSensitive, invoiceRules, validate, invoice);
+router.post("/receipt", verifyJWT, limiterSensitive, receiptRules, validate, receipt);
+router.post("/credit-note", verifyJWT, limiterSensitive, invoiceRules, validate, creditNote);
+router.post("/writeoff", verifyJWT, writeOffRules, validate, writeOff);
+router.post("/change-category", verifyJWT, changeCategoryRules, validate, changeCategory);
+router.post("/claim-credit", verifyJWT, validate, claimApplicationCredit);
 
 export default router;
