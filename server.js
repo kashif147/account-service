@@ -1,6 +1,6 @@
 import { config } from "./config/index.js";
 import { connectDB, disconnectDB } from "./config/db.js";
-import { connectRabbit, closeRabbit } from "./config/rabbit.js";
+// import { connectRabbit, closeRabbit } from "./config/rabbit.js";
 import logger from "./config/logger.js";
 import app from "./app.js";
 
@@ -8,7 +8,7 @@ let server;
 
 async function start() {
   await connectDB(config.mongoUri);
-  await connectRabbit();
+  // await connectRabbit();
 
   server = app.listen(config.port, () => {
     logger.info({ port: config.port }, "API listening");
@@ -21,7 +21,8 @@ async function shutdown(signal) {
     if (server) {
       await new Promise((res) => server.close(res));
     }
-    await Promise.allSettled([closeRabbit(), disconnectDB()]);
+    // await Promise.allSettled([closeRabbit(), disconnectDB()]);
+    await Promise.allSettled([disconnectDB()]);
     process.exit(0);
   } catch (e) {
     logger.error(e, "Shutdown error");

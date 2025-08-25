@@ -5,9 +5,9 @@ const options = {
   definition: {
     openapi: "3.0.0",
     info: { title: "Accounts Service API", version: "1.0.0" },
-    servers: [{ url: "/api" }]
+    servers: [{ url: "/api" }],
   },
-  apis: ["./src/routes/*.js"]
+  apis: ["./routes/*.js"],
 };
 
 const spec = swaggerJSDoc(options);
