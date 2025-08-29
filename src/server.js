@@ -4,6 +4,7 @@ import { connectRabbit, closeRabbit } from "./config/rabbit.js";
 import logger from "./config/logger.js";
 import app from "./app.js";
 
+
 let server;
 
 async function start() {
