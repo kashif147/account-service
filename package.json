@@ -4,8 +4,17 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
+<<<<<<< HEAD
     "dev": "nodemon --watch . --ext js,json --exec node server.js",
     "start": "node server.js",
+=======
+    "dev": "nodemon --watch src --ext js,json --exec node src/server.js",
+    "start": "node src/server.js",
+    "start:dev": "cross-env NODE_ENV=development node src/server.js",
+    "start:staging": "cross-env NODE_ENV=staging node src/server.js",
+    "start:prod": "cross-env NODE_ENV=production node src/server.js",
+    
+>>>>>>> 0ab85be64f514865448803c4727443a0193f872c
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
     "seed:coa": "node seed/coa.seed.js",
     "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand"
