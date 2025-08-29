@@ -9,6 +9,7 @@
     "start:dev": "cross-env NODE_ENV=development node src/server.js",
     "start:staging": "cross-env NODE_ENV=staging node src/server.js",
     "start:prod": "cross-env NODE_ENV=production node src/server.js",
+    
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
     "seed:coa": "node src/seed/coa.seed.js",
     "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand"
