@@ -9,11 +9,19 @@ let server;
 
 async function start() {
   await connectDB(config.mongoUri);
-  await connectRabbit();
-
+  
+  //commented to call HTTP first
+  // await connectRabbit();
+  
+  // start HTTP first
   server = app.listen(config.port, () => {
     logger.info({ port: config.port }, "API listening");
   });
+
+  // start messaging but do not prevent boot
+  await connectRabbit().catch((e) =>
+  logger.warn({ err: e.message }, "RabbitMQ connect failed at boot")
+);
 }
 
 async function shutdown(signal) {
