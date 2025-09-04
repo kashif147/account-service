@@ -10,10 +10,9 @@ import {
   yearBoundsFrom,
 } from "../helpers/prorata.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
-import { sum } from "lodash-es";
 import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
 
-function sum(arr, sel) {
+function sumArray(arr, sel) {
   return Number(arr.reduce((s, x) => s + sel(x), 0).toFixed(2));
 }
 
@@ -49,8 +48,8 @@ export async function postBalancedJournal({
   const enriched = await enrichLines(lines);
 
   // basic balance check
-  const deb = sum(enriched, (x) => (x.dc === "D" ? x.amount : 0));
-  const cre = sum(enriched, (x) => (x.dc === "C" ? x.amount : 0));
+  const deb = sumArray(enriched, (x) => (x.dc === "D" ? x.amount : 0));
+  const cre = sumArray(enriched, (x) => (x.dc === "C" ? x.amount : 0));
   if (deb !== cre)
     throw AppError.badRequest(`Unbalanced journal D ${deb} vs C ${cre}`, {
       debit: deb,
