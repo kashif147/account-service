@@ -1,6 +1,6 @@
 // Template controller - replace with your service-specific endpoints
 import { body, param, query } from "express-validator";
-import { validate } from "../middlewares/validate.js";
+import validate from "../middlewares/validate.js";
 import { asyncHandler } from "../helpers/asyncHandler.js";
 import * as templateService from "../services/template.service.js";
 import { logInfo } from "../middlewares/logger.mw.js";

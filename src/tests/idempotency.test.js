@@ -1,64 +1,90 @@
 import {
   clearIdempotencyCache,
   getIdempotencyCacheSize,
+  idempotency,
 } from "../middlewares/idempotency.js";
 
 // Test idempotency functionality
-export function testIdempotency() {
-  console.log("=== Idempotency Test ===");
-
-  // Clear cache before testing
-  clearIdempotencyCache();
-  console.log("Cache cleared. Size:", getIdempotencyCacheSize());
-
-  // Simulate request processing
-  const mockRequest = {
-    header: (name) => {
-      if (name === "Idempotency-Key") return "test-key-123";
-      return null;
-    },
-  };
-
-  const mockResponse = {
-    json: (body) => {
-      console.log("Response sent:", body);
-      return mockResponse;
-    },
-  };
-
-  // Test middleware
-  const idempotencyMiddleware =
-    require("../middlewares/idempotency.js").idempotency();
-
-  console.log("First request with key 'test-key-123'");
-  idempotencyMiddleware(mockRequest, mockResponse, () => {
-    console.log("Processing first request...");
-    mockResponse.json({ id: 1, message: "Created" });
+describe("Idempotency Middleware", () => {
+  beforeEach(() => {
+    // Clear cache before each test
+    clearIdempotencyCache();
   });
 
-  console.log("Cache size after first request:", getIdempotencyCacheSize());
+  it("should process first request with idempotency key", () => {
+    const mockRequest = {
+      header: (name) => {
+        if (name === "Idempotency-Key") return "test-key-123";
+        return null;
+      },
+    };
 
-  console.log("Second request with same key 'test-key-123'");
-  idempotencyMiddleware(mockRequest, mockResponse, () => {
-    console.log("This should not execute due to idempotency");
+    const mockResponse = {
+      status: (code) => mockResponse,
+      json: (body) => {
+        return mockResponse;
+      },
+    };
+
+    const idempotencyMiddleware = idempotency();
+
+    idempotencyMiddleware(mockRequest, mockResponse, () => {
+      mockResponse.json({ id: 1, message: "Created" });
+    });
+
+    expect(getIdempotencyCacheSize()).toBeGreaterThan(0);
   });
 
-  console.log("Cache size after second request:", getIdempotencyCacheSize());
+  it("should handle duplicate requests with same idempotency key", () => {
+    const mockRequest = {
+      header: (name) => {
+        if (name === "Idempotency-Key") return "test-key-123";
+        return null;
+      },
+    };
 
-  // Test without key
-  const mockRequestNoKey = {
-    header: (name) => null,
-  };
+    const mockResponse = {
+      status: (code) => mockResponse,
+      json: (body) => {
+        return mockResponse;
+      },
+    };
 
-  console.log("Request without Idempotency-Key");
-  idempotencyMiddleware(mockRequestNoKey, mockResponse, () => {
-    console.log("Processing request without key...");
+    const idempotencyMiddleware = idempotency();
+
+    // First request
+    idempotencyMiddleware(mockRequest, mockResponse, () => {
+      mockResponse.json({ id: 1, message: "Created" });
+    });
+
+    const initialCacheSize = getIdempotencyCacheSize();
+
+    // Second request with same key
+    idempotencyMiddleware(mockRequest, mockResponse, () => {
+      // This should not execute due to idempotency
+    });
+
+    expect(getIdempotencyCacheSize()).toBe(initialCacheSize);
   });
 
-  console.log("Final cache size:", getIdempotencyCacheSize());
-}
+  it("should process requests without idempotency key", () => {
+    const mockRequestNoKey = {
+      header: (name) => null,
+    };
 
-// Run test if this file is executed directly
-if (import.meta.url === `file://${process.argv[1]}`) {
-  testIdempotency();
-}
+    const mockResponse = {
+      status: (code) => mockResponse,
+      json: (body) => {
+        return mockResponse;
+      },
+    };
+
+    const idempotencyMiddleware = idempotency();
+
+    idempotencyMiddleware(mockRequestNoKey, mockResponse, () => {
+      // Processing request without key
+    });
+
+    expect(getIdempotencyCacheSize()).toBe(0);
+  });
+});
