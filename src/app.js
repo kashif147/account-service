@@ -98,6 +98,23 @@ app.get("/health/events", (req, res) => {
   });
 });
 
+// root route
+app.get("/", (req, res) => {
+  res.success({
+    service: "Account Service",
+    version: "1.0.0",
+    status: "running",
+    environment: process.env.NODE_ENV || "development",
+    endpoints: {
+      health: "/health",
+      ready: "/ready",
+      api: "/api",
+      docs: "/api/docs",
+    },
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // swagger
 app.use("/api/docs", swaggerServe, swaggerSetup);
 
