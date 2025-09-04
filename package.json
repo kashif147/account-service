@@ -10,7 +10,9 @@
     "start:staging": "cross-env NODE_ENV=staging node bin/account-service.js",
     "start:prod": "cross-env NODE_ENV=production node bin/account-service.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
+    "seed:coa": "node src/seed/coa.seed.js",
     "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand"
+
   },
   "dependencies": {
     "amqplib": "^0.10.4",

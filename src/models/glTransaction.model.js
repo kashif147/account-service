@@ -28,7 +28,7 @@ GLSchema.index({ "entries.accountCode": 1, date: -1 });
 GLSchema.index({ docType: 1, date: -1 });
 
 // Fast docNo fetch (already unique)
-GLSchema.index({ docNo: 1 }, { unique: true });
+//GLSchema.index({ docNo: 1 }, { unique: true });
 
 // Optional: text index on memo/category for search
 GLSchema.index({ memo: "text", "entries.categoryName": "text" });
