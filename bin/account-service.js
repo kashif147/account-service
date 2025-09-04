@@ -1,8 +1,8 @@
-import { config } from "./config/index.js";
-import { connectDB, disconnectDB } from "./config/db.js";
-import { connectRabbit, closeRabbit } from "./config/rabbit.js";
-import logger from "./config/logger.js";
-import app from "./app.js";
+import { config } from "../src/config/index.js";
+import { connectDB, disconnectDB } from "../src/config/db.js";
+import { connectRabbit, closeRabbit } from "../src/config/rabbit.js";
+import logger from "../src/config/logger.js";
+import app from "../src/app.js";
 
 
 let server;

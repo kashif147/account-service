@@ -1,22 +1,24 @@
-// import { getChannel } from "../config/rabbit.js";
-// import { config } from "../config/index.js";
-
-// export function publishEvent(routingKey, payload) {
-//   const ch = getChannel();
-//   const body = Buffer.from(JSON.stringify(payload));
-//   ch.publish(config.rabbitExchange, routingKey, body, { contentType: "application/json", persistent: true });
-// }
-// publisher.js
-import { publish as mqPublish } from "../config/rabbit.js";
+// Legacy publisher helper - now using new infra/rabbit infrastructure
+import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
 
 /**
- * Publishes an event to RabbitMQ. Returns true if queued, false if dropped.
+ * Publishes an event to RabbitMQ using the new infrastructure.
+ * Returns true if queued, false if dropped.
+ * @deprecated Use publishDomainEvent from infra/rabbit/events.js instead
  */
 export async function publishEvent(routingKey, payload, options = {}) {
   try {
-    const ok = await mqPublish(routingKey, payload, options);
-    return !!ok;
-  } catch {
+    // Convert legacy format to new domain event format
+    const success = await publishDomainEvent(routingKey, payload, {
+      legacy: true,
+      ...options,
+    });
+    return !!success;
+  } catch (error) {
+    console.error("Failed to publish event:", error);
     return false;
   }
 }
+
+// Export event types for backward compatibility
+export { EVENT_TYPES };

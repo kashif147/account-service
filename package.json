@@ -2,14 +2,13 @@
   "name": "accounts-service",
   "version": "1.0.0",
   "type": "module",
-  "main": "src/server.js",
+  "main": "bin/account-service.js",
   "scripts": {
-    "dev": "nodemon --watch src --ext js,json --exec node src/server.js",
-    "start": "node src/server.js",
-    "start:dev": "cross-env NODE_ENV=development node src/server.js",
-    "start:staging": "cross-env NODE_ENV=staging node src/server.js",
-    "start:prod": "cross-env NODE_ENV=production node src/server.js",
-    
+    "dev": "nodemon --watch src --watch bin --ext js,json --exec node bin/account-service.js",
+    "start": "node bin/account-service.js",
+    "start:dev": "cross-env NODE_ENV=development node bin/account-service.js",
+    "start:staging": "cross-env NODE_ENV=staging node bin/account-service.js",
+    "start:prod": "cross-env NODE_ENV=production node bin/account-service.js",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
     "seed:coa": "node src/seed/coa.seed.js",
     "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand"

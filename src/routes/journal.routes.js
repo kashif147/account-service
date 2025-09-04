@@ -1,19 +1,99 @@
 // src/routes/journal.routes.js
 import {
-  invoiceRules, receiptRules, creditNoteRules, writeOffRules, changeCategoryRules, listJournalsRules, claimApplicationCreditRules
+  invoiceRules,
+  receiptRules,
+  creditNoteRules,
+  writeOffRules,
+  changeCategoryRules,
+  listJournalsRules,
+  claimApplicationCreditRules,
 } from "../validators/journal.validators.js";
-import { invoice, creditNote, receipt, listJournals, claimApplicationCredit, writeOff, changeCategory } from "../controllers/journal.controller.js";
+import {
+  invoice,
+  creditNote,
+  receipt,
+  listJournals,
+  claimApplicationCredit,
+  writeOff,
+  changeCategory,
+} from "../controllers/journal.controller.js";
 import router from "./reports.routes.js";
 import validate from "../middlewares/validate.js";
-import verifyJWT from "../middlewares/verifyJWT.js"
+import {
+  ensureAuthenticated,
+  authorizeMin,
+  authorizeAny,
+} from "../middlewares/auth.js";
+import { idempotency } from "../middlewares/idempotency.js";
 
-router.get("/", verifyJWT, listJournalsRules, listJournals);
-router.post("/invoice",verifyJWT, invoiceRules, validate, invoice);
-router.post("/receipt",verifyJWT, receiptRules, validate, receipt);
-router.post("/credit-note",verifyJWT, creditNoteRules, validate, creditNote);
-router.post("/writeoff",verifyJWT, writeOffRules, validate, writeOff);
-router.post("/change-category",verifyJWT, changeCategoryRules, validate, changeCategory);
-router.post("/claim-credit",verifyJWT, claimApplicationCreditRules, validate, claimApplicationCredit)
+// All journal operations require authentication and minimum User role
+router.get(
+  "/",
+  ensureAuthenticated,
+  authorizeMin("User"),
+  listJournalsRules,
+  listJournals
+);
 
+// POST operations with idempotency for data consistency
+router.post(
+  "/invoice",
+  ensureAuthenticated,
+  authorizeMin("User"),
+  idempotency(),
+  invoiceRules,
+  validate,
+  invoice
+);
 
-export default router
+router.post(
+  "/receipt",
+  ensureAuthenticated,
+  authorizeMin("User"),
+  idempotency(),
+  receiptRules,
+  validate,
+  receipt
+);
+
+router.post(
+  "/credit-note",
+  ensureAuthenticated,
+  authorizeMin("User"),
+  idempotency(),
+  creditNoteRules,
+  validate,
+  creditNote
+);
+
+router.post(
+  "/writeoff",
+  ensureAuthenticated,
+  authorizeMin("Editor"),
+  idempotency(),
+  writeOffRules,
+  validate,
+  writeOff
+);
+
+router.post(
+  "/change-category",
+  ensureAuthenticated,
+  authorizeMin("Editor"),
+  idempotency(),
+  changeCategoryRules,
+  validate,
+  changeCategory
+);
+
+router.post(
+  "/claim-credit",
+  ensureAuthenticated,
+  authorizeMin("User"),
+  idempotency(),
+  claimApplicationCreditRules,
+  validate,
+  claimApplicationCredit
+);
+
+export default router;
