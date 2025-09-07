@@ -1,5 +1,4 @@
 import express from "express";
-// import { ,  } from "../controllers/reports.controller.js";
 import {
   monthEnd,
   memberStatement,
@@ -24,16 +23,18 @@ router.get(
   authorizeMin("User"),
   memberStatement
 );
+
+// Balances snapshot - consolidated single route
 router.get(
-  "/balances",
+  "/balances/snapshot",
   ensureAuthenticated,
   authorizeMin("User"),
   balancesSnapshot
 );
 
-// Debtor/Creditor quick view from materialized balances (already in your app)
+// Balances as-of - moved to distinct path to avoid duplicate
 router.get(
-  "/balances",
+  "/balances/as-of",
   ensureAuthenticated,
   authorizeMin("User"),
   balancesAsOfRules,

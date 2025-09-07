@@ -1,4 +1,5 @@
 // src/routes/journal.routes.js
+import express from "express";
 import {
   invoiceRules,
   receiptRules,
@@ -17,23 +18,17 @@ import {
   writeOff,
   changeCategory,
 } from "../controllers/journal.controller.js";
-import router from "./reports.routes.js";
 import validate from "../middlewares/validate.js";
-import {
-  ensureAuthenticated,
-  authorizeMin,
-  authorizeAny,
-  requirePermission,
-} from "../middlewares/auth.js";
+import { ensureAuthenticated, authorizeMin } from "../middlewares/auth.js";
 import { idempotency } from "../middlewares/idempotency.js";
-import PERMISSIONS from "@membership/shared-constants/permissions";
 
-// All journal operations require authentication and minimum Read Only role
-// AI Agents and higher roles can view journals
+const router = express.Router();
+
+// Journals - list; single consolidated route with minimum AI role
 router.get(
   "/",
   ensureAuthenticated,
-  authorizeMin("AI"), // AI Agent or higher (includes REO, MEMBER, etc.)
+  authorizeMin("AI"),
   listJournalsRules,
   listJournals
 );

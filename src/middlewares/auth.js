@@ -87,11 +87,7 @@ function hasAnyRole(userRoles, requiredRoles) {
   return requiredRoles.some((role) => userRoles.includes(role));
 }
 
-// Helper function to check if user has specific role
-function hasRole(userRoles, requiredRole) {
-  if (!userRoles || !Array.isArray(userRoles)) return false;
-  return userRoles.includes(requiredRole);
-}
+// Helper function to check if user has specific role is provided below as an exported utility
 
 // Helper function to check if user has Super User role (full access)
 // Note: isSuperUser is now imported from roleHierarchy.js
