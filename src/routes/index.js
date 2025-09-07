@@ -1,5 +1,7 @@
 import express from "express";
-import templateRoutes from "./template.routes.js";
+import adminRoutes from "./admin.routes.js";
+import journalRoutes from "./journal.routes.js";
+import reportsRoutes from "./reports.routes.js";
 
 const router = express.Router();
 
@@ -12,13 +14,17 @@ router.get("/", (req, res) => {
     endpoints: {
       health: "/health",
       status: "/status",
-      templates: "/templates",
+      admin: "/admin",
+      journal: "/journal",
+      reports: "/reports",
       docs: "/api/docs",
     },
     timestamp: new Date().toISOString(),
   });
 });
 
-router.use("/", templateRoutes);
+router.use("/admin", adminRoutes);
+router.use("/journal", journalRoutes);
+router.use("/reports", reportsRoutes);
 
 export default router;

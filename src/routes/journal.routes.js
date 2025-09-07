@@ -23,77 +23,97 @@ import {
   ensureAuthenticated,
   authorizeMin,
   authorizeAny,
+  requirePermission,
 } from "../middlewares/auth.js";
 import { idempotency } from "../middlewares/idempotency.js";
+import PERMISSIONS from "@membership/shared-constants/permissions";
 
-// All journal operations require authentication and minimum User role
+// All journal operations require authentication and minimum Read Only role
+// AI Agents and higher roles can view journals
 router.get(
   "/",
   ensureAuthenticated,
-  authorizeMin("User"),
+  authorizeMin("AI"), // AI Agent or higher (includes REO, MEMBER, etc.)
   listJournalsRules,
   listJournals
 );
 
 // POST operations with idempotency for data consistency
+// Invoice creation - requires minimum Accounts Assistant level
 router.post(
   "/invoice",
   ensureAuthenticated,
-  authorizeMin("User"),
+  authorizeMin("AA"), // Accounts Assistant or higher
   idempotency(),
   invoiceRules,
   validate,
   invoice
 );
 
+// Receipt processing - requires minimum Accounts Assistant level
 router.post(
   "/receipt",
   ensureAuthenticated,
-  authorizeMin("User"),
+  authorizeMin("AA"), // Accounts Assistant or higher
   idempotency(),
   receiptRules,
   validate,
   receipt
 );
 
+// Credit note creation - requires minimum Accounts Assistant level
 router.post(
   "/credit-note",
   ensureAuthenticated,
-  authorizeMin("User"),
+  authorizeMin("AA"), // Accounts Assistant or higher
   idempotency(),
   creditNoteRules,
   validate,
   creditNote
 );
 
+// Write-off operations - requires minimum Accounts Manager level (sensitive operation)
 router.post(
   "/writeoff",
   ensureAuthenticated,
-  authorizeMin("Editor"),
+  authorizeMin("AM"), // Accounts Manager or higher
   idempotency(),
   writeOffRules,
   validate,
   writeOff
 );
 
+// Category changes - requires minimum Accounts Manager level (sensitive operation)
 router.post(
   "/change-category",
   ensureAuthenticated,
-  authorizeMin("Editor"),
+  authorizeMin("AM"), // Accounts Manager or higher
   idempotency(),
   changeCategoryRules,
   validate,
   changeCategory
 );
 
+// Claim application credit - requires minimum Membership Officer level
 router.post(
   "/claim-credit",
   ensureAuthenticated,
-  authorizeMin("User"),
+  authorizeMin("MO"), // Membership Officer or higher
   idempotency(),
   claimApplicationCreditRules,
   validate,
   claimApplicationCredit
+);
+
+// Online payment processing - allows MEMBER role for portal users
+router.post(
+  "/online-payment",
+  ensureAuthenticated,
+  authorizeMin("MEMBER"), // Member or higher (includes all staff roles)
+  idempotency(),
+  receiptRules, // Using receipt rules for payment processing
+  validate,
+  receipt // Using receipt controller for payment processing
 );
 
 export default router;

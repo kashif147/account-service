@@ -12,9 +12,9 @@
     "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
     "seed:coa": "node src/seed/coa.seed.js",
     "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand"
-
   },
   "dependencies": {
+    "@membership/shared-constants": "github:kashif147/membership-shared-constants#v1.0.0",
     "amqplib": "^0.10.4",
     "compression": "^1.7.4",
     "cors": "^2.8.5",
