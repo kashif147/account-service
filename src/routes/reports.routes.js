@@ -12,7 +12,8 @@ import {
   balancesAsOfRules,
 } from "../validators/reports.validators.js";
 import validate from "../middlewares/validate.js";
-import { ensureAuthenticated, authorizeMin } from "../middlewares/auth.js";
+import { ensureAuthenticated } from "../middlewares/auth.js";
+import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 
 const router = express.Router();
 
@@ -20,7 +21,7 @@ const router = express.Router();
 router.get(
   "/member/:memberId/statement",
   ensureAuthenticated,
-  authorizeMin("User"),
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberStatement
 );
 
@@ -28,7 +29,7 @@ router.get(
 router.get(
   "/balances/snapshot",
   ensureAuthenticated,
-  authorizeMin("User"),
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   balancesSnapshot
 );
 
@@ -36,7 +37,7 @@ router.get(
 router.get(
   "/balances/as-of",
   ensureAuthenticated,
-  authorizeMin("User"),
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   balancesAsOfRules,
   validate,
   balancesAsOf
@@ -46,7 +47,7 @@ router.get(
 router.get(
   "/month-end",
   ensureAuthenticated,
-  authorizeMin("Editor"),
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "write"),
   monthEndRules,
   validate,
   monthEnd
@@ -54,7 +55,7 @@ router.get(
 router.get(
   "/year-end",
   ensureAuthenticated,
-  authorizeMin("Editor"),
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "write"),
   yearEndRules,
   validate,
   yearEnd

@@ -19,7 +19,8 @@ import {
   changeCategory,
 } from "../controllers/journal.controller.js";
 import validate from "../middlewares/validate.js";
-import { ensureAuthenticated, authorizeMin } from "../middlewares/auth.js";
+import { ensureAuthenticated } from "../middlewares/auth.js";
+import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
 
 const router = express.Router();
@@ -28,7 +29,7 @@ const router = express.Router();
 router.get(
   "/",
   ensureAuthenticated,
-  authorizeMin("AI"),
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listJournalsRules,
   listJournals
 );
@@ -38,7 +39,7 @@ router.get(
 router.post(
   "/invoice",
   ensureAuthenticated,
-  authorizeMin("AA"), // Accounts Assistant or higher
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   invoiceRules,
   validate,
@@ -49,7 +50,7 @@ router.post(
 router.post(
   "/receipt",
   ensureAuthenticated,
-  authorizeMin("AA"), // Accounts Assistant or higher
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   receiptRules,
   validate,
@@ -60,7 +61,7 @@ router.post(
 router.post(
   "/credit-note",
   ensureAuthenticated,
-  authorizeMin("AA"), // Accounts Assistant or higher
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   creditNoteRules,
   validate,
@@ -71,7 +72,7 @@ router.post(
 router.post(
   "/writeoff",
   ensureAuthenticated,
-  authorizeMin("AM"), // Accounts Manager or higher
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   idempotency(),
   writeOffRules,
   validate,
@@ -82,7 +83,7 @@ router.post(
 router.post(
   "/change-category",
   ensureAuthenticated,
-  authorizeMin("AM"), // Accounts Manager or higher
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   idempotency(),
   changeCategoryRules,
   validate,
@@ -93,7 +94,7 @@ router.post(
 router.post(
   "/claim-credit",
   ensureAuthenticated,
-  authorizeMin("MO"), // Membership Officer or higher
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   idempotency(),
   claimApplicationCreditRules,
   validate,
@@ -104,7 +105,7 @@ router.post(
 router.post(
   "/online-payment",
   ensureAuthenticated,
-  authorizeMin("MEMBER"), // Member or higher (includes all staff roles)
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   receiptRules, // Using receipt rules for payment processing
   validate,

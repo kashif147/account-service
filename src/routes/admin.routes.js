@@ -1,22 +1,24 @@
 import express from "express";
 import { listCoA } from "../controllers/admin.controller.js";
-import {
-  ensureAuthenticated,
-  authorizeMin,
-  requireRole,
-} from "../middlewares/auth.js";
+import { ensureAuthenticated } from "../middlewares/auth.js";
+import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
 
 const router = express.Router();
 
 // CoA - single route with role-based access (Accounts Manager or higher)
-router.get("/coa", ensureAuthenticated, authorizeMin("AM"), listCoA);
+router.get(
+  "/coa",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.admin", "read"),
+  listCoA
+);
 
 // Create CoA - Super User only
 router.post(
   "/coa",
   ensureAuthenticated,
-  requireRole("SU"),
+  defaultPolicyMiddleware.requirePermission("accounts.admin", "write"),
   idempotency(),
   (req, res) => {
     res.created({ message: "CoA created", user: req.ctx });
@@ -27,7 +29,7 @@ router.post(
 router.put(
   "/coa/:id",
   ensureAuthenticated,
-  authorizeMin("AM"),
+  defaultPolicyMiddleware.requirePermission("accounts.admin", "write"),
   idempotency(),
   (req, res) => {
     res.success({ message: "CoA updated", user: req.ctx });

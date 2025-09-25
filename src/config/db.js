@@ -1,10 +1,14 @@
 import mongoose from "mongoose";
 import logger from "./logger.js";
-import { config } from "./index.js";
 
-export async function connectDB(uri = config.mongoUri) {
-  await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000,
-autoIndex: process.env.NODE_ENV !== "production" });
+export async function connectDB(
+  uri = process.env.MONGO_URI ||
+    "mongodb://127.0.0.1:27017/account-service?replicaSet=rs0"
+) {
+  await mongoose.connect(uri, {
+    serverSelectionTimeoutMS: 10000,
+    autoIndex: process.env.NODE_ENV !== "production",
+  });
   logger.info({ db: mongoose.connection.name }, "Mongo connected");
   return mongoose.connection;
 }
@@ -22,6 +26,3 @@ export async function disconnectDB() {
     logger.info("Mongo disconnected");
   }
 }
-
-
-

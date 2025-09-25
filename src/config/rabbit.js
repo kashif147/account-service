@@ -33,7 +33,6 @@
 // rabbit.js
 import amqplib from "amqplib";
 import logger from "./logger.js";
-import { config } from "./index.js";
 import { startMemberConsumer } from "../handlers/members.consumer.js";
 import { AppError } from "../errors/AppError.js";
 
@@ -47,20 +46,32 @@ const ALLOW_START_WITHOUT_RABBIT =
 
 async function initTopology(channel) {
   await channel.prefetch(10);
-  await channel.assertExchange(config.rabbitExchange, "topic", {
-    durable: true,
-  });
+  await channel.assertExchange(
+    process.env.RABBITMQ_EXCHANGE ||
+      process.env.RABBIT_EXCHANGE ||
+      "accounts.events",
+    "topic",
+    {
+      durable: true,
+    }
+  );
 
   // inbound member events
   const q = await channel.assertQueue("accounts.sync.members", {
     durable: true,
   });
-  await channel.bindQueue(q.queue, config.rabbitExchange, "members.*");
+  await channel.bindQueue(
+    q.queue,
+    process.env.RABBITMQ_EXCHANGE ||
+      process.env.RABBIT_EXCHANGE ||
+      "accounts.events",
+    "members.*"
+  );
   startMemberConsumer(channel, q.queue);
 }
 
 async function attemptConnect() {
-  const url = config.rabbitUrl;
+  const url = process.env.RABBITMQ_URL || process.env.RABBIT_URL;
   if (!url)
     throw AppError.badRequest("RabbitMQ URL not set", { config: "rabbitUrl" });
 
@@ -96,7 +107,16 @@ async function attemptConnect() {
 
   conn = c;
   ch = channel;
-  logger.info({ url, exchange: config.rabbitExchange }, "RabbitMQ connected");
+  logger.info(
+    {
+      url,
+      exchange:
+        process.env.RABBITMQ_EXCHANGE ||
+        process.env.RABBIT_EXCHANGE ||
+        "accounts.events",
+    },
+    "RabbitMQ connected"
+  );
 }
 
 function sleep(ms) {
@@ -130,10 +150,14 @@ export async function connectRabbit({
         { err: err.message },
         "RabbitMQ unavailable. Starting without messaging"
       );
-      // try to recover in the background
-      reconnectLoop().catch((e) =>
-        logger.error({ e }, "RabbitMQ reconnect loop crashed")
-      );
+      // try to recover in the background only if URL provided
+      if (process.env.RABBITMQ_URL || process.env.RABBIT_URL) {
+        reconnectLoop().catch((e) =>
+          logger.error({ e }, "RabbitMQ reconnect loop crashed")
+        );
+      } else {
+        logger.warn("RABBITMQ_URL not set; will not attempt reconnects");
+      }
       return { conn: undefined, ch: undefined };
     }
     throw err;
@@ -155,11 +179,16 @@ export async function publish(routingKey, payload, options = {}) {
   const body = Buffer.isBuffer(payload)
     ? payload
     : Buffer.from(JSON.stringify(payload));
-  const ok = ch.publish(config.rabbitExchange, routingKey, body, {
-    persistent: true,
-    contentType: "application/json",
-    ...options,
-  });
+  const ok = ch.publish(
+    process.env.RABBIT_EXCHANGE || "accounts.events",
+    routingKey,
+    body,
+    {
+      persistent: true,
+      contentType: "application/json",
+      ...options,
+    }
+  );
   if (!ok) logger.warn({ routingKey }, "RabbitMQ publish returned false");
   return ok;
 }
