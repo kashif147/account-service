@@ -74,7 +74,14 @@ export async function ensureAuthenticated(req, res, next) {
         process.env.ACCESS_TOEKN_SECRET; // tolerate legacy typo
       const decoded = jwt.verify(token, secret);
 
-      if (!decoded.tid) {
+      const tokenTenantId =
+        decoded.tid ||
+        decoded.tenantId ||
+        decoded.tenantID ||
+        decoded.tenant_id ||
+        null;
+
+      if (!tokenTenantId) {
         return next(
           AppError.badRequest("Invalid token: missing tenantId", {
             tokenError: true,
@@ -90,14 +97,14 @@ export async function ensureAuthenticated(req, res, next) {
         : [];
 
       req.ctx = {
-        tenantId: decoded.tid,
+        tenantId: tokenTenantId,
         userId: decoded.sub || decoded.id,
         roles: normalizedRoles,
         permissions: decoded.permissions || [],
       };
       req.user = decoded;
       req.userId = decoded.sub || decoded.id;
-      req.tenantId = decoded.tid;
+      req.tenantId = tokenTenantId;
       req.roles = normalizedRoles;
       req.permissions = decoded.permissions || [];
       return next();
