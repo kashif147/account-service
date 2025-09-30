@@ -14,8 +14,16 @@ class PolicyMiddleware {
   requirePermission(resource, action) {
     return async (req, res, next) => {
       try {
-        const authHeader =
-          req.headers.authorization || req.headers.Authorization;
+        let authHeader = req.headers.authorization || req.headers.Authorization;
+        const aadAccessToken =
+          req.headers["x-ms-token-aad-access-token"] ||
+          req.headers["X-MS-TOKEN-AAD-ACCESS-TOKEN"];
+
+        if (!authHeader && aadAccessToken) {
+          authHeader = `Bearer ${aadAccessToken}`;
+          req.headers.authorization = authHeader;
+        }
+
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
           return next(
             AppError.unauthorized("Authorization header required", {

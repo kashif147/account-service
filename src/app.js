@@ -15,6 +15,8 @@ import errorHandler from "./middlewares/errorHandler.js";
 import routes from "./routes/index.js";
 import logger from "./config/logger.js";
 import { getIdempotencyCacheSize } from "./middlewares/idempotency.js";
+import Payment from "./models/payment.model.js";
+import Refund from "./models/refund.model.js";
 import {
   initEventSystem,
   setupConsumers,

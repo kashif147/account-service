@@ -2,6 +2,7 @@ import express from "express";
 import adminRoutes from "./admin.routes.js";
 import journalRoutes from "./journal.routes.js";
 import reportsRoutes from "./reports.routes.js";
+import paymentsRoutes from "./payment.routes.js";
 
 const router = express.Router();
 
@@ -26,5 +27,6 @@ router.get("/", (req, res) => {
 router.use("/admin", adminRoutes);
 router.use("/journal", journalRoutes);
 router.use("/reports", reportsRoutes);
+router.use("/payments", paymentsRoutes);
 
 export default router;

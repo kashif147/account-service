@@ -1,0 +1,491 @@
+{
+  "name": "Stripe + Accounts-Service Orchestration",
+  "nodes": [
+    {
+      "parameters": {
+        "events": [
+          "payment_intent.succeeded",
+          "payment_intent.payment_failed",
+          "checkout.session.completed",
+          "charge.refunded",
+          "balance.available"
+        ],
+        "resolveData": true
+      },
+      "id": "Stripe_Trigger",
+      "name": "Stripe Events",
+      "type": "n8n-nodes-base.stripeTrigger",
+      "typeVersion": 1,
+      "position": [220, 200],
+      "credentials": {
+        "stripeApi": {
+          "id": "__REPLACE_WITH_STRIPE_CREDENTIAL_ID__",
+          "name": "Stripe Prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {},
+        "rules": [
+          {
+            "type": "equals",
+            "value1": "={{$json[\"type\"]}}",
+            "value2": "payment_intent.succeeded"
+          }
+        ]
+      },
+      "id": "IF_Succeeded",
+      "name": "IF Succeeded",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1040, 200]
+    },
+    {
+      "parameters": {
+        "options": {},
+        "rules": [
+          {
+            "type": "equals",
+            "value1": "={{$json[\"data\"][\"object\"][\"metadata\"][\"purpose\"]}}",
+            "value2": "applicationFee"
+          }
+        ]
+      },
+      "id": "IF_AppFee",
+      "name": "IF purpose = applicationFee",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1260, 200]
+    },
+    {
+      "parameters": {
+        "queue": "",
+        "exchange": "={{$env.RABBITMQ_EXCHANGE}}",
+        "routingKey": "application.payment.captured",
+        "options": {
+          "exchangeType": "topic",
+          "persistent": true
+        },
+        "message": "={\"tenantId\": $json[\"data\"][\"object\"][\"metadata\"][\"tenantId\"], \"memberId\": $json[\"data\"][\"object\"][\"metadata\"][\"memberId\"], \"applicationId\": $json[\"data\"][\"object\"][\"metadata\"][\"applicationId\"], \"paymentIntentId\": $json[\"data\"][\"object\"][\"id\"] || $json[\"data\"][\"object\"][\"payment_intent\"], \"amount\": $json[\"data\"][\"object\"][\"amount_received\"] || $json[\"data\"][\"object\"][\"amount_total\"] || $json[\"data\"][\"object\"][\"amount\"], \"currency\": $json[\"data\"][\"object\"][\"currency\"]}"
+      },
+      "id": "AMQP_Publish",
+      "name": "RabbitMQ publish application.payment.captured",
+      "type": "n8n-nodes-base.amqp",
+      "typeVersion": 2,
+      "position": [1490, 200],
+      "credentials": {
+        "amqp": {
+          "id": "__REPLACE_WITH_AMQP_CREDENTIAL_ID__",
+          "name": "RabbitMQ Prod"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {},
+        "assignments": [
+          {
+            "name": "eventId",
+            "value": "={{$json[\"id\"]}}",
+            "type": "string"
+          },
+          {
+            "name": "type",
+            "value": "={{$json[\"type\"]}}",
+            "type": "string"
+          },
+          {
+            "name": "payment",
+            "value": "={ \"paymentIntentId\": $json[\"data\"][\"object\"][\"payment_intent\"] || $json[\"data\"][\"object\"][\"id\"], \"amount\": $json[\"data\"][\"object\"][\"amount_received\"] || $json[\"data\"][\"object\"][\"amount_total\"] || $json[\"data\"][\"object\"][\"amount\"] || 0, \"currency\": $json[\"data\"][\"object\"][\"currency\"] || \"eur\", \"chargeId\": $json[\"data\"][\"object\"][\"latest_charge\"] || $json[\"data\"][\"object\"][\"charge\"] || null, \"customerId\": $json[\"data\"][\"object\"][\"customer\"] || null, \"paymentMethodId\": $json[\"data\"][\"object\"][\"payment_method\"] || null, \"status\": $json[\"data\"][\"object\"][\"status\"], \"metadata\": $json[\"data\"][\"object\"][\"metadata\"] }",
+            "type": "json"
+          }
+        ]
+      },
+      "id": "Set_ReconcilePayload",
+      "name": "Map → /v1/payments/reconcile",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [560, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ACCOUNTS_BASE_URL}}/v1/payments/reconcile",
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "jsonParameters": true,
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBasicAuth",
+        "headerParametersJson": "={\"x-api-key\": \"{{$env.ACCOUNTS_API_KEY}}\", \"x-tenant-id\": \"{{$json[\"data\"][\"object\"][\"metadata\"][\"tenantId\"]}}\", \"content-type\": \"application/json\"}"
+      },
+      "id": "HTTP_Reconcile",
+      "name": "POST accounts-service /reconcile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [800, 200],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "__OPTIONAL_HTTP_BASIC_CRED_ID__",
+          "name": "Optional Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "path": "webhook/payments/create",
+        "options": {
+          "rawBody": false,
+          "responseData": "allData"
+        }
+      },
+      "id": "Webhook_Create",
+      "name": "POST /webhook/payments/create",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [220, 520],
+      "webhookId": "={{$env.N8N_WEBHOOK_TOKEN || \"protect-this\"}}"
+    },
+    {
+      "parameters": {
+        "options": {},
+        "assignments": [
+          {
+            "name": "purpose",
+            "value": "={{$json[\"body\"][\"purpose\"]}}",
+            "type": "string"
+          },
+          {
+            "name": "memberId",
+            "value": "={{$json[\"body\"][\"memberId\"] || \"\"}}",
+            "type": "string"
+          },
+          {
+            "name": "applicationId",
+            "value": "={{$json[\"body\"][\"applicationId\"] || \"\"}}",
+            "type": "string"
+          },
+          {
+            "name": "invoiceId",
+            "value": "={{$json[\"body\"][\"invoiceId\"] || \"\"}}",
+            "type": "string"
+          },
+          {
+            "name": "amount",
+            "value": "={{$json[\"body\"][\"amount\"] || 0}}",
+            "type": "number"
+          },
+          {
+            "name": "currency",
+            "value": "={{$json[\"body\"][\"currency\"] || \"eur\"}}",
+            "type": "string"
+          },
+          {
+            "name": "useCheckout",
+            "value": "={{$json[\"body\"][\"useCheckout\"] || false}}",
+            "type": "boolean"
+          },
+          {
+            "name": "savePaymentMethod",
+            "value": "={{$json[\"body\"][\"savePaymentMethod\"] || false}}",
+            "type": "boolean"
+          },
+          {
+            "name": "idempotencyKey",
+            "value": "={{$json[\"body\"][\"idempotencyKey\"] || $json[\"headers\"][\"x-idempotency-key\"] || $now}}",
+            "type": "string"
+          },
+          {
+            "name": "tenantId",
+            "value": "={{$json[\"headers\"][\"x-tenant-id\"]}}",
+            "type": "string"
+          },
+          {
+            "name": "source",
+            "value": "={{$json[\"body\"][\"source\"] || \"bot\"}}",
+            "type": "string"
+          }
+        ]
+      },
+      "id": "Set_Inbound",
+      "name": "Normalize inbound",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [440, 520]
+    },
+    {
+      "parameters": {
+        "options": {},
+        "rules": [
+          {
+            "type": "smaller",
+            "value1": "={{$json[\"amount\"]}}",
+            "value2": 1
+          },
+          {
+            "type": "equals",
+            "value1": "={{$json[\"purpose\"]}}",
+            "value2": "outstandingBalance"
+          }
+        ],
+        "combineOperation": "all"
+      },
+      "id": "IF_NeedsBalance",
+      "name": "IF amount missing and outstandingBalance",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [660, 520]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ACCOUNTS_BASE_URL}}/v1/members/{{$json[\"memberId\"]}}/balance",
+        "options": {
+          "timeout": 60000
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBasicAuth",
+        "headerParametersJson": "={\"x-api-key\": \"{{$env.ACCOUNTS_API_KEY}}\", \"x-tenant-id\": \"{{$json[\"tenantId\"]}}\"}"
+      },
+      "id": "HTTP_GetBalance",
+      "name": "GET member balance",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [880, 470],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "__OPTIONAL_HTTP_BASIC_CRED_ID__",
+          "name": "Optional Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {},
+        "assignments": [
+          {
+            "name": "amount",
+            "value": "={{$json[\"body\"][\"amountDue\"]}}",
+            "type": "number"
+          }
+        ]
+      },
+      "id": "Set_AmountFromBalance",
+      "name": "Set amount from balance",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [1100, 470]
+    },
+    {
+      "parameters": {
+        "url": "={{$env.ACCOUNTS_BASE_URL}}/v1/payments/intents",
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "jsonParameters": true,
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBasicAuth",
+        "headerParametersJson": "={\"x-api-key\": \"{{$env.ACCOUNTS_API_KEY}}\", \"x-tenant-id\": \"{{$json[\"tenantId\"]}}\", \"content-type\": \"application/json\"}",
+        "bodyParametersJson": "={ \"purpose\": $json[\"purpose\"], \"amount\": $json[\"amount\"], \"currency\": $json[\"currency\"], \"memberId\": $json[\"memberId\"], \"applicationId\": $json[\"applicationId\"], \"invoiceId\": $json[\"invoiceId\"], \"useCheckout\": $json[\"useCheckout\"], \"savePaymentMethod\": $json[\"savePaymentMethod\"], \"idempotencyKey\": $json[\"idempotencyKey\"], \"source\": $json[\"source\"] }"
+      },
+      "id": "HTTP_CreateIntent",
+      "name": "POST /v1/payments/intents",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1320, 520],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "__OPTIONAL_HTTP_BASIC_CRED_ID__",
+          "name": "Optional Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "responseBody": "={ $json[\"checkoutUrl\"] ? { \"checkoutUrl\": $json[\"checkoutUrl\"], \"status\": $json[\"status\"] } : { \"paymentIntentId\": $json[\"paymentIntentId\"], \"clientSecret\": $json[\"clientSecret\"], \"status\": $json[\"status\"] } }",
+        "responseCode": 200
+      },
+      "id": "Respond_Create",
+      "name": "Respond with URL or clientSecret",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1540, 520]
+    },
+    {
+      "parameters": {
+        "responseBody": "{\"ok\": true}",
+        "responseCode": 200
+      },
+      "id": "Respond_OK",
+      "name": "Ack Stripe",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1260, 360]
+    }
+  ],
+  "connections": {
+    "Stripe Events": {
+      "main": [
+        [
+          {
+            "node": "Map → /v1/payments/reconcile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map → /v1/payments/reconcile": {
+      "main": [
+        [
+          {
+            "node": "POST accounts-service /reconcile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST accounts-service /reconcile": {
+      "main": [
+        [
+          {
+            "node": "IF Succeeded",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Ack Stripe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Succeeded": {
+      "main": [
+        [
+          {
+            "node": "IF purpose = applicationFee",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "IF purpose = applicationFee": {
+      "main": [
+        [
+          {
+            "node": "RabbitMQ publish application.payment.captured",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ack Stripe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST /webhook/payments/create": {
+      "main": [
+        [
+          {
+            "node": "Normalize inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize inbound": {
+      "main": [
+        [
+          {
+            "node": "IF amount missing and outstandingBalance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF amount missing and outstandingBalance": {
+      "main": [
+        [
+          {
+            "node": "GET member balance",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST /v1/payments/intents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET member balance": {
+      "main": [
+        [
+          {
+            "node": "Set amount from balance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set amount from balance": {
+      "main": [
+        [
+          {
+            "node": "POST /v1/payments/intents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST /v1/payments/intents": {
+      "main": [
+        [
+          {
+            "node": "Respond with URL or clientSecret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RabbitMQ publish application.payment.captured": {
+      "main": [
+        [
+          {
+            "node": "Ack Stripe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "generated-by-chatgpt"
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "id": "Stripe-Accounts-Orchestration"
+}

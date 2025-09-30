@@ -1,15 +1,25 @@
 import mongoose from "mongoose";
 import logger from "./logger.js";
+import Payment from "../models/payment.model.js";
+import Refund from "../models/refund.model.js";
 
 export async function connectDB(
-  uri = process.env.MONGO_URI ||
-    "mongodb://127.0.0.1:27017/account-service?replicaSet=rs0"
+  uri = process.env.MONGODB_URI ||
+    process.env.MONGO_URI ||
+    "mongodb://localhost:27017/account-service"
 ) {
   await mongoose.connect(uri, {
     serverSelectionTimeoutMS: 10000,
     autoIndex: process.env.NODE_ENV !== "production",
   });
   logger.info({ db: mongoose.connection.name }, "Mongo connected");
+
+  try {
+    await Promise.allSettled([Payment.init(), Refund.init()]);
+    logger.info("Models initialized (indexes ensured)");
+  } catch (e) {
+    logger.warn({ err: e.message }, "Model init failed");
+  }
   return mongoose.connection;
 }
 

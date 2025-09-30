@@ -16,7 +16,8 @@ async function start() {
 
   // Try DB in background, but don't block server startup
   connectDB(
-    process.env.MONGO_URI ||
+    process.env.MONGODB_URI ||
+      process.env.MONGO_URI ||
       "mongodb://127.0.0.1:27017/account-service?replicaSet=rs0"
   ).catch((err) =>
     logger.warn(

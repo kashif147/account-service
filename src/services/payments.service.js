@@ -1,0 +1,280 @@
+import Payment, {
+  zCreateIntent,
+  zReconcile,
+  zRecordExternal,
+} from "../models/payment.model.js";
+import Refund, { zCreateRefund } from "../models/refund.model.js";
+import { AppError } from "../errors/AppError.js";
+import { getStripe } from "../lib/stripe.js";
+
+function ensureIntegerCents(value) {
+  if (!Number.isInteger(value)) {
+    throw AppError.badRequest("Amount must be integer cents");
+  }
+}
+
+export async function createIntent(input, ctx) {
+  const parsed = zCreateIntent.parse(input);
+  ensureIntegerCents(parsed.amount);
+
+  const stripe = getStripe();
+
+  let stripeResult = {};
+  let status = "created";
+  let mode = "stripe";
+  let stripeIds = {};
+
+  if (parsed.useCheckout) {
+    const session = await stripe.checkout.sessions.create(
+      {
+        mode: "payment",
+        payment_method_types: ["card"],
+        currency: parsed.currency || "eur",
+        line_items: [
+          {
+            price_data: {
+              currency: parsed.currency || "eur",
+              product_data: { name: parsed.purpose },
+              unit_amount: parsed.amount,
+            },
+            quantity: 1,
+          },
+        ],
+        success_url: `${
+          process.env.PORTAL_BASE_URL || "https://example.com"
+        }/payments/success`,
+        cancel_url: `${
+          process.env.PORTAL_BASE_URL || "https://example.com"
+        }/payments/cancel`,
+      },
+      { idempotencyKey: ctx.idempotencyKey || undefined }
+    );
+    stripeResult = session;
+    status = "requires_action";
+    stripeIds = { checkoutSessionId: session.id };
+  } else {
+    const intent = await stripe.paymentIntents.create(
+      {
+        amount: parsed.amount,
+        currency: parsed.currency || "eur",
+        payment_method_types: ["card"],
+        metadata: parsed.metadata || {},
+      },
+      { idempotencyKey: ctx.idempotencyKey || undefined }
+    );
+    stripeResult = intent;
+    status = intent.status || "requires_action";
+    stripeIds = { paymentIntentId: intent.id };
+  }
+
+  const payment = await Payment.create({
+    tenantId: ctx.tenantId,
+    purpose: parsed.purpose,
+    amount: parsed.amount,
+    currency: parsed.currency || "eur",
+    status,
+    memberId: parsed.memberId,
+    applicationId: parsed.applicationId,
+    invoiceId: parsed.invoiceId,
+    idempotencyKey: ctx.idempotencyKey || undefined,
+    source: "portal",
+    mode,
+    stripe: stripeIds,
+    metadata: parsed.metadata || {},
+  });
+
+  return {
+    paymentIntentId: stripeIds.paymentIntentId,
+    checkoutSessionId: stripeIds.checkoutSessionId,
+    clientSecret: stripeResult.client_secret,
+    checkoutUrl: stripeResult.url,
+    status,
+    id: payment._id.toString(),
+  };
+}
+
+export async function findByStripePaymentIntent(paymentIntentId, ctx) {
+  const doc = await Payment.findOne({
+    tenantId: ctx.tenantId,
+    "stripe.paymentIntentId": paymentIntentId,
+  });
+  if (!doc) return null;
+  return doc;
+}
+
+export async function reconcileStripeEvent(input, ctx) {
+  const parsed = zReconcile.parse(input);
+  ensureIntegerCents(parsed.payment.amount);
+  const filter = {
+    tenantId: ctx.tenantId,
+    "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+  };
+  const update = {
+    $set: {
+      amount: parsed.payment.amount,
+      currency: parsed.payment.currency,
+      status: parsed.payment.status,
+      "stripe.chargeId": parsed.payment.chargeId,
+      "stripe.customerId": parsed.payment.customerId,
+      "stripe.paymentMethodId": parsed.payment.paymentMethodId,
+      metadata: parsed.payment.metadata || {},
+    },
+    $setOnInsert: {
+      purpose: "subscriptionFee",
+      mode: "stripe",
+    },
+  };
+  const options = { upsert: true, new: true, setDefaultsOnInsert: true };
+  const doc = await Payment.findOneAndUpdate(filter, update, options);
+
+  if (parsed.payment.status === "succeeded") {
+    await postJournalForPayment(doc, ctx);
+  }
+
+  return { ok: true };
+}
+
+export async function recordExternal(input, ctx) {
+  const parsed = zRecordExternal.parse(input);
+  ensureIntegerCents(parsed.amount);
+
+  if (parsed.direction === "in") {
+    const payment = await Payment.create({
+      tenantId: ctx.tenantId,
+      purpose: "subscriptionFee",
+      amount: parsed.amount,
+      currency: parsed.currency,
+      status: "succeeded",
+      mode: "external",
+      memberId: parsed.memberId,
+      applicationId: parsed.applicationId,
+      invoiceId: parsed.invoiceId,
+      external: { externalRef: parsed.externalRef },
+      metadata: parsed.metadata || {},
+    });
+    await postJournalForPayment(payment, ctx);
+    return { ok: true, paymentId: payment._id.toString() };
+  }
+
+  // direction === "out" maps to refund
+  const refund = await Refund.create({
+    tenantId: ctx.tenantId,
+    mode: "external",
+    amount: parsed.amount,
+    currency: parsed.currency,
+    reason: parsed.reason,
+    metadata: parsed.metadata || {},
+  });
+  return { ok: true, refundId: refund._id.toString() };
+}
+
+export async function createRefund(input, ctx) {
+  const parsed = zCreateRefund.parse(input);
+  const stripe = getStripe();
+
+  if (parsed.mode === "stripe") {
+    const refund = await stripe.refunds.create(
+      {
+        charge: parsed.chargeId,
+        payment_intent: parsed.paymentIntentId,
+        amount: parsed.amount,
+        reason: parsed.reason,
+        metadata: parsed.metadata || {},
+      },
+      { idempotencyKey: ctx.idempotencyKey || undefined }
+    );
+
+    const payment = await Payment.findOne({
+      tenantId: ctx.tenantId,
+      "stripe.paymentIntentId": parsed.paymentIntentId,
+    });
+
+    const refundDoc = await Refund.create({
+      tenantId: ctx.tenantId,
+      paymentId: payment ? payment._id : undefined,
+      mode: "stripe",
+      amount: parsed.amount || (payment ? payment.amount : undefined),
+      currency: payment ? payment.currency : "eur",
+      reason: parsed.reason,
+      stripe: {
+        refundId: refund.id,
+        chargeId: refund.charge || undefined,
+        paymentIntentId: parsed.paymentIntentId,
+      },
+      note: parsed.note,
+      metadata: parsed.metadata || {},
+    });
+
+    if (payment) {
+      const newStatus =
+        parsed.amount && parsed.amount < payment.amount
+          ? "partially_refunded"
+          : "refunded";
+      await Payment.updateOne(
+        { _id: payment._id },
+        { $set: { status: newStatus } }
+      );
+    }
+
+    return { refundId: refund.id, status: "ok" };
+  }
+
+  // external refund
+  const payment = parsed.paymentIntentId
+    ? await Payment.findOne({
+        tenantId: ctx.tenantId,
+        "stripe.paymentIntentId": parsed.paymentIntentId,
+      })
+    : null;
+
+  const refundDoc = await Refund.create({
+    tenantId: ctx.tenantId,
+    paymentId: payment ? payment._id : undefined,
+    mode: "external",
+    amount: parsed.amount || (payment ? payment.amount : undefined),
+    currency: payment ? payment.currency : "eur",
+    reason: parsed.reason,
+    note: parsed.note,
+    metadata: parsed.metadata || {},
+  });
+
+  if (payment) {
+    const newStatus =
+      parsed.amount && parsed.amount < payment.amount
+        ? "partially_refunded"
+        : "refunded";
+    await Payment.updateOne(
+      { _id: payment._id },
+      { $set: { status: newStatus } }
+    );
+  }
+
+  return { ok: true };
+}
+
+export async function postJournalForPayment(payment, ctx) {
+  const debit = {
+    account: "Cash",
+    amount: payment.amount,
+    currency: payment.currency,
+  };
+  const credit = {
+    account: "Revenue",
+    amount: payment.amount,
+    currency: payment.currency,
+  };
+  return {
+    tenantId: ctx.tenantId,
+    entries: [debit, credit],
+    meta: { paymentId: payment._id.toString(), purpose: payment.purpose },
+  };
+}
+
+export default {
+  createIntent,
+  findByStripePaymentIntent,
+  reconcileStripeEvent,
+  recordExternal,
+  createRefund,
+  postJournalForPayment,
+};

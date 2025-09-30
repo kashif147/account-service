@@ -1,6 +1,6 @@
-# Service Template
+# Account Service
 
-A comprehensive Node.js service template with Express, MongoDB, RabbitMQ, and modern development practices.
+Node.js Express microservice with MongoDB (Mongoose), Stripe payments, and idempotent APIs.
 
 ## Features
 
@@ -87,16 +87,20 @@ A comprehensive Node.js service template with Express, MongoDB, RabbitMQ, and mo
 │   │   ├── notFound.js        # 404 handler
 │   │   ├── requestId.js       # Request ID
 │   │   ├── response.mw.js     # Response formatting
-│   │   ├── validate.js        # Validation
+│   │   ├── validate.js        # Validation (Zod wrapper)
+│   │   ├── context.js         # Request context (tenant/api key)
 │   │   ├── verifyJWT.js       # JWT verification
 │   │   └── verifyRoles.js     # Role verification
 │   ├── models/                # Mongoose models
-│   │   └── template.model.js
+│   │   ├── Payment.js
+│   │   └── Refund.js
 │   ├── routes/                # Route definitions
 │   │   ├── index.js           # Main router
-│   │   └── template.routes.js
+│   │   └── payments.js
 │   ├── services/              # Business logic
-│   │   └── template.service.js
+│   │   └── payments.js
+│   ├── lib/
+│   │   └── stripe.js          # Stripe client
 │   ├── tests/                 # Test files
 │   ├── validators/            # Validation schemas
 │   ├── docs/                  # Documentation
@@ -188,6 +192,15 @@ router.post("/your-endpoint", yourController.createYourEntity);
 export default router;
 ```
 
+## Environment Variables
+
+Use dotenv-flow to provide these:
+
+- MONGODB_URI: Mongo connection string
+- STRIPE_SECRET_KEY: Stripe Secret Key
+- ACCOUNTS_API_KEY: Shared API key for requests
+- PORTAL_BASE_URL: Portal base for checkout success/cancel URLs
+
 ## Available Scripts
 
 - `npm start` - Start production server
@@ -242,5 +255,75 @@ Once the server is running, visit `/api/docs` for Swagger documentation.
 - `pino-pretty` - Pretty logging
 
 ## License
+
+## Payments API
+
+All endpoints require headers:
+
+- x-tenant-id: demo-tenant
+- x-api-key: ${ACCOUNTS_API_KEY}
+- x-idempotency-key: demo-tenant:member-123:1690000000000
+
+### Create Intent
+
+```bash
+curl -X POST http://localhost:4000/api/payments/intents \
+  -H "content-type: application/json" \
+  -H "x-tenant-id: demo-tenant" \
+  -H "x-api-key: $ACCOUNTS_API_KEY" \
+  -H "x-idempotency-key: demo-tenant:member-123:1690000000000" \
+  -d '{"purpose":"subscriptionFee","amount":500,"currency":"eur"}'
+```
+
+### Create Intent (Checkout)
+
+```bash
+curl -X POST http://localhost:4000/api/payments/intents \
+  -H "content-type: application/json" \
+  -H "x-tenant-id: demo-tenant" \
+  -H "x-api-key: $ACCOUNTS_API_KEY" \
+  -H "x-idempotency-key: demo-tenant:member-123:1690000000000" \
+  -d '{"purpose":"subscriptionFee","amount":500,"currency":"eur","useCheckout":true}'
+```
+
+### Reconcile
+
+```bash
+curl -X POST http://localhost:4000/api/payments/reconcile \
+  -H "content-type: application/json" \
+  -H "x-tenant-id: demo-tenant" \
+  -H "x-api-key: $ACCOUNTS_API_KEY" \
+  -H "x-idempotency-key: demo-tenant:member-123:1690000000000" \
+  -d '{"eventId":"evt_1","type":"payment_intent.succeeded","payment":{"paymentIntentId":"pi_123","amount":500,"currency":"eur","status":"succeeded"}}'
+```
+
+### Get by Stripe Intent
+
+```bash
+curl http://localhost:4000/api/payments/by-stripe/pi_123 \
+  -H "x-tenant-id: demo-tenant" \
+  -H "x-api-key: $ACCOUNTS_API_KEY"
+```
+
+### Record External
+
+```bash
+curl -X POST http://localhost:4000/api/payments/record-external \
+  -H "content-type: application/json" \
+  -H "x-tenant-id: demo-tenant" \
+  -H "x-api-key: $ACCOUNTS_API_KEY" \
+  -d '{"direction":"in","amount":500,"currency":"eur","reason":"cash"}'
+```
+
+### Refunds
+
+```bash
+curl -X POST http://localhost:4000/api/payments/refunds \
+  -H "content-type: application/json" \
+  -H "x-tenant-id: demo-tenant" \
+  -H "x-api-key: $ACCOUNTS_API_KEY" \
+  -H "x-idempotency-key: demo-tenant:member-123:1690000000000" \
+  -d '{"mode":"stripe","paymentIntentId":"pi_123","amount":100}'
+```
 
 MIT License - feel free to use this template for your projects.

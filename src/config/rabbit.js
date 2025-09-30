@@ -46,7 +46,7 @@ const ALLOW_START_WITHOUT_RABBIT =
 
 async function initTopology(channel) {
   await channel.prefetch(10);
-  await channel.assertExchange(
+  await channel.assertEchange(
     process.env.RABBITMQ_EXCHANGE ||
       process.env.RABBIT_EXCHANGE ||
       "accounts.events",
