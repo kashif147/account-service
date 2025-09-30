@@ -13,6 +13,25 @@ function ensureIntegerCents(value) {
   }
 }
 
+function mapStripeStatusToDomain(status) {
+  switch (status) {
+    case "requires_payment_method":
+    case "requires_confirmation":
+    case "requires_action":
+      return "requires_action";
+    case "requires_capture":
+      return "processing";
+    case "processing":
+      return "processing";
+    case "succeeded":
+      return "succeeded";
+    case "canceled":
+      return "failed";
+    default:
+      return "processing";
+  }
+}
+
 export async function createIntent(input, ctx) {
   const parsed = zCreateIntent.parse(input);
   ensureIntegerCents(parsed.amount);
@@ -63,7 +82,7 @@ export async function createIntent(input, ctx) {
       { idempotencyKey: ctx.idempotencyKey || undefined }
     );
     stripeResult = intent;
-    status = intent.status || "requires_action";
+    status = mapStripeStatusToDomain(intent.status) || "requires_action";
     stripeIds = { paymentIntentId: intent.id };
   }
 
