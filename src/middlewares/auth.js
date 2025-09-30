@@ -68,7 +68,11 @@ export async function ensureAuthenticated(req, res, next) {
   if (header?.startsWith("Bearer ")) {
     const token = header.split(" ")[1];
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const secret =
+        process.env.JWT_SECRET ||
+        process.env.ACCESS_TOKEN_SECRET ||
+        process.env.ACCESS_TOEKN_SECRET; // tolerate legacy typo
+      const decoded = jwt.verify(token, secret);
 
       if (!decoded.tid) {
         return next(

@@ -1,5 +1,6 @@
 import express from "express";
 import context from "../middlewares/context.js";
+import { ensureAuthenticated } from "../middlewares/auth.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import {
   createIntent,
@@ -17,7 +18,11 @@ import { zCreateRefund } from "../models/refund.model.js";
 
 const router = express.Router();
 
-router.use(context);
+// Accept either API key context or JWT auth
+router.use((req, res, next) => {
+  if (req.headers["x-api-key"]) return context(req, res, next);
+  return ensureAuthenticated(req, res, next);
+});
 
 router.post("/intents", zodValidate(zCreateIntent), async (req, res, next) => {
   try {
