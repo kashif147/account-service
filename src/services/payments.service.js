@@ -32,6 +32,35 @@ function mapStripeStatusToDomain(status) {
   }
 }
 
+async function buildIntentResponse(payment, stripe) {
+  let clientSecret;
+  let checkoutUrl;
+  if (payment?.stripe?.paymentIntentId) {
+    try {
+      const pi = await stripe.paymentIntents.retrieve(
+        payment.stripe.paymentIntentId
+      );
+      clientSecret = pi?.client_secret;
+    } catch (_) {}
+  }
+  if (payment?.stripe?.checkoutSessionId) {
+    try {
+      const cs = await stripe.checkout.sessions.retrieve(
+        payment.stripe.checkoutSessionId
+      );
+      checkoutUrl = cs?.url;
+    } catch (_) {}
+  }
+  return {
+    paymentIntentId: payment?.stripe?.paymentIntentId,
+    checkoutSessionId: payment?.stripe?.checkoutSessionId,
+    clientSecret,
+    checkoutUrl,
+    status: payment.status,
+    id: payment._id.toString(),
+  };
+}
+
 export async function createIntent(input, ctx) {
   const parsed = zCreateIntent.parse(input);
   ensureIntegerCents(parsed.amount);
@@ -86,30 +115,44 @@ export async function createIntent(input, ctx) {
     stripeIds = { paymentIntentId: intent.id };
   }
 
-  const payment = await Payment.create({
-    tenantId: ctx.tenantId,
-    purpose: parsed.purpose,
-    amount: parsed.amount,
-    currency: parsed.currency || "eur",
-    status,
-    memberId: parsed.memberId,
-    applicationId: parsed.applicationId,
-    invoiceId: parsed.invoiceId,
-    idempotencyKey: ctx.idempotencyKey || undefined,
-    source: "portal",
-    mode,
-    stripe: stripeIds,
-    metadata: parsed.metadata || {},
-  });
+  try {
+    const payment = await Payment.create({
+      tenantId: ctx.tenantId,
+      purpose: parsed.purpose,
+      amount: parsed.amount,
+      currency: parsed.currency || "eur",
+      status,
+      memberId: parsed.memberId,
+      applicationId: parsed.applicationId,
+      invoiceId: parsed.invoiceId,
+      idempotencyKey: ctx.idempotencyKey || undefined,
+      source: "portal",
+      mode,
+      stripe: stripeIds,
+      metadata: parsed.metadata || {},
+    });
 
-  return {
-    paymentIntentId: stripeIds.paymentIntentId,
-    checkoutSessionId: stripeIds.checkoutSessionId,
-    clientSecret: stripeResult.client_secret,
-    checkoutUrl: stripeResult.url,
-    status,
-    id: payment._id.toString(),
-  };
+    return {
+      paymentIntentId: stripeIds.paymentIntentId,
+      checkoutSessionId: stripeIds.checkoutSessionId,
+      clientSecret: stripeResult.client_secret,
+      checkoutUrl: stripeResult.url,
+      status,
+      id: payment._id.toString(),
+    };
+  } catch (e) {
+    // Handle idempotent replays by returning the existing Payment
+    if (e && e.code === 11000 && ctx.idempotencyKey) {
+      const existing = await Payment.findOne({
+        tenantId: ctx.tenantId,
+        idempotencyKey: ctx.idempotencyKey,
+      });
+      if (existing) {
+        return await buildIntentResponse(existing, stripe);
+      }
+    }
+    throw e;
+  }
 }
 
 export async function findByStripePaymentIntent(paymentIntentId, ctx) {
