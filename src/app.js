@@ -17,6 +17,7 @@ import logger from "./config/logger.js";
 import { getIdempotencyCacheSize } from "./middlewares/idempotency.js";
 import Payment from "./models/payment.model.js";
 import Refund from "./models/refund.model.js";
+import webhookRoutes from "./routes/webhook.routes.js";
 import {
   initEventSystem,
   setupConsumers,
@@ -55,6 +56,9 @@ app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
 app.use(compression());
 
 // body
+// Mount webhooks BEFORE JSON parser to preserve raw body
+app.use("/api/webhook", webhookRoutes);
+
 app.use(bodyParser.json({ limit: "1mb" }));
 
 // request id for correlation
