@@ -115,6 +115,27 @@ export async function createIntent(input, ctx) {
     stripeIds = { paymentIntentId: intent.id };
   }
 
+  // Idempotency and duplicate protection: return existing if present
+  if (ctx.idempotencyKey) {
+    const existingByIdem = await Payment.findOne({
+      tenantId: ctx.tenantId,
+      idempotencyKey: ctx.idempotencyKey,
+    });
+    if (existingByIdem) {
+      return await buildIntentResponse(existingByIdem, stripe);
+    }
+  }
+
+  if (stripeIds.paymentIntentId) {
+    const existingByPi = await Payment.findOne({
+      tenantId: ctx.tenantId,
+      "stripe.paymentIntentId": stripeIds.paymentIntentId,
+    });
+    if (existingByPi) {
+      return await buildIntentResponse(existingByPi, stripe);
+    }
+  }
+
   try {
     const payment = await Payment.create({
       tenantId: ctx.tenantId,
@@ -149,6 +170,15 @@ export async function createIntent(input, ctx) {
       });
       if (existing) {
         return await buildIntentResponse(existing, stripe);
+      }
+    }
+    if (e && e.code === 11000 && stripeIds.paymentIntentId) {
+      const existingByPi = await Payment.findOne({
+        tenantId: ctx.tenantId,
+        "stripe.paymentIntentId": stripeIds.paymentIntentId,
+      });
+      if (existingByPi) {
+        return await buildIntentResponse(existingByPi, stripe);
       }
     }
     throw e;
