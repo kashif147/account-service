@@ -102,6 +102,12 @@ export async function ensureAuthenticated(req, res, next) {
         roles: normalizedRoles,
         permissions: decoded.permissions || [],
       };
+
+      // Handle idempotency key from headers
+      const idempotencyKey = req.header("x-idempotency-key");
+      if (idempotencyKey) {
+        req.ctx.idempotencyKey = idempotencyKey;
+      }
       req.user = decoded;
       req.userId = decoded.sub || decoded.id;
       req.tenantId = tokenTenantId;
@@ -138,6 +144,12 @@ export async function ensureAuthenticated(req, res, next) {
         roles: extracted.roles,
         permissions: extracted.permissions,
       };
+
+      // Handle idempotency key from headers
+      const idempotencyKey = req.header("x-idempotency-key");
+      if (idempotencyKey) {
+        req.ctx.idempotencyKey = idempotencyKey;
+      }
       req.user = principal;
       req.userId = extracted.userId;
       req.tenantId = extracted.tenantId;
