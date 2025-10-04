@@ -138,7 +138,7 @@ export async function createIntent(input, ctx) {
   }
 
   try {
-    const payment = await Payment.create({
+    const paymentData = {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
@@ -147,12 +147,18 @@ export async function createIntent(input, ctx) {
       memberId: parsed.memberId,
       applicationId: parsed.applicationId,
       invoiceId: parsed.invoiceId,
-      idempotencyKey: ctx.idempotencyKey || undefined,
       source: "portal",
       mode,
       stripe: stripeIds,
       metadata: parsed.metadata || {},
-    });
+    };
+
+    // Only include idempotencyKey if it's actually provided (not null or undefined)
+    if (ctx.idempotencyKey) {
+      paymentData.idempotencyKey = ctx.idempotencyKey;
+    }
+
+    const payment = await Payment.create(paymentData);
 
     return {
       paymentIntentId: stripeIds.paymentIntentId,
