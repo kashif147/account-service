@@ -67,6 +67,17 @@ export async function createIntent(input, ctx) {
 
   const stripe = getStripe();
 
+  // Idempotency and duplicate protection: check for existing payments BEFORE Stripe API call
+  if (ctx.idempotencyKey) {
+    const existingByIdem = await Payment.findOne({
+      tenantId: ctx.tenantId,
+      idempotencyKey: ctx.idempotencyKey,
+    });
+    if (existingByIdem) {
+      return await buildIntentResponse(existingByIdem, stripe);
+    }
+  }
+
   let stripeResult = {};
   let status = "created";
   let mode = "stripe";
@@ -115,17 +126,7 @@ export async function createIntent(input, ctx) {
     stripeIds = { paymentIntentId: intent.id };
   }
 
-  // Idempotency and duplicate protection: return existing if present
-  if (ctx.idempotencyKey) {
-    const existingByIdem = await Payment.findOne({
-      tenantId: ctx.tenantId,
-      idempotencyKey: ctx.idempotencyKey,
-    });
-    if (existingByIdem) {
-      return await buildIntentResponse(existingByIdem, stripe);
-    }
-  }
-
+  // Check for existing payment with the same Stripe payment intent ID
   if (stripeIds.paymentIntentId) {
     const existingByPi = await Payment.findOne({
       tenantId: ctx.tenantId,
@@ -162,24 +163,40 @@ export async function createIntent(input, ctx) {
       id: payment._id.toString(),
     };
   } catch (e) {
-    // Handle idempotent replays by returning the existing Payment
-    if (e && e.code === 11000 && ctx.idempotencyKey) {
-      const existing = await Payment.findOne({
-        tenantId: ctx.tenantId,
-        idempotencyKey: ctx.idempotencyKey,
-      });
-      if (existing) {
-        return await buildIntentResponse(existing, stripe);
+    // Handle MongoDB duplicate key errors (11000) by returning existing payment
+    if (e && e.code === 11000) {
+      // Try to find existing payment by idempotency key first
+      if (ctx.idempotencyKey) {
+        const existing = await Payment.findOne({
+          tenantId: ctx.tenantId,
+          idempotencyKey: ctx.idempotencyKey,
+        });
+        if (existing) {
+          return await buildIntentResponse(existing, stripe);
+        }
       }
-    }
-    if (e && e.code === 11000 && stripeIds.paymentIntentId) {
-      const existingByPi = await Payment.findOne({
-        tenantId: ctx.tenantId,
-        "stripe.paymentIntentId": stripeIds.paymentIntentId,
-      });
-      if (existingByPi) {
-        return await buildIntentResponse(existingByPi, stripe);
+
+      // Try to find existing payment by Stripe payment intent ID
+      if (stripeIds.paymentIntentId) {
+        const existingByPi = await Payment.findOne({
+          tenantId: ctx.tenantId,
+          "stripe.paymentIntentId": stripeIds.paymentIntentId,
+        });
+        if (existingByPi) {
+          return await buildIntentResponse(existingByPi, stripe);
+        }
       }
+
+      // If we can't find an existing payment, it's a real constraint violation
+      console.error(
+        "MongoDB duplicate key error but no existing payment found:",
+        {
+          error: e,
+          tenantId: ctx.tenantId,
+          idempotencyKey: ctx.idempotencyKey,
+          paymentIntentId: stripeIds.paymentIntentId,
+        }
+      );
     }
     throw e;
   }
