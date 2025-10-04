@@ -31,6 +31,10 @@ export function idempotency() {
       });
     }
 
+    // Add idempotency key to request context for services to use
+    if (!req.ctx) req.ctx = {};
+    req.ctx.idempotencyKey = key;
+
     // Check if we've seen this key before
     if (mem.has(key)) {
       const cachedResponse = mem.get(key);

@@ -14,7 +14,10 @@ import notFound from "./middlewares/notFound.js";
 import errorHandler from "./middlewares/errorHandler.js";
 import routes from "./routes/index.js";
 import logger from "./config/logger.js";
-import { getIdempotencyCacheSize } from "./middlewares/idempotency.js";
+import {
+  getIdempotencyCacheSize,
+  clearIdempotencyCache,
+} from "./middlewares/idempotency.js";
 import Payment from "./models/payment.model.js";
 import Refund from "./models/refund.model.js";
 import webhookRoutes from "./routes/webhook.routes.js";
@@ -84,6 +87,21 @@ app.get("/health/idempotency", (req, res) => {
     status: "healthy",
     timestamp: new Date().toISOString(),
   });
+});
+
+// clear idempotency cache (for testing)
+app.post("/health/idempotency", (req, res) => {
+  const { action } = req.body;
+  if (action === "clear_cache") {
+    clearIdempotencyCache();
+    res.success({
+      message: "Idempotency cache cleared",
+      cacheSize: getIdempotencyCacheSize(),
+      timestamp: new Date().toISOString(),
+    });
+  } else {
+    res.badRequest("Invalid action. Use 'clear_cache'");
+  }
 });
 
 // logging health check
