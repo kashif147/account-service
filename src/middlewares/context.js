@@ -16,11 +16,11 @@ export default function context(req, res, next) {
   }
 
   req.ctx = { tenantId, apiKeyOk: true };
-  
+
   // Only include idempotencyKey if it's actually provided
   if (idempotencyKey) {
     req.ctx.idempotencyKey = idempotencyKey;
   }
-  
+
   return next();
 }
