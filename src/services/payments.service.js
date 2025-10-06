@@ -151,6 +151,10 @@ export async function createIntent(input, ctx) {
       mode,
       stripe: stripeIds,
       metadata: parsed.metadata || {},
+      audit: {
+        createdBy: ctx.userId || ctx.memberId || "system",
+        updatedBy: ctx.userId || ctx.memberId || "system",
+      },
     };
 
     // Only include idempotencyKey if it's actually provided (not null or undefined)
@@ -233,10 +237,13 @@ export async function reconcileStripeEvent(input, ctx) {
       "stripe.customerId": parsed.payment.customerId,
       "stripe.paymentMethodId": parsed.payment.paymentMethodId,
       metadata: parsed.payment.metadata || {},
+      "audit.updatedBy": ctx.userId || ctx.memberId || "system",
     },
     $setOnInsert: {
       purpose: "subscriptionFee",
       mode: "stripe",
+      "audit.createdBy": ctx.userId || ctx.memberId || "system",
+      "audit.updatedBy": ctx.userId || ctx.memberId || "system",
     },
   };
   const options = { upsert: true, new: true, setDefaultsOnInsert: true };
@@ -327,7 +334,12 @@ export async function createRefund(input, ctx) {
           : "refunded";
       await Payment.updateOne(
         { _id: payment._id },
-        { $set: { status: newStatus } }
+        {
+          $set: {
+            status: newStatus,
+            "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+          },
+        }
       );
     }
 
@@ -360,7 +372,12 @@ export async function createRefund(input, ctx) {
         : "refunded";
     await Payment.updateOne(
       { _id: payment._id },
-      { $set: { status: newStatus } }
+      {
+        $set: {
+          status: newStatus,
+          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+        },
+      }
     );
   }
 

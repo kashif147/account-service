@@ -24,8 +24,9 @@ const ExternalSubSchema = new Schema(
 const AuditSubSchema = new Schema(
   {
     createdBy: { type: String },
+    updatedBy: { type: String },
   },
-  { _id: false, timestamps: { createdAt: "createdAt", updatedAt: "updatedAt" } }
+  { _id: false }
 );
 
 const PaymentSchema = new Schema(
