@@ -25,7 +25,7 @@ import {
   initEventSystem,
   setupConsumers,
   shutdownEventSystem,
-} from "./infra/rabbit/events.js";
+} from "./rabbitMQ/events.js";
 
 const app = express();
 
@@ -120,6 +120,70 @@ app.get("/health/events", (req, res) => {
     initialized: eventSystemInitialized,
     timestamp: new Date().toISOString(),
   });
+});
+
+// RabbitMQ health check with connection test
+app.get("/health/rabbitmq", async (req, res) => {
+  try {
+    const { publishEvent } = await import("./rabbitMQ/publisher.js");
+
+    // Test publishing a health check event
+    const testEvent = {
+      eventId: `health-check-${Date.now()}`,
+      eventType: "health.check",
+      timestamp: new Date().toISOString(),
+      data: { service: "account-service", check: "health" },
+      metadata: { source: "health-check" },
+    };
+
+    const success = await publishEvent("health.check", testEvent);
+
+    res.success({
+      status: success ? "healthy" : "unhealthy",
+      connection: "connected",
+      testEventPublished: success,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).success({
+      status: "unhealthy",
+      connection: "disconnected",
+      error: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+// Test event publishing endpoint (for development/testing)
+app.post("/test/publish-event", async (req, res) => {
+  try {
+    const { eventType, data, metadata } = req.body;
+
+    if (!eventType) {
+      return res.badRequest("eventType is required");
+    }
+
+    const { publishDomainEvent } = await import("./rabbitMQ/events.js");
+
+    const success = await publishDomainEvent(eventType, data || {}, {
+      source: "test-endpoint",
+      ...metadata,
+    });
+
+    res.success({
+      published: success,
+      eventType,
+      data,
+      metadata,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(500).success({
+      published: false,
+      error: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // root route

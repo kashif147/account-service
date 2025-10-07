@@ -9,7 +9,8 @@
     "start:dev": "cross-env NODE_ENV=development node bin/account-service.js",
     "start:staging": "cross-env NODE_ENV=staging node bin/account-service.js",
     "start:prod": "cross-env NODE_ENV=production node bin/account-service.js",
-    "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand"
+    "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
+    "test:rabbitmq": "node scripts/test-rabbitmq-events.js"
   },
   "dependencies": {
     "@membership/shared-constants": "github:kashif147/membership-shared-constants#v1.0.0",

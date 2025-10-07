@@ -10,7 +10,7 @@ import {
   yearBoundsFrom,
 } from "../helpers/prorata.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
-import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
+import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
 function sumArray(arr, sel) {
   return Number(arr.reduce((s, x) => s + sel(x), 0).toFixed(2));

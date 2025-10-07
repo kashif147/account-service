@@ -1,10 +1,10 @@
-// Legacy publisher helper - now using new infra/rabbit infrastructure
-import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
+// Legacy publisher helper - now using new rabbitMQ infrastructure
+import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
 /**
  * Publishes an event to RabbitMQ using the new infrastructure.
  * Returns true if queued, false if dropped.
- * @deprecated Use publishDomainEvent from infra/rabbit/events.js instead
+ * @deprecated Use publishDomainEvent from rabbitMQ/events.js instead
  */
 export async function publishEvent(routingKey, payload, options = {}) {
   try {

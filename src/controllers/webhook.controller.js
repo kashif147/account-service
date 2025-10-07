@@ -1,6 +1,8 @@
 // src/controllers/webhook.controller.js
 import stripe from "../lib/stripe.js";
 import { reconcileStripeEvent } from "../services/payments.service.js";
+import { publishDomainEvent } from "../rabbitMQ/events.js";
+import { APPLICATION_EVENTS } from "../rabbitMQ/events/application.events.js";
 import logger from "../config/logger.js";
 
 export async function handleStripeWebhook(req, res) {
@@ -41,7 +43,7 @@ async function processStripeEvent(event) {
       { eventId: event.id, type: event.type },
       "Missing tenantId in Stripe event metadata"
     );
-    return;
+    // return; // TODO: Uncomment this when we have a way to handle this
   }
 
   let paymentData = {};
@@ -58,6 +60,44 @@ async function processStripeEvent(event) {
         paymentMethodId: pi.payment_method || undefined,
         metadata: pi.metadata || {},
       };
+
+      // Publish portal event to update application status to submitted
+      try {
+        await publishDomainEvent(
+          APPLICATION_EVENTS.STATUS_UPDATED,
+          {
+            applicationId: metadata.applicationId || metadata.application_id,
+            status: "submitted",
+            paymentIntentId: pi.id,
+            amount: pi.amount,
+            currency: pi.currency,
+            tenantId,
+          },
+          {
+            source: "stripe-webhook",
+            eventId: event.id,
+          }
+        );
+        logger.info(
+          {
+            applicationId: metadata.applicationId || metadata.application_id,
+            paymentIntentId: pi.id,
+            tenantId,
+          },
+          "Published application status update event to portal-service"
+        );
+      } catch (error) {
+        logger.error(
+          {
+            error: error.message,
+            applicationId: metadata.applicationId || metadata.application_id,
+            paymentIntentId: pi.id,
+            tenantId,
+          },
+          "Failed to publish application status update event"
+        );
+        // Continue processing even if event publishing fails
+      }
       break;
     }
     case "payment_intent.payment_failed": {

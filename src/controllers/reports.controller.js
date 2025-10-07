@@ -6,7 +6,7 @@ import { monthRange, yearRange } from "../helpers/period.js";
 import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn } from "../middlewares/logger.mw.js";
-import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
+import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
 export async function memberStatement(req, res, next) {
   try {

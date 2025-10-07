@@ -5,45 +5,17 @@ import {
   consumeQueue,
   stopAllConsumers,
 } from "./consumer.js";
-import logger from "../../config/logger.js";
+import logger from "../config/logger.js";
 
-// Event types and routing keys
-export const EVENT_TYPES = {
-  // Journal events
-  JOURNAL_CREATED: "journal.created",
-  JOURNAL_UPDATED: "journal.updated",
-  JOURNAL_DELETED: "journal.deleted",
-
-  // Balance events
-  BALANCE_UPDATED: "balance.updated",
-  BALANCE_RECALCULATED: "balance.recalculated",
-
-  // Member events
-  MEMBER_CREATED: "member.created",
-  MEMBER_UPDATED: "member.updated",
-  MEMBER_DELETED: "member.deleted",
-
-  // Invoice events
-  INVOICE_CREATED: "invoice.created",
-  INVOICE_PAID: "invoice.paid",
-  INVOICE_CANCELLED: "invoice.cancelled",
-
-  // Payment events
-  PAYMENT_RECEIVED: "payment.received",
-  PAYMENT_REFUNDED: "payment.refunded",
-
-  // Report events
-  REPORT_GENERATED: "report.generated",
-  REPORT_EXPORTED: "report.exported",
-};
-
-// Queue names
-export const QUEUES = {
-  MEMBER_SYNC: "accounts.sync.members",
-  JOURNAL_PROCESSING: "accounts.journal.processing",
-  BALANCE_UPDATES: "accounts.balance.updates",
-  REPORT_GENERATION: "accounts.report.generation",
-};
+// Import event types and handlers from separate event files
+import {
+  EVENT_TYPES,
+  QUEUES,
+  handleJournalEvent,
+  handleBalanceEvent,
+  handleMemberEvent,
+  handleReportEvent,
+} from "./events/index.js";
 
 // Initialize event system
 export async function initEventSystem() {
@@ -113,54 +85,8 @@ export async function setupConsumers() {
   }
 }
 
-// Event handlers
-async function handleMemberEvent(payload, routingKey, msg) {
-  logger.info(
-    { routingKey, eventId: payload.eventId },
-    "Processing member event"
-  );
-
-  // TODO: Implement member event handling logic
-  // - Update member cache
-  // - Trigger balance recalculations
-  // - Update related records
-}
-
-async function handleJournalEvent(payload, routingKey, msg) {
-  logger.info(
-    { routingKey, eventId: payload.eventId },
-    "Processing journal event"
-  );
-
-  // TODO: Implement journal event handling logic
-  // - Update balances
-  // - Trigger reports
-  // - Send notifications
-}
-
-async function handleBalanceEvent(payload, routingKey, msg) {
-  logger.info(
-    { routingKey, eventId: payload.eventId },
-    "Processing balance event"
-  );
-
-  // TODO: Implement balance event handling logic
-  // - Update materialized views
-  // - Trigger notifications
-  // - Update caches
-}
-
-async function handleReportEvent(payload, routingKey, msg) {
-  logger.info(
-    { routingKey, eventId: payload.eventId },
-    "Processing report event"
-  );
-
-  // TODO: Implement report event handling logic
-  // - Generate reports
-  // - Send notifications
-  // - Update status
-}
+// Event handlers are now imported from individual event files
+// This keeps the main events.js file clean and focused on system management
 
 // Utility functions
 function generateEventId() {

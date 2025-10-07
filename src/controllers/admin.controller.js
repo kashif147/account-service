@@ -2,7 +2,7 @@
 import CoA from "../models/coa.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo } from "../middlewares/logger.mw.js";
-import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
+import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
 export async function listCoA(req, res, next) {
   try {

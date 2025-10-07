@@ -1,5 +1,5 @@
 import logger from "../config/logger.js";
-import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
+import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
 // Example consumer to sync member changes from the Members service
 export function startMemberConsumer(channel, queue) {
