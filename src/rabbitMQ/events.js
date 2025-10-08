@@ -17,6 +17,9 @@ import {
   handleReportEvent,
 } from "./events/index.js";
 
+// Re-export for convenience
+export { EVENT_TYPES, QUEUES };
+
 // Initialize event system
 export async function initEventSystem() {
   try {
