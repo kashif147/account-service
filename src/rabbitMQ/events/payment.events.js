@@ -6,7 +6,7 @@ export const PAYMENT_EVENTS = {
 
 // Payment event handlers
 export async function handlePaymentEvent(payload, routingKey, msg) {
-  const logger = (await import("../config/logger.js")).default;
+  const logger = (await import("../../config/logger.js")).default;
 
   logger.info(
     { routingKey, eventId: payload.eventId },

@@ -10,7 +10,7 @@ export const REPORT_QUEUES = {
 
 // Report event handlers
 export async function handleReportEvent(payload, routingKey, msg) {
-  const logger = (await import("../config/logger.js")).default;
+  const logger = (await import("../../config/logger.js")).default;
 
   logger.info(
     { routingKey, eventId: payload.eventId },

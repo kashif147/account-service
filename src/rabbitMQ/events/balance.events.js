@@ -10,7 +10,7 @@ export const BALANCE_QUEUES = {
 
 // Balance event handlers
 export async function handleBalanceEvent(payload, routingKey, msg) {
-  const logger = (await import("../config/logger.js")).default;
+  const logger = (await import("../../config/logger.js")).default;
 
   logger.info(
     { routingKey, eventId: payload.eventId },

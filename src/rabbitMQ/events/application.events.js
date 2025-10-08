@@ -5,7 +5,7 @@ export const APPLICATION_EVENTS = {
 
 // Application event handlers
 export async function handleApplicationEvent(payload, routingKey, msg) {
-  const logger = (await import("../config/logger.js")).default;
+  const logger = (await import("../../config/logger.js")).default;
 
   logger.info(
     { routingKey, eventId: payload.eventId },

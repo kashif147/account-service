@@ -1,30 +1,52 @@
-// Export all event types and handlers from individual event files
-export {
+// Import all event types and handlers from individual event files
+import {
   JOURNAL_EVENTS,
   JOURNAL_QUEUES,
   handleJournalEvent,
 } from "./journal.events.js";
-export {
+import {
   BALANCE_EVENTS,
   BALANCE_QUEUES,
   handleBalanceEvent,
 } from "./balance.events.js";
-export {
+import {
   MEMBER_EVENTS,
   MEMBER_QUEUES,
   handleMemberEvent,
 } from "./member.events.js";
-export { INVOICE_EVENTS, handleInvoiceEvent } from "./invoice.events.js";
-export { PAYMENT_EVENTS, handlePaymentEvent } from "./payment.events.js";
-export {
+import { INVOICE_EVENTS, handleInvoiceEvent } from "./invoice.events.js";
+import { PAYMENT_EVENTS, handlePaymentEvent } from "./payment.events.js";
+import {
   APPLICATION_EVENTS,
   handleApplicationEvent,
 } from "./application.events.js";
-export {
+import {
   REPORT_EVENTS,
   REPORT_QUEUES,
   handleReportEvent,
 } from "./report.events.js";
+
+// Re-export everything
+export {
+  JOURNAL_EVENTS,
+  JOURNAL_QUEUES,
+  handleJournalEvent,
+  BALANCE_EVENTS,
+  BALANCE_QUEUES,
+  handleBalanceEvent,
+  MEMBER_EVENTS,
+  MEMBER_QUEUES,
+  handleMemberEvent,
+  INVOICE_EVENTS,
+  handleInvoiceEvent,
+  PAYMENT_EVENTS,
+  handlePaymentEvent,
+  APPLICATION_EVENTS,
+  handleApplicationEvent,
+  REPORT_EVENTS,
+  REPORT_QUEUES,
+  handleReportEvent,
+};
 
 // Combined event types for backward compatibility
 export const EVENT_TYPES = {

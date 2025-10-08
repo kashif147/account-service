@@ -7,7 +7,7 @@ export const INVOICE_EVENTS = {
 
 // Invoice event handlers
 export async function handleInvoiceEvent(payload, routingKey, msg) {
-  const logger = (await import("../config/logger.js")).default;
+  const logger = (await import("../../config/logger.js")).default;
 
   logger.info(
     { routingKey, eventId: payload.eventId },

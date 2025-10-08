@@ -11,7 +11,7 @@ export const JOURNAL_QUEUES = {
 
 // Journal event handlers
 export async function handleJournalEvent(payload, routingKey, msg) {
-  const logger = (await import("../config/logger.js")).default;
+  const logger = (await import("../../config/logger.js")).default;
 
   logger.info(
     { routingKey, eventId: payload.eventId },

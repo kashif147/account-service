@@ -11,7 +11,7 @@ export const MEMBER_QUEUES = {
 
 // Member event handlers
 export async function handleMemberEvent(payload, routingKey, msg) {
-  const logger = (await import("../config/logger.js")).default;
+  const logger = (await import("../../config/logger.js")).default;
 
   logger.info(
     { routingKey, eventId: payload.eventId },
