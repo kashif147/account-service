@@ -195,6 +195,29 @@
           "path": ["api", "payments", "refunds"]
         }
       }
+    },
+    {
+      "name": "Stripe Webhook Event",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "content-type", "value": "application/json" },
+          {
+            "key": "stripe-signature",
+            "value": "t=1234567890,v1=fake_signature_for_testing"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"id\": \"evt_1234567890\",\n  \"object\": \"event\",\n  \"api_version\": \"2024-06-20\",\n  \"created\": 1234567890,\n  \"data\": {\n    \"object\": {\n      \"id\": \"{{paymentIntentId}}\",\n      \"object\": \"payment_intent\",\n      \"amount\": 500,\n      \"currency\": \"eur\",\n      \"status\": \"succeeded\",\n      \"metadata\": {\n        \"tenantId\": \"{{tenantId}}\"\n      },\n      \"customer\": \"cus_test123\",\n      \"payment_method\": \"pm_test123\",\n      \"latest_charge\": \"ch_test123\"\n    }\n  },\n  \"livemode\": false\n  ,\n  \"pending_webhooks\": 1,\n  \"request\": {\n    \"id\": null,\n    \"idempotency_key\": null\n  },\n  \"type\": \"payment_intent.succeeded\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/webhook/stripe",
+          "host": ["{{baseUrl}}"],
+          "path": ["api", "webhook", "stripe"]
+        }
+      }
     }
   ]
 }

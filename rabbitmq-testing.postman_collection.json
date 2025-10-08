@@ -1,0 +1,113 @@
+{
+  "info": {
+    "name": "RabbitMQ Event Testing",
+    "description": "Collection for testing RabbitMQ event publishing",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health Checks",
+      "item": [
+        {
+          "name": "RabbitMQ Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/rabbitmq",
+              "host": ["{{baseUrl}}"],
+              "path": ["health", "rabbitmq"]
+            }
+          }
+        },
+        {
+          "name": "Event System Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["health", "events"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Test Event Publishing",
+      "item": [
+        {
+          "name": "Publish Application Status Update",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"application.status.updated\",\n  \"data\": {\n    \"applicationId\": \"test-app-123\",\n    \"status\": \"submitted\",\n    \"paymentIntentId\": \"pi_test_123\",\n    \"amount\": 2000,\n    \"currency\": \"usd\",\n    \"tenantId\": \"test-tenant-456\"\n  },\n  \"metadata\": {\n    \"source\": \"postman-test\",\n    \"testCase\": \"application-status-update\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/test/publish-event",
+              "host": ["{{baseUrl}}"],
+              "path": ["test", "publish-event"]
+            }
+          }
+        },
+        {
+          "name": "Publish Payment Received",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"payment.received\",\n  \"data\": {\n    \"paymentId\": \"pay_test_123\",\n    \"amount\": 1000,\n    \"currency\": \"usd\",\n    \"memberId\": \"member_123\",\n    \"tenantId\": \"test-tenant-456\"\n  },\n  \"metadata\": {\n    \"source\": \"postman-test\",\n    \"testCase\": \"payment-received\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/test/publish-event",
+              "host": ["{{baseUrl}}"],
+              "path": ["test", "publish-event"]
+            }
+          }
+        },
+        {
+          "name": "Publish Journal Created",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"journal.created\",\n  \"data\": {\n    \"journalId\": \"journal_test_123\",\n    \"amount\": 500,\n    \"description\": \"Test journal entry\",\n    \"tenantId\": \"test-tenant-456\"\n  },\n  \"metadata\": {\n    \"source\": \"postman-test\",\n    \"testCase\": \"journal-created\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/test/publish-event",
+              "host": ["{{baseUrl}}"],
+              "path": ["test", "publish-event"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    }
+  ]
+}

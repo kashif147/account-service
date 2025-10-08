@@ -99,7 +99,7 @@ logWarn("Rate limit exceeded", { ip: req.ip });
 RabbitMQ integration for asynchronous messaging:
 
 ```javascript
-import { publishDomainEvent, EVENT_TYPES } from "../infra/rabbit/events.js";
+import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
 await publishDomainEvent(
   EVENT_TYPES.USER_CREATED,
