@@ -243,7 +243,6 @@ export async function reconcileStripeEvent(input, ctx) {
       purpose: "subscriptionFee",
       mode: "stripe",
       "audit.createdBy": ctx.userId || ctx.memberId || "system",
-      "audit.updatedBy": ctx.userId || ctx.memberId || "system",
     },
   };
   const options = { upsert: true, new: true, setDefaultsOnInsert: true };
