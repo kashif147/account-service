@@ -10,7 +10,11 @@ export async function initRabbit() {
   const url = process.env.RABBIT_URL || "amqp://localhost:5672";
   connection = await amqplib.connect(url);
   channel = await connection.createChannel();
-  await channel.assertExchange("domain.events", "topic", { durable: true });
+  const exchange =
+    process.env.RABBITMQ_EXCHANGE ||
+    process.env.RABBIT_EXCHANGE ||
+    "accounts.events";
+  await channel.assertExchange(exchange, "topic", { durable: true });
 
   logger.info("RabbitMQ publisher initialized");
 
@@ -46,8 +50,12 @@ export async function publishEvent(routingKey, payload, options = {}) {
       ...options,
     };
 
+    const exchange =
+      process.env.RABBITMQ_EXCHANGE ||
+      process.env.RABBIT_EXCHANGE ||
+      "accounts.events";
     const success = channel.publish(
-      "domain.events",
+      exchange,
       routingKey,
       Buffer.from(JSON.stringify(payload)),
       messageOptions
