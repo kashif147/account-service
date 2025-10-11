@@ -13,6 +13,9 @@ import { APPLICATION_EVENTS, handleApplicationEvent } from "./events/index.js";
 // Re-export for convenience
 export { APPLICATION_EVENTS };
 
+// Export EVENT_TYPES as alias for APPLICATION_EVENTS (for backward compatibility)
+export const EVENT_TYPES = APPLICATION_EVENTS;
+
 // Initialize event system
 export async function initEventSystem() {
   try {
