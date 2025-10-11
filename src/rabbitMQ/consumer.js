@@ -9,6 +9,11 @@ export async function initConsumer() {
   if (connection) return;
 
   const url = process.env.RABBIT_URL || "amqp://localhost:5672";
+  logger.info(
+    { url: url.replace(/\/\/.*@/, "//***@") },
+    "Connecting to RabbitMQ"
+  );
+
   connection = await amqplib.connect(url);
   channel = await connection.createChannel();
 
@@ -37,21 +42,29 @@ export async function initConsumer() {
   });
 }
 
-export async function createQueue(queueName, routingKeys = []) {
+export async function createQueue(queueName, exchangeName, routingKeys = []) {
   if (!channel) await initConsumer();
 
+  // Assert the exchange
+  await channel.assertExchange(exchangeName, "topic", { durable: true });
   await channel.assertQueue(queueName, { durable: true });
 
   // Bind to exchange with routing keys
   for (const routingKey of routingKeys) {
-    await channel.bindQueue(queueName, "domain.events", routingKey);
+    await channel.bindQueue(queueName, exchangeName, routingKey);
+    logger.info(
+      { queue: queueName, exchange: exchangeName, routingKey },
+      "Queue bound"
+    );
   }
 
-  logger.info({ queueName, routingKeys }, "Queue created and bound");
+  logger.info({ queueName, exchangeName }, "Queue created");
 }
 
 export async function consumeQueue(queueName, handler) {
   if (!channel) await initConsumer();
+
+  logger.info({ queueName }, "Starting to consume queue");
 
   const consumer = await channel.consume(queueName, async (msg) => {
     if (!msg) return;
@@ -59,17 +72,34 @@ export async function consumeQueue(queueName, handler) {
     try {
       const payload = JSON.parse(msg.content.toString());
       const routingKey = msg.fields.routingKey;
+      const exchange = msg.fields.exchange;
 
-      logger.debug(
-        { queueName, routingKey, eventId: payload.eventId },
-        "Processing message"
+      logger.info(
+        {
+          queueName,
+          exchange,
+          routingKey,
+          eventId: payload.eventId,
+          eventType: payload.eventType,
+        },
+        "Message received"
       );
 
       await handler(payload, routingKey, msg);
       channel.ack(msg);
+
+      logger.info(
+        { queueName, routingKey, eventId: payload.eventId },
+        "Message processed successfully"
+      );
     } catch (error) {
       logger.error(
-        { queueName, error: error.message },
+        {
+          queueName,
+          routingKey: msg.fields.routingKey,
+          error: error.message,
+          stack: error.stack,
+        },
         "Error processing message"
       );
       channel.nack(msg, false, false); // Don't requeue on error

@@ -8,17 +8,10 @@ import {
 import logger from "../config/logger.js";
 
 // Import event types and handlers from separate event files
-import {
-  EVENT_TYPES,
-  QUEUES,
-  handleJournalEvent,
-  handleBalanceEvent,
-  handleMemberEvent,
-  handleReportEvent,
-} from "./events/index.js";
+import { APPLICATION_EVENTS, handleApplicationEvent } from "./events/index.js";
 
 // Re-export for convenience
-export { EVENT_TYPES, QUEUES };
+export { APPLICATION_EVENTS };
 
 // Initialize event system
 export async function initEventSystem() {
@@ -65,31 +58,19 @@ export async function publishDomainEvent(eventType, data, metadata = {}) {
 // Set up consumers for different event types
 export async function setupConsumers() {
   try {
-    // Member sync queue
-    await createQueue(QUEUES.MEMBER_SYNC, ["member.*"]);
-    await consumeQueue(QUEUES.MEMBER_SYNC, handleMemberEvent);
+    logger.info("Setting up RabbitMQ consumers...");
 
-    // Journal processing queue
-    await createQueue(QUEUES.JOURNAL_PROCESSING, ["journal.*"]);
-    await consumeQueue(QUEUES.JOURNAL_PROCESSING, handleJournalEvent);
+    // TODO: Configure consumers when account-service needs to consume events from other services
+    // Example:
+    // await createQueue("account-service.portal.events", "portal.events", ["portal.event.*"]);
+    // await consumeQueue("account-service.portal.events", handlePortalEvent);
 
-    // Balance updates queue
-    await createQueue(QUEUES.BALANCE_UPDATES, ["balance.*"]);
-    await consumeQueue(QUEUES.BALANCE_UPDATES, handleBalanceEvent);
-
-    // Report generation queue
-    await createQueue(QUEUES.REPORT_GENERATION, ["report.*"]);
-    await consumeQueue(QUEUES.REPORT_GENERATION, handleReportEvent);
-
-    logger.info("All consumers set up successfully");
+    logger.info("All consumers set up successfully (none configured yet)");
   } catch (error) {
     logger.error({ error: error.message }, "Failed to set up consumers");
     throw error;
   }
 }
-
-// Event handlers are now imported from individual event files
-// This keeps the main events.js file clean and focused on system management
 
 // Utility functions
 function generateEventId() {

@@ -1,6 +1,6 @@
 // Application Events
 export const APPLICATION_EVENTS = {
-  STATUS_UPDATED: "application.status.updated",
+  STATUS_UPDATED: "application.status.submitted",
 };
 
 // Application event handlers

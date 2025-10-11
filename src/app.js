@@ -25,19 +25,25 @@ import {
   initEventSystem,
   setupConsumers,
   shutdownEventSystem,
-} from "./rabbitMQ/events.js";
+} from "./rabbitMQ/index.js";
 
 const app = express();
 
-// Initialize event system
+// Initialize event system - Now using middleware
 let eventSystemInitialized = false;
 
 async function initializeEventSystem() {
+  if (!process.env.RABBIT_URL) {
+    logger.warn("RABBIT_URL not configured, skipping RabbitMQ initialization");
+    return;
+  }
+
   try {
+    logger.info("RabbitMQ URL configured, initializing with middleware...");
     await initEventSystem();
     await setupConsumers();
     eventSystemInitialized = true;
-    logger.info("Event system initialized successfully");
+    logger.info("Event system initialized successfully with middleware");
   } catch (error) {
     logger.warn(
       { error: error.message },
@@ -48,6 +54,23 @@ async function initializeEventSystem() {
 
 // Initialize event system on startup
 initializeEventSystem();
+
+// Graceful shutdown
+process.on("SIGTERM", async () => {
+  logger.info("SIGTERM received, shutting down gracefully...");
+  if (eventSystemInitialized) {
+    await shutdownEventSystem();
+  }
+  process.exit(0);
+});
+
+process.on("SIGINT", async () => {
+  logger.info("SIGINT received, shutting down gracefully...");
+  if (eventSystemInitialized) {
+    await shutdownEventSystem();
+  }
+  process.exit(0);
+});
 
 // logging first
 app.use(pinoHttp({ logger }));
