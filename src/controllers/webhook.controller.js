@@ -62,41 +62,64 @@ async function processStripeEvent(event) {
       };
 
       // Publish portal event to update application status to submitted
-      try {
-        await publishDomainEvent(
-          APPLICATION_EVENTS.STATUS_UPDATED,
-          {
-            applicationId: metadata.applicationId || metadata.application_id,
-            status: "submitted",
-            paymentIntentId: pi.id,
-            amount: pi.amount,
-            currency: pi.currency,
-            tenantId,
-          },
-          {
-            source: "stripe-webhook",
-            eventId: event.id,
-          }
-        );
+      // Only publish if there's an applicationId and no memberId in metadata
+      const applicationId = metadata.applicationId || metadata.application_id;
+      const memberId = metadata.memberId || metadata.member_id;
+
+      if (applicationId && !memberId) {
+        try {
+          await publishDomainEvent(
+            APPLICATION_EVENTS.STATUS_UPDATED,
+            {
+              applicationId,
+              status: "submitted",
+              paymentIntentId: pi.id,
+              amount: pi.amount,
+              currency: pi.currency,
+              tenantId,
+            },
+            {
+              source: "stripe-webhook",
+              eventId: event.id,
+            }
+          );
+          logger.info(
+            {
+              applicationId,
+              paymentIntentId: pi.id,
+              tenantId,
+            },
+            "Published application status update event to portal-service"
+          );
+        } catch (error) {
+          logger.error(
+            {
+              error: error.message,
+              applicationId,
+              paymentIntentId: pi.id,
+              tenantId,
+            },
+            "Failed to publish application status update event"
+          );
+          // Continue processing even if event publishing fails
+        }
+      } else if (memberId) {
         logger.info(
           {
-            applicationId: metadata.applicationId || metadata.application_id,
+            memberId,
             paymentIntentId: pi.id,
             tenantId,
           },
-          "Published application status update event to portal-service"
+          "Skipping portal event publishing for member payment (memberId present)"
         );
-      } catch (error) {
-        logger.error(
+      } else {
+        logger.info(
           {
-            error: error.message,
-            applicationId: metadata.applicationId || metadata.application_id,
             paymentIntentId: pi.id,
             tenantId,
           },
-          "Failed to publish application status update event"
+          "Skipping portal event publishing - no applicationId found in metadata"
         );
-        // Continue processing even if event publishing fails
       }
       break;
     }
