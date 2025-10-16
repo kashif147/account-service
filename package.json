@@ -13,6 +13,7 @@
     "test:rabbitmq": "node scripts/test-rabbitmq-events.js"
   },
   "dependencies": {
+    "@membership/policy-middleware": "github:kashif147/policy-middleware",
     "@membership/shared-constants": "github:kashif147/membership-shared-constants#v1.0.0",
     "@projectShell/rabbitmq-middleware": "github:kashif147/rabbitmq-middleware#9822b3a4eb39908f118a41044d154c16d49f0ee4",
     "amqplib": "^0.10.4",
