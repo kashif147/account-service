@@ -3,13 +3,7 @@
  * Uses shared policy middleware package
  */
 
-// Use createRequire to import CommonJS modules in ESM
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-
-const {
-  createDefaultPolicyMiddleware,
-} = require("@membership/policy-middleware");
+import { createDefaultPolicyMiddleware } from "@membership/policy-middleware";
 
 // Create default policy middleware instance
 const defaultPolicyMiddleware = createDefaultPolicyMiddleware(
