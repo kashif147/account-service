@@ -31,7 +31,12 @@ export async function getPaymentByStripeId(req, res, next) {
       req.params.paymentIntentId,
       req.ctx
     );
-    if (!doc) return res.notFound("Payment not found");
+    if (!doc) {
+      return res.status(200).json({
+        data: null,
+        message: "Not found"
+      });
+    }
     res.success(doc);
   } catch (e) {
     next(e);
