@@ -11,6 +11,10 @@ import logger from "../config/logger.js";
 
 // Import local event definitions
 import { APPLICATION_EVENTS, handleApplicationEvent } from "./events/index.js";
+import {
+  handleCrmUserCreated,
+  handleCrmUserUpdated,
+} from "./listeners/user.crm.listener.js";
 
 // Re-export for convenience
 export { APPLICATION_EVENTS };
@@ -62,15 +66,36 @@ export async function setupConsumers() {
   try {
     logger.info("Setting up RabbitMQ consumers...");
 
-    // TODO: Configure consumers when account-service needs to consume events from other services
-    // Example:
-    // const QUEUE = "accounts.portal.events";
-    // await consumer.createQueue(QUEUE, { durable: true, messageTtl: 3600000 });
-    // await consumer.bindQueue(QUEUE, "portal.events", ["portal.event.*"]);
-    // consumer.registerHandler("portal.event.type", handlePortalEvent);
-    // await consumer.consume(QUEUE);
+    // CRM user events queue (user.events exchange)
+    const USER_QUEUE = "accounts.user.events";
+    logger.info("Creating CRM user events queue...", {
+      queue: USER_QUEUE,
+      exchange: "user.events",
+      routingKeys: ["user.crm.created.v1", "user.crm.updated.v1"],
+    });
 
-    logger.info("All consumers set up successfully (none configured yet)");
+    await consumer.createQueue(USER_QUEUE, {
+      durable: true,
+      messageTtl: 3600000, // 1 hour
+    });
+
+    await consumer.bindQueue(USER_QUEUE, "user.events", [
+      "user.crm.created.v1",
+      "user.crm.updated.v1",
+    ]);
+
+    consumer.registerHandler("user.crm.created.v1", async (payload, context) => {
+      await handleCrmUserCreated(payload);
+    });
+
+    consumer.registerHandler("user.crm.updated.v1", async (payload, context) => {
+      await handleCrmUserUpdated(payload);
+    });
+
+    await consumer.consume(USER_QUEUE, { prefetch: 10 });
+    logger.info("CRM user events consumer ready", { queue: USER_QUEUE });
+
+    logger.info("All consumers set up successfully");
   } catch (error) {
     logger.error({ error: error.message }, "Failed to set up consumers");
     throw error;
