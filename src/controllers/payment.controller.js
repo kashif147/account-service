@@ -6,6 +6,7 @@ import {
   recordExternal,
   createRefund,
 } from "../services/payments.service.js";
+import { AppError } from "../errors/AppError.js";
 
 export async function createPaymentIntent(req, res, next) {
   try {
@@ -32,10 +33,7 @@ export async function getPaymentByStripeId(req, res, next) {
       req.ctx
     );
     if (!doc) {
-      return res.status(200).json({
-        data: null,
-        message: "Not found"
-      });
+      return next(AppError.notFound("Payment not found"));
     }
     res.success(doc);
   } catch (e) {

@@ -33,9 +33,12 @@ function mapStripeStatusToDomain(status) {
 }
 
 async function buildIntentResponse(payment, stripe) {
-  let clientSecret;
-  let checkoutUrl;
-  if (payment?.stripe?.paymentIntentId) {
+  // Use stored values if available, otherwise fetch from Stripe (fallback)
+  let clientSecret = payment?.stripe?.clientSecret;
+  let checkoutUrl = payment?.stripe?.checkoutUrl;
+  
+  // Only fetch from Stripe if stored values are missing (backward compatibility)
+  if (!clientSecret && payment?.stripe?.paymentIntentId) {
     try {
       const pi = await stripe.paymentIntents.retrieve(
         payment.stripe.paymentIntentId
@@ -43,7 +46,7 @@ async function buildIntentResponse(payment, stripe) {
       clientSecret = pi?.client_secret;
     } catch (_) {}
   }
-  if (payment?.stripe?.checkoutSessionId) {
+  if (!checkoutUrl && payment?.stripe?.checkoutSessionId) {
     try {
       const cs = await stripe.checkout.sessions.retrieve(
         payment.stripe.checkoutSessionId
@@ -72,7 +75,7 @@ export async function createIntent(input, ctx) {
     const existingByIdem = await Payment.findOne({
       tenantId: ctx.tenantId,
       idempotencyKey: ctx.idempotencyKey,
-    });
+    }).select("stripe status _id").lean();
     if (existingByIdem) {
       return await buildIntentResponse(existingByIdem, stripe);
     }
@@ -110,7 +113,10 @@ export async function createIntent(input, ctx) {
     );
     stripeResult = session;
     status = "requires_action";
-    stripeIds = { checkoutSessionId: session.id };
+    stripeIds = {
+      checkoutSessionId: session.id,
+      checkoutUrl: session.url,
+    };
   } else {
     const intent = await stripe.paymentIntents.create(
       {
@@ -123,18 +129,10 @@ export async function createIntent(input, ctx) {
     );
     stripeResult = intent;
     status = mapStripeStatusToDomain(intent.status) || "requires_action";
-    stripeIds = { paymentIntentId: intent.id };
-  }
-
-  // Check for existing payment with the same Stripe payment intent ID
-  if (stripeIds.paymentIntentId) {
-    const existingByPi = await Payment.findOne({
-      tenantId: ctx.tenantId,
-      "stripe.paymentIntentId": stripeIds.paymentIntentId,
-    });
-    if (existingByPi) {
-      return await buildIntentResponse(existingByPi, stripe);
-    }
+    stripeIds = {
+      paymentIntentId: intent.id,
+      clientSecret: intent.client_secret,
+    };
   }
 
   try {
@@ -167,8 +165,8 @@ export async function createIntent(input, ctx) {
     return {
       paymentIntentId: stripeIds.paymentIntentId,
       checkoutSessionId: stripeIds.checkoutSessionId,
-      clientSecret: stripeResult.client_secret,
-      checkoutUrl: stripeResult.url,
+      clientSecret: stripeIds.clientSecret || stripeResult.client_secret,
+      checkoutUrl: stripeIds.checkoutUrl || stripeResult.url,
       status,
       id: payment._id.toString(),
     };
@@ -180,7 +178,7 @@ export async function createIntent(input, ctx) {
         const existing = await Payment.findOne({
           tenantId: ctx.tenantId,
           idempotencyKey: ctx.idempotencyKey,
-        });
+        }).select("stripe status _id").lean();
         if (existing) {
           return await buildIntentResponse(existing, stripe);
         }
@@ -191,7 +189,7 @@ export async function createIntent(input, ctx) {
         const existingByPi = await Payment.findOne({
           tenantId: ctx.tenantId,
           "stripe.paymentIntentId": stripeIds.paymentIntentId,
-        });
+        }).select("stripe status _id").lean();
         if (existingByPi) {
           return await buildIntentResponse(existingByPi, stripe);
         }

@@ -10,6 +10,8 @@ const StripeSubSchema = new Schema(
     chargeId: { type: String },
     customerId: { type: String },
     paymentMethodId: { type: String },
+    clientSecret: { type: String },
+    checkoutUrl: { type: String },
   },
   { _id: false }
 );
