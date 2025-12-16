@@ -1,0 +1,31 @@
+name: Deploy Accounts Service
+
+on:
+  push:
+    branches:
+      - gateway
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Sync code
+        run: |
+          rsync -avz --delete \
+          -e "ssh -o StrictHostKeyChecking=no" ./ \
+          ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/home/deploy/membership-platform/accounts-service/
+
+      - name: Build and restart accounts-service
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+            cd /home/deploy/membership-platform/accounts-service
+            docker compose build accounts-service
+            docker compose up -d accounts-service
+          EOF
