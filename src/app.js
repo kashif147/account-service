@@ -12,7 +12,7 @@ if (!process.env.APPINSIGHTS_INSTRUMENTATIONKEY || process.env.APPINSIGHTS_INSTR
     }
     return originalStderrWrite(chunk, encoding, callback);
   };
-  
+  //
   const originalConsoleWarn = console.warn;
   const originalConsoleError = console.error;
   
