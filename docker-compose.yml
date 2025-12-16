@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   accounts-service:
     build: .
@@ -8,9 +6,8 @@ services:
       - "4000:4000"
     restart: always
     networks:
-      - shared-net
+      - gateway_app-net
 
 networks:
-  shared-net:
+  gateway_app-net:
     external: true
-    name: gateway_app-net
