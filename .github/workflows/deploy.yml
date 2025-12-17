@@ -22,10 +22,10 @@ jobs:
           -e "ssh -o StrictHostKeyChecking=no" ./ \
           ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/home/deploy/membership-platform/accounts-service/
 
-      - name: Build and restart accounts-service
+      - name: Build and restart account-service
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
-            cd /home/deploy/membership-platform/accounts-service
-            docker compose build accounts-service
-            docker compose up -d accounts-service
+            cd /home/deploy/membership-platform/account-service
+            docker compose build account-service
+            docker compose up -d account-service
           EOF
