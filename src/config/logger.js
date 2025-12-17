@@ -1,9 +1,15 @@
 import pino from "pino";
+import pretty from "pino-pretty";
 
-export default pino({
-  level: process.env.LOG_LEVEL || "info",
-  transport:
-    (process.env.NODE_ENV || "development") === "development"
-      ? { target: "pino-pretty", options: { singleLine: true } }
-      : undefined,
-});
+const stream =
+  process.env.NODE_ENV === "production"
+    ? undefined
+    : pretty({
+        colorize: true,
+        translateTime: "SYS:standard",
+        ignore: "pid,hostname",
+      });
+
+const logger = pino({}, stream);
+
+export default logger;
