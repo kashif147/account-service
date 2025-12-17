@@ -1,7 +1,7 @@
 services:
   accounts-service:
     build: .
-    container_name: accounts-service
+    container_name: account-service
     ports:
       - "4000:4000"
     restart: always
