@@ -1,5 +1,5 @@
 services:
-  accounts-service:
+  account-service:
     build: .
     container_name: account-service
     ports:
