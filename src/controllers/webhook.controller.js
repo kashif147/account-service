@@ -1,8 +1,7 @@
 // src/controllers/webhook.controller.js
 import stripe from "../lib/stripe.js";
 import { reconcileStripeEvent } from "../services/payments.service.js";
-// import { publishDomainEvent } from "../rabbitMQ/events.js";
-// import { APPLICATION_EVENTS } from "../rabbitMQ/events/application.events.js";
+import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
 
 export async function handleStripeWebhook(req, res) {
