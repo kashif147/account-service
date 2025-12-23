@@ -129,12 +129,24 @@ app.use(pinoHttp({ logger }));
 // app.use(corsMiddleware);
 app.use(securityHeaders);
 app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
-app.use(compression());
 
-// body
+// Capture raw body for Stripe webhook BEFORE compression and JSON parsing
+// Stripe requires raw body buffer for signature verification
+app.use("/api/webhook/stripe", express.raw({ type: "application/json" }));
+
+// Compression - exclude webhook routes to preserve raw body integrity
+const compressionMiddleware = compression({
+  filter: (req, res) => {
+    // Skip compression for webhook routes to preserve raw body
+    return !req.path.startsWith("/api/webhook");
+  },
+});
+app.use(compressionMiddleware);
+
 // Mount webhooks BEFORE JSON parser to preserve raw body
 app.use("/api/webhook", webhookRoutes);
 
+// JSON body parser for all other routes
 app.use(bodyParser.json({ limit: "1mb" }));
 
 // request id for correlation

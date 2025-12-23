@@ -7,10 +7,14 @@ import logger from "../config/logger.js";
 
 export async function handleStripeWebhook(req, res) {
   const sig = req.headers["stripe-signature"];
+  
+  // Ensure body is a Buffer (raw body from express.raw())
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
+  
   let event;
   try {
     event = stripe.webhooks.constructEvent(
-      req.body,
+      rawBody,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
