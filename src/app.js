@@ -79,6 +79,9 @@ import {
 
 const app = express();
 
+// Disable Express automatic ETag generation (304 responses)
+app.set("etag", false);
+
 // Initialize event system - Now using middleware
 let eventSystemInitialized = false;
 
