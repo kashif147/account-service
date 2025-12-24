@@ -97,5 +97,22 @@ export default function responseMiddleware(req, res, next) {
     return res.serverError(error.message, { originalError: error });
   };
 
+  // Standardized not found responses (200 OK instead of 404)
+  res.notFoundList = (message = "No records found") => {
+    res.status(200).json({
+      success: true,
+      data: [],
+      message,
+    });
+  };
+
+  res.notFoundRecord = (message = "Record not found") => {
+    res.status(200).json({
+      success: true,
+      data: null,
+      message,
+    });
+  };
+
   next();
 }

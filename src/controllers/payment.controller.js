@@ -33,7 +33,7 @@ export async function getPaymentByStripeId(req, res, next) {
       req.ctx
     );
     if (!doc) {
-      return next(AppError.notFound("Payment not found"));
+      return res.notFoundRecord("Payment not found");
     }
     res.success(doc);
   } catch (e) {
