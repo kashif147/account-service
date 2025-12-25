@@ -165,7 +165,9 @@ app.use(responseMiddleware);
 app.use(limiterGeneral);
 
 // health
-app.get("/health", (req, res) => res.success({ ok: true }));
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "UP" });
+});
 app.get("/ready", (req, res) => res.success({ ok: true }));
 
 // idempotency health check
