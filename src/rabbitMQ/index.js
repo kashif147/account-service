@@ -26,6 +26,8 @@ export async function initEventSystem() {
       url: process.env.RABBIT_URL,
       logger: logger,
       prefetch: 10,
+      connectionName: "account-service",
+      serviceName: "account-service",
     });
     logger.info("Event system initialized with middleware");
   } catch (error) {
@@ -84,13 +86,19 @@ export async function setupConsumers() {
       "user.crm.updated.v1",
     ]);
 
-    consumer.registerHandler("user.crm.created.v1", async (payload, context) => {
-      await handleCrmUserCreated(payload);
-    });
+    consumer.registerHandler(
+      "user.crm.created.v1",
+      async (payload, context) => {
+        await handleCrmUserCreated(payload);
+      }
+    );
 
-    consumer.registerHandler("user.crm.updated.v1", async (payload, context) => {
-      await handleCrmUserUpdated(payload);
-    });
+    consumer.registerHandler(
+      "user.crm.updated.v1",
+      async (payload, context) => {
+        await handleCrmUserUpdated(payload);
+      }
+    );
 
     await consumer.consume(USER_QUEUE, { prefetch: 10 });
     logger.info("CRM user events consumer ready", { queue: USER_QUEUE });

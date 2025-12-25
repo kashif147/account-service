@@ -213,18 +213,17 @@ app.get("/health/events", (req, res) => {
 // RabbitMQ health check with connection test
 app.get("/health/rabbitmq", async (req, res) => {
   try {
-    const { publishEvent } = await import("./rabbitMQ/publisher.js");
+    const { publishDomainEvent } = await import("./rabbitMQ/index.js");
 
-    // Test publishing a health check event
+    // Test publishing a health check event using middleware
     const testEvent = {
-      eventId: `health-check-${Date.now()}`,
-      eventType: "health.check",
-      timestamp: new Date().toISOString(),
-      data: { service: "account-service", check: "health" },
-      metadata: { source: "health-check" },
+      service: "account-service",
+      check: "health",
     };
 
-    const success = await publishEvent("health.check", testEvent);
+    const success = await publishDomainEvent("health.check", testEvent, {
+      source: "health-check",
+    });
 
     res.success({
       status: success ? "healthy" : "unhealthy",

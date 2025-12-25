@@ -15,7 +15,7 @@
   "dependencies": {
     "@membership/policy-middleware": "github:kashif147/policy-middleware#gateway",
     "@membership/shared-constants": "github:kashif147/membership-shared-constants#v1.0.0",
-    "@projectShell/rabbitmq-middleware": "github:kashif147/rabbitmq-middleware",
+    "@projectShell/rabbitmq-middleware": "github:kashif147/rabbitmq-middleware#gateway",
     "amqplib": "^0.10.9",
     "compression": "^1.7.4",
     "cors": "^2.8.5",
