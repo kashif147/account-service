@@ -7,6 +7,7 @@ import {
   writeOffRules,
   changeCategoryRules,
   listJournalsRules,
+  listStripePaymentsRules,
   claimApplicationCreditRules,
 } from "../validators/journal.validators.js";
 import {
@@ -14,6 +15,7 @@ import {
   creditNote,
   receipt,
   listJournals,
+  listStripePayments,
   claimApplicationCredit,
   writeOff,
   changeCategory,
@@ -32,6 +34,15 @@ router.get(
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listJournalsRules,
   listJournals
+);
+
+// Stripe receipts - list by settlement status
+router.get(
+  "/stripe-payments",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
+  listStripePaymentsRules,
+  listStripePayments
 );
 
 // POST operations with idempotency for data consistency

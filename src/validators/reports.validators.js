@@ -11,3 +11,14 @@ export const yearEndRules = [
 export const balancesAsOfRules = [
   query("asOf").isISO8601().withMessage("asOf must be YYYY-MM-DD")
 ];
+
+export const memberNetBalanceRules = [
+  query("year")
+    .optional()
+    .isInt({ min: 2000, max: 2100 })
+    .withMessage("year must be YYYY")
+];
+
+export const memberLedgerRules = [
+  query("accountCode").optional().isString().notEmpty()
+];

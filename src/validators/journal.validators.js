@@ -4,6 +4,7 @@ const isBucket = ["arrears", "current", "advance"];
 const isClearing = ["1210", "1220", "1230", "1240", "1250"];
 const isAdjSubType = ["prorata", "fee-increase-credit", "downgrade", "discount", "credit-note", "writeoff"];
 const isProvider = ["stripe"]; // extend if you add others
+const isSettlementStatus = ["PENDING", "SETTLED", "ALL"];
 
 export const invoiceRules = [
   body("date").isISO8601().withMessage("date must be ISO (YYYY-MM-DD)"),
@@ -73,6 +74,14 @@ export const listJournalsRules = [
   query("to").optional().isISO8601(),
   query("docType").optional().isString(),
   query("memberId").optional().isString(),
+  query("limit").optional().isInt({ min: 1, max: 500 }),
+  query("skip").optional().isInt({ min: 0 })
+];
+
+export const listStripePaymentsRules = [
+  query("from").optional().isISO8601(),
+  query("to").optional().isISO8601(),
+  query("status").optional().isIn(isSettlementStatus),
   query("limit").optional().isInt({ min: 1, max: 500 }),
   query("skip").optional().isInt({ min: 0 })
 ];

@@ -1,6 +1,7 @@
 // src/controllers/journal.controller.js
 import CoA from "../models/coa.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
+import MaterializedBalance from "../models/materializedBalance.model.js";
 import dayjs from "dayjs";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
@@ -37,6 +38,20 @@ async function enrichLines(lines) {
       _a: a, // keep the CoA row handy for guardrails if needed
     };
   });
+}
+
+function rollupMemberBalances({ date, entries }) {
+  const year = new Date(date).getFullYear();
+  const totals = new Map();
+
+  for (const e of entries) {
+    if (!e.memberId || !e.periodBucket) continue;
+    const signed = e.dc === "D" ? e.amount : -e.amount;
+    const key = `${e.memberId}|${e.accountCode}|${e.periodBucket}|${year}`;
+    totals.set(key, (totals.get(key) || 0) + signed);
+  }
+
+  return { year, totals };
 }
 
 export async function postBalancedJournal({
@@ -98,6 +113,25 @@ export async function postBalancedJournal({
     memo,
     entries,
   });
+
+  const { year, totals } = rollupMemberBalances({ date, entries });
+  if (totals.size) {
+    const ops = [];
+    for (const [key, amount] of totals.entries()) {
+      const [memberId, accountCode, bucket] = key.split("|");
+      ops.push({
+        updateOne: {
+          filter: { memberId, accountCode, bucket, year },
+          update: {
+            $inc: { amount },
+            $set: { updatedAt: new Date() },
+          },
+          upsert: true,
+        },
+      });
+    }
+    await MaterializedBalance.bulkWrite(ops, { ordered: false });
+  }
 
   // Publish journal created event
   await publishDomainEvent(
@@ -538,6 +572,56 @@ export async function listJournals(req, res, next) {
     }
     if (docType) query.docType = docType;
     if (memberId) query["entries.memberId"] = memberId;
+
+    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const offset = Math.max(parseInt(skip, 10) || 0, 0);
+
+    const [items, total] = await Promise.all([
+      GLTransaction.find(query)
+        .sort({ date: -1, createdAt: -1 })
+        .skip(offset)
+        .limit(pageSize)
+        .lean(),
+      GLTransaction.countDocuments(query),
+    ]);
+
+    res.success({
+      total,
+      skip: offset,
+      limit: pageSize,
+      items,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// List Stripe receipts with settlement status filtering
+/**
+ * GET /api/journal/stripe-payments
+ * Query params:
+ *  - from, to: ISO dates
+ *  - status: PENDING | SETTLED | ALL (default: PENDING)
+ *  - skip, limit: pagination (defaults: 0, 50; max limit 200)
+ */
+export async function listStripePayments(req, res, next) {
+  try {
+    const { from, to, status = "PENDING", limit = 50, skip = 0 } = req.query;
+
+    const query = {
+      docType: "Receipt",
+      "settlement.provider": "Stripe",
+    };
+
+    if (from || to) {
+      query.date = {};
+      if (from) query.date.$gte = new Date(from);
+      if (to) query.date.$lte = new Date(to);
+    }
+
+    if (status && status !== "ALL") {
+      query["settlement.status"] = status;
+    }
 
     const pageSize = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(skip, 10) || 0, 0);

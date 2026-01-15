@@ -5,8 +5,8 @@ import { jest } from "@jest/globals";
 process.env.ACCOUNTS_API_KEY = process.env.ACCOUNTS_API_KEY || "test-key";
 
 // Mock Stripe client before importing app/services
-await jest.unstable_mockModule("../lib/stripe.js", () => ({
-  getStripe: () => ({
+await jest.unstable_mockModule("../lib/stripe.js", () => {
+  const stripeMock = {
     paymentIntents: {
       create: async () => ({
         id: "pi_mock_1",
@@ -22,8 +22,12 @@ await jest.unstable_mockModule("../lib/stripe.js", () => ({
     refunds: {
       create: async () => ({ id: "re_mock_1", charge: "ch_mock_1" }),
     },
-  }),
-}));
+  };
+  return {
+    default: stripeMock,
+    getStripe: () => stripeMock,
+  };
+});
 
 const { default: app } = await import("../app.js");
 const { default: Payment } = await import("../models/payment.model.js");
@@ -32,7 +36,6 @@ const { default: Refund } = await import("../models/refund.model.js");
 const headers = {
   "x-tenant-id": "demo-tenant",
   "x-api-key": process.env.ACCOUNTS_API_KEY,
-  "x-idempotency-key": "demo-tenant:member-123:1690000000000",
 };
 
 describe("Payments API", () => {

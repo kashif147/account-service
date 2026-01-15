@@ -5,11 +5,15 @@ import {
   balancesSnapshot,
   yearEnd,
   balancesAsOf,
+  memberNetBalance,
+  memberLedger,
 } from "../controllers/reports.controller.js";
 import {
   monthEndRules,
   yearEndRules,
   balancesAsOfRules,
+  memberNetBalanceRules,
+  memberLedgerRules,
 } from "../validators/reports.validators.js";
 import validate from "../middlewares/validate.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
@@ -23,6 +27,24 @@ router.get(
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberStatement
+);
+
+router.get(
+  "/member/:memberId/net-balance",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  memberNetBalanceRules,
+  validate,
+  memberNetBalance
+);
+
+router.get(
+  "/member/:memberId/ledger",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  memberLedgerRules,
+  validate,
+  memberLedger
 );
 
 // Balances snapshot - consolidated single route

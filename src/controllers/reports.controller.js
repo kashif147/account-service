@@ -253,6 +253,63 @@ export async function balancesAsOf(req, res, next) {
   }
 }
 
+export async function memberNetBalance(req, res, next) {
+  try {
+    const { memberId } = req.params;
+    const { year } = req.query;
+    const query = { memberId };
+    const y = year ? parseInt(year, 10) : new Date().getFullYear();
+    if (Number.isNaN(y)) throw AppError.badRequest("year must be YYYY");
+    query.year = y;
+
+    const rows = await MatBal.find(query).lean();
+    let net = 0;
+    const byAccount = {};
+    const byBucket = {};
+
+    for (const r of rows) {
+      net += r.amount;
+      byAccount[r.accountCode] = (byAccount[r.accountCode] || 0) + r.amount;
+      const key = `${r.accountCode}:${r.bucket}`;
+      byBucket[key] = (byBucket[key] || 0) + r.amount;
+    }
+
+    res.success({
+      memberId,
+      year: y,
+      net: Number(net.toFixed(2)),
+      accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
+        accountCode,
+        amount: Number(amount.toFixed(2)),
+      })),
+      buckets: Object.entries(byBucket).map(([key, amount]) => {
+        const [accountCode, bucket] = key.split(":");
+        return { accountCode, bucket, amount: Number(amount.toFixed(2)) };
+      }),
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function memberLedger(req, res, next) {
+  try {
+    const { memberId } = req.params;
+    const { accountCode } = req.query;
+
+    const q = { "entries.memberId": memberId };
+    if (accountCode) q["entries.accountCode"] = accountCode;
+
+    const items = await GL.find(q)
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
+
+    res.success({ memberId, items });
+  } catch (e) {
+    next(e);
+  }
+}
+
 export async function monthEnd(req, res, next) {
   try {
     const { period, lock, notes } = req.query; // YYYY-MM

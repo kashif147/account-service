@@ -1,0 +1,101 @@
+{
+  "info": {
+    "name": "Account Service - Custom Endpoints",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000/api" },
+    { "key": "token", "value": "" },
+    { "key": "memberId", "value": "MEMBER123" }
+  ],
+  "item": [
+    {
+      "name": "Stripe Payments - Business (ALL)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/journal/stripe-payments?status=ALL",
+          "host": ["{{baseUrl}}"],
+          "path": ["journal", "stripe-payments"],
+          "query": [{ "key": "status", "value": "ALL" }]
+        }
+      }
+    },
+    {
+      "name": "Stripe Payments - Clearing (PENDING)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/journal/stripe-payments",
+          "host": ["{{baseUrl}}"],
+          "path": ["journal", "stripe-payments"]
+        }
+      }
+    },
+    {
+      "name": "Stripe Payments - History (SETTLED)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/journal/stripe-payments?status=SETTLED",
+          "host": ["{{baseUrl}}"],
+          "path": ["journal", "stripe-payments"],
+          "query": [{ "key": "status", "value": "SETTLED" }]
+        }
+      }
+    },
+    {
+      "name": "Member Net Balance",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reports/member/{{memberId}}/net-balance?year=2026",
+          "host": ["{{baseUrl}}"],
+          "path": ["reports", "member", "{{memberId}}", "net-balance"],
+          "query": [{ "key": "year", "value": "2026" }]
+        }
+      }
+    },
+    {
+      "name": "Member Ledger",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reports/member/{{memberId}}/ledger",
+          "host": ["{{baseUrl}}"],
+          "path": ["reports", "member", "{{memberId}}", "ledger"]
+        }
+      }
+    },
+    {
+      "name": "Member Ledger (Filtered by accountCode)",
+      "request": {
+        "method": "GET",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/reports/member/{{memberId}}/ledger?accountCode=1400",
+          "host": ["{{baseUrl}}"],
+          "path": ["reports", "member", "{{memberId}}", "ledger"],
+          "query": [{ "key": "accountCode", "value": "1400" }]
+        }
+      }
+    }
+  ]
+}

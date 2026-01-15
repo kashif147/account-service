@@ -1,24 +1,45 @@
 import mongoose from "mongoose";
 
-const EntrySchema = new mongoose.Schema({
-  accountCode: { type: String, required: true },
-  dc:          { type: String, enum: ["D","C"], required: true },
-  amount:      { type: Number, required: true },
-  memberId:    { type: String},          // required for 1400/2020 lines
-  applicationId: { type: String },                     // used before memberId exists
-  periodBucket: { type: String, enum: ["arrears","current","advance"] },
-  revenueSubType: { type: String },                    // e.g., "fee"
-  adjSubType:     { type: String },                    // "prorata", "discount", etc.
-  categoryName:   { type: String }                     // for descriptions/reports
-}, { _id: false });
+const EntrySchema = new mongoose.Schema(
+  {
+    accountCode: { type: String, required: true },
+    dc: { type: String, enum: ["D", "C"], required: true },
+    amount: { type: Number, required: true },
+    memberId: { type: String }, // required for 1400/2020 lines
+    applicationId: { type: String }, // used before memberId exists
+    periodBucket: { type: String, enum: ["arrears", "current", "advance"] },
+    revenueSubType: { type: String }, // e.g., "fee"
+    adjSubType: { type: String }, // "prorata", "discount", etc.
+    categoryName: { type: String }, // for descriptions/reports
+  },
+  { _id: false }
+);
 
-const GLSchema = new mongoose.Schema({
-  date:     { type: Date, required: true },
-  docType:  { type: String, required: true }, // Invoice, CreditNote, Receipt, WriteOff, Claim, etc.
-  docNo:    { type: String, required: true, unique: true },
-  memo:     { type: String },
-  entries:  { type: [EntrySchema], validate: v => Array.isArray(v) && v.length >= 2 }
-}, { timestamps: true });
+const GLSchema = new mongoose.Schema(
+  {
+    date: { type: Date, required: true },
+    docType: { type: String, required: true }, // Invoice, CreditNote, Receipt, WriteOff, Claim, etc.
+    docNo: { type: String, required: true, unique: true },
+    memo: { type: String },
+    settlement: {
+      provider: { type: String }, // Stripe
+      payoutId: { type: String }, // Stripe payout id
+      status: {
+        type: String,
+        enum: ["PENDING", "SETTLED"],
+        default: "PENDING",
+      },
+      settledAt: { type: Date },
+      bankAccountCode: { type: String }, // 1010
+    },
+
+    entries: {
+      type: [EntrySchema],
+      validate: (v) => Array.isArray(v) && v.length >= 2,
+    },
+  },
+  { timestamps: true }
+);
 
 // Helpful compound indexes for reporting and lookups
 GLSchema.index({ "entries.memberId": 1, date: -1 });
