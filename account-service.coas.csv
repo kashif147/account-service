@@ -1,0 +1,23 @@
+code,description,type,isCash,isClearing,isMemberTracked,isRevenue,isContraRevenue,__v,createdAt,updatedAt
+1100,Cash,Asset,true,false,false,false,false,0,2025-09-04T21:36:26.105Z,2025-09-04T21:36:26.105Z
+1160,VAT recoverable on fees,Asset,false,false,false,false,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+1200,Bank,Asset,true,false,false,false,false,0,2025-09-04T21:36:26.108Z,2025-09-04T21:36:26.108Z
+1210,Undeposited cheques,Asset,false,true,false,false,false,0,2025-09-04T21:36:26.109Z,2025-09-04T21:36:26.109Z
+1220,Card gateway clearing,Asset,false,true,false,false,false,0,2025-09-04T21:36:26.109Z,2025-09-04T21:36:26.109Z
+1230,Salary deduction clearing,Asset,false,true,false,false,false,0,2025-09-04T21:36:26.109Z,2025-09-04T21:36:26.109Z
+1240,Standing order clearing,Asset,false,true,false,false,false,0,2025-09-04T21:36:26.109Z,2025-09-04T21:36:26.109Z
+1250,Direct debit clearing,Asset,false,true,false,false,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+1300,Product inventory,Asset,false,false,false,false,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+1400,Accounts receivable (Members),Asset,false,false,true,false,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+2020,Payment on Account (Member credits),Liability,false,false,true,false,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+4000,Subscription income – General All Grades,Income,false,false,false,true,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+4010,Subscription income – Short-term / Relief,Income,false,false,false,true,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+4040,Subscription income – Private nursing home,Income,false,false,false,true,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+4050,Subscription income – Affiliate members,Income,false,false,false,true,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+4060,Subscription income – Lecturing,Income,false,false,false,true,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+4070,Subscription income – Associate,Income,false,false,false,true,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+4080,Subscription income – Retired Associate,Income,false,false,false,true,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+4090,Subscription income – Students,Income,false,false,false,true,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+4900,"Credit Notes / Discounts (adjSubType: discount, prorata, fee-decrease, fee-increase-credit)",ContraIncome,false,false,false,false,true,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+5100,"Payment processing fees (e.g. Stripe, bank charges)",Expense,false,false,false,false,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+5200,Bad debt / Write-offs,Expense,false,false,false,false,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z

@@ -8,6 +8,7 @@ import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import {
   prorataFromJoinToYearEnd,
   yearBoundsFrom,
+  prorataForPeriod,
 } from "../helpers/prorata.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
@@ -126,7 +127,7 @@ export async function postBalancedJournal({
   return obj;
 }
 
-// Invoice → 1400 (AR) debit, income credit
+// Invoice → 1400 (Accounts receivable - Members) debit, income credit
 export async function invoice(req, res, next) {
   try {
     const {
@@ -365,7 +366,7 @@ export async function creditNote(req, res, next) {
   }
 }
 
-// // Receipt (unlinked money-in) → 12xx clearing debit, 2020 credit
+// Receipt (unlinked money-in) → 12xx clearing debit, 2020 (Payment on Account - Member credits) credit
 
 export async function receipt(req, res, next) {
   try {
@@ -395,14 +396,14 @@ export async function receipt(req, res, next) {
         amount,
         memberId: effectiveMemberId,
         periodBucket: bucket,
-      }, // Payment on Account
+      }, // Payment on Account - Member credits (2020)
     ];
 
     // Stripe fee and VAT (Ireland), applied against the clearing account
     if (provider === "stripe") {
       const { feeNoVat, feeVat, feeTotal } = stripeFeeBreakdown(amount);
-      lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Processing fee
-      lines.push({ accountCode: "1160", dc: "D", amount: feeVat }); // VAT recoverable
+      lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Payment processing fees
+      lines.push({ accountCode: "1160", dc: "D", amount: feeVat }); // VAT recoverable on fees
       lines.push({ accountCode: clearingCode, dc: "C", amount: feeTotal });
     }
 
@@ -419,7 +420,7 @@ export async function receipt(req, res, next) {
   }
 }
 
-// “claim credit” endpoint (transfer 2020 from app → member)
+// “claim credit” endpoint (transfer 2020 Payment on Account - Member credits from app → member)
 export async function claimApplicationCredit(req, res, next) {
   try {
     const {
@@ -436,7 +437,7 @@ export async function claimApplicationCredit(req, res, next) {
       });
     }
 
-    const appMember = applicationId;
+    const appMember = `app:${applicationId}`;
 
     // Find the credit entry for this application
     const creditEntry = await GLTransaction.aggregate([

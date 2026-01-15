@@ -382,21 +382,71 @@ export async function createRefund(input, ctx) {
 }
 
 export async function postJournalForPayment(payment, ctx) {
-  const debit = {
-    account: "Cash",
-    amount: payment.amount,
-    currency: payment.currency,
-  };
-  const credit = {
-    account: "Revenue",
-    amount: payment.amount,
-    currency: payment.currency,
-  };
-  return {
-    tenantId: ctx.tenantId,
-    entries: [debit, credit],
-    meta: { paymentId: payment._id.toString(), purpose: payment.purpose },
-  };
+  // Import required modules
+  const { postBalancedJournal } = await import("../controllers/journal.controller.js");
+  const { stripeFeeBreakdown } = await import("../helpers/fees.js");
+  
+  // Convert amount from cents to currency units
+  const amount = payment.amount / 100;
+  
+  // Determine clearing code based on payment method
+  // 1220 = Card Gateway Clearing (for Stripe/card payments)
+  // 1210 = Undeposited Cheques
+  // 1230 = Salary Deduction Clearing
+  // 1240 = Standing Order Clearing
+  // 1250 = Direct Debit Clearing
+  const clearingCode = payment.mode === "stripe" ? "1220" : "1210";
+  
+  // Determine effective member ID (use applicationId format if no memberId)
+  const effectiveMemberId = payment.memberId || 
+    (payment.applicationId ? `app:${payment.applicationId}` : null);
+  
+  if (!effectiveMemberId) {
+    // Log warning but don't throw - payment is recorded, journal entry can be created manually
+    const logger = (await import("../config/logger.js")).default;
+    logger.warn(
+      { paymentId: payment._id, memberId: payment.memberId, applicationId: payment.applicationId },
+      "Skipping journal entry - memberId or applicationId required"
+    );
+    return null;
+  }
+  
+  const lines = [
+    { accountCode: clearingCode, dc: "D", amount }, // Debit clearing account
+    {
+      accountCode: "2020",
+      dc: "C",
+      amount,
+      memberId: effectiveMemberId,
+      periodBucket: "current",
+    }, // Credit Payment on Account - Member credits (2020)
+  ];
+  
+  // Add Stripe fee entries if payment is via Stripe
+  if (payment.mode === "stripe") {
+    const { feeNoVat, feeVat, feeTotal } = stripeFeeBreakdown(amount);
+    lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Payment processing fees
+    lines.push({ accountCode: "1160", dc: "D", amount: feeVat }); // VAT recoverable on fees
+    lines.push({ accountCode: clearingCode, dc: "C", amount: feeTotal }); // Credit clearing for fees
+  }
+  
+  // Generate document number
+  const docNo = `RCP-${payment._id}`;
+  const date = new Date().toISOString().split("T")[0];
+  
+  // Create journal entry using the exported function
+  // Note: postBalancedJournal needs to be exported from journal.controller.js
+  const journal = await postBalancedJournal({
+    date,
+    docType: "Receipt",
+    docNo,
+    memo: payment.applicationId 
+      ? `Receipt (app ${payment.applicationId})` 
+      : `Receipt (member ${payment.memberId})`,
+    lines,
+  });
+  
+  return journal;
 }
 
 export default {

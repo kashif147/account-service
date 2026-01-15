@@ -15,6 +15,7 @@ import {
   handleCrmUserCreated,
   handleCrmUserUpdated,
 } from "./listeners/user.crm.listener.js";
+import { handleApplicationApproved } from "../handlers/application.approval.listener.js";
 
 // Re-export for convenience
 export { APPLICATION_EVENTS };
@@ -102,6 +103,33 @@ export async function setupConsumers() {
 
     await consumer.consume(USER_QUEUE, { prefetch: 10 });
     logger.info("CRM user events consumer ready", { queue: USER_QUEUE });
+
+    // Application approval events queue (application.events exchange)
+    const APPLICATION_QUEUE = "accounts.application.events";
+    logger.info("Creating application events queue...", {
+      queue: APPLICATION_QUEUE,
+      exchange: "application.events",
+      routingKeys: ["applications.review.approved.v1"],
+    });
+
+    await consumer.createQueue(APPLICATION_QUEUE, {
+      durable: true,
+      messageTtl: 3600000, // 1 hour
+    });
+
+    await consumer.bindQueue(APPLICATION_QUEUE, "application.events", [
+      "applications.review.approved.v1",
+    ]);
+
+    consumer.registerHandler(
+      "applications.review.approved.v1",
+      async (payload) => {
+        await handleApplicationApproved(payload);
+      }
+    );
+
+    await consumer.consume(APPLICATION_QUEUE, { prefetch: 10 });
+    logger.info("Application events consumer ready", { queue: APPLICATION_QUEUE });
 
     logger.info("All consumers set up successfully");
   } catch (error) {
