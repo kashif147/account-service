@@ -12,6 +12,7 @@ code,description,type,isCash,isClearing,isMemberTracked,isRevenue,isContraRevenu
 2020,Payment on Account (Member credits),Liability,false,false,true,false,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
 4000,Subscription income – General All Grades,Income,false,false,false,true,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
 4010,Subscription income – Short-term / Relief,Income,false,false,false,true,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
+4010,Subscription income – Postgraduate Students,Income,false,false,false,true,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
 4040,Subscription income – Private nursing home,Income,false,false,false,true,false,0,2025-09-04T21:36:26.110Z,2025-09-04T21:36:26.110Z
 4050,Subscription income – Affiliate members,Income,false,false,false,true,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
 4060,Subscription income – Lecturing,Income,false,false,false,true,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z

@@ -15,6 +15,17 @@ import {
   handleCrmUserCreated,
   handleCrmUserUpdated,
 } from "./listeners/user.crm.listener.js";
+import {
+  handleProductTypeCreated,
+  handleProductTypeUpdated,
+  handleProductTypeDeleted,
+  handleProductCreated,
+  handleProductUpdated,
+  handleProductDeleted,
+  handlePricingCreated,
+  handlePricingUpdated,
+  handlePricingDeleted,
+} from "./listeners/product.sync.listener.js";
 import { handleApplicationApproved } from "../handlers/application.approval.listener.js";
 
 // Re-export for convenience
@@ -130,6 +141,99 @@ export async function setupConsumers() {
 
     await consumer.consume(APPLICATION_QUEUE, { prefetch: 10 });
     logger.info("Application events consumer ready", { queue: APPLICATION_QUEUE });
+
+    // Product events queue (product.events exchange)
+    const PRODUCT_QUEUE = "accounts.product.events";
+    logger.info("Creating product events queue...", {
+      queue: PRODUCT_QUEUE,
+      exchange: "product.events",
+      routingKeys: [
+        "product.type.created.v1",
+        "product.type.updated.v1",
+        "product.type.deleted.v1",
+        "product.created.v1",
+        "product.updated.v1",
+        "product.deleted.v1",
+        "pricing.created.v1",
+        "pricing.updated.v1",
+        "pricing.deleted.v1",
+      ],
+    });
+
+    await consumer.createQueue(PRODUCT_QUEUE, {
+      durable: true,
+      messageTtl: 3600000, // 1 hour
+    });
+
+    await consumer.bindQueue(PRODUCT_QUEUE, "product.events", [
+      "product.type.created.v1",
+      "product.type.updated.v1",
+      "product.type.deleted.v1",
+      "product.created.v1",
+      "product.updated.v1",
+      "product.deleted.v1",
+      "pricing.created.v1",
+      "pricing.updated.v1",
+      "pricing.deleted.v1",
+    ]);
+
+    consumer.registerHandler(
+      "product.type.created.v1",
+      async (payload) => {
+        await handleProductTypeCreated(payload);
+      }
+    );
+    consumer.registerHandler(
+      "product.type.updated.v1",
+      async (payload) => {
+        await handleProductTypeUpdated(payload);
+      }
+    );
+    consumer.registerHandler(
+      "product.type.deleted.v1",
+      async (payload) => {
+        await handleProductTypeDeleted(payload);
+      }
+    );
+    consumer.registerHandler(
+      "product.created.v1",
+      async (payload) => {
+        await handleProductCreated(payload);
+      }
+    );
+    consumer.registerHandler(
+      "product.updated.v1",
+      async (payload) => {
+        await handleProductUpdated(payload);
+      }
+    );
+    consumer.registerHandler(
+      "product.deleted.v1",
+      async (payload) => {
+        await handleProductDeleted(payload);
+      }
+    );
+    consumer.registerHandler(
+      "pricing.created.v1",
+      async (payload) => {
+        await handlePricingCreated(payload);
+      }
+    );
+    consumer.registerHandler(
+      "pricing.updated.v1",
+      async (payload) => {
+        await handlePricingUpdated(payload);
+      }
+    );
+    consumer.registerHandler(
+      "pricing.deleted.v1",
+      async (payload) => {
+        await handlePricingDeleted(payload);
+      }
+    );
+
+    await consumer.consume(PRODUCT_QUEUE, { prefetch: 10 });
+    logger.info("Product events consumer ready", { queue: PRODUCT_QUEUE });
 
     logger.info("All consumers set up successfully");
   } catch (error) {

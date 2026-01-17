@@ -13,9 +13,7 @@
       "name": "Stripe Payments - Business (ALL)",
       "request": {
         "method": "GET",
-        "header": [
-          { "key": "Authorization", "value": "Bearer {{token}}" }
-        ],
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
         "url": {
           "raw": "{{baseUrl}}/journal/stripe-payments?status=ALL",
           "host": ["{{baseUrl}}"],
@@ -28,9 +26,7 @@
       "name": "Stripe Payments - Clearing (PENDING)",
       "request": {
         "method": "GET",
-        "header": [
-          { "key": "Authorization", "value": "Bearer {{token}}" }
-        ],
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
         "url": {
           "raw": "{{baseUrl}}/journal/stripe-payments",
           "host": ["{{baseUrl}}"],
@@ -42,9 +38,7 @@
       "name": "Stripe Payments - History (SETTLED)",
       "request": {
         "method": "GET",
-        "header": [
-          { "key": "Authorization", "value": "Bearer {{token}}" }
-        ],
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
         "url": {
           "raw": "{{baseUrl}}/journal/stripe-payments?status=SETTLED",
           "host": ["{{baseUrl}}"],
@@ -57,9 +51,7 @@
       "name": "Member Net Balance",
       "request": {
         "method": "GET",
-        "header": [
-          { "key": "Authorization", "value": "Bearer {{token}}" }
-        ],
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
         "url": {
           "raw": "{{baseUrl}}/reports/member/{{memberId}}/net-balance?year=2026",
           "host": ["{{baseUrl}}"],
@@ -72,9 +64,7 @@
       "name": "Member Ledger",
       "request": {
         "method": "GET",
-        "header": [
-          { "key": "Authorization", "value": "Bearer {{token}}" }
-        ],
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
         "url": {
           "raw": "{{baseUrl}}/reports/member/{{memberId}}/ledger",
           "host": ["{{baseUrl}}"],
@@ -86,9 +76,7 @@
       "name": "Member Ledger (Filtered by accountCode)",
       "request": {
         "method": "GET",
-        "header": [
-          { "key": "Authorization", "value": "Bearer {{token}}" }
-        ],
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
         "url": {
           "raw": "{{baseUrl}}/reports/member/{{memberId}}/ledger?accountCode=1400",
           "host": ["{{baseUrl}}"],
