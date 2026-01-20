@@ -1,6 +1,11 @@
 import logger from "../config/logger.js";
 
 export default function loggerMiddleware(req, res, next) {
+  // Skip logging for health check endpoints
+  if (req.path === "/health" || req.path.startsWith("/health/")) {
+    return next();
+  }
+
   const startTime = Date.now();
 
   // Log request details

@@ -125,8 +125,15 @@ process.on("SIGINT", async () => {
   process.exit(0);
 });
 
-// logging first
-app.use(pinoHttp({ logger }));
+// logging first - skip health endpoints
+app.use(
+  pinoHttp({
+    logger,
+    autoLogging: {
+      ignore: (req) => req.path === "/health" || req.path.startsWith("/health/"),
+    },
+  })
+);
 
 // hardening
 // app.use(corsMiddleware);

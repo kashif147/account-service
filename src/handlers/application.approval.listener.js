@@ -5,11 +5,23 @@ import logger from "../config/logger.js";
 import { invoice } from "../controllers/journal.controller.js";
 import { claimApplicationCredit } from "../controllers/journal.controller.js";
 import CoA from "../models/coa.model.js";
+import Product from "../models/product.model.js";
+import Pricing from "../models/pricing.model.js";
 
 /**
  * Maps membership category to income account code
  * Update this mapping based on your Chart of Accounts
  */
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 async function getIncomeCodeForCategory(categoryName) {
   // Default mapping - customize based on your CoA
   const categoryToIncomeCode = {
@@ -43,20 +55,60 @@ async function getIncomeCodeForCategory(categoryName) {
  * Gets annual fee for membership category
  * This should integrate with your subscription/fee service
  */
-async function getAnnualFeeForCategory(categoryName, subscriptionDetails) {
-  // If fee is in subscription details, use it
-  if (subscriptionDetails?.annualFee) {
-    return subscriptionDetails.annualFee;
+async function getMembershipPricing({
+  categoryName,
+  subscriptionDetails,
+  startDate,
+  tenantId,
+}) {
+  let annualFee = subscriptionDetails?.annualFee ?? null;
+  let incomeCode = null;
+
+  const product = await Product.findOne({
+    tenantId,
+    isDeleted: false,
+    isActive: true,
+    name: new RegExp(`^${escapeRegex(categoryName)}$`, "i"),
+  }).lean();
+
+  if (product?.code) {
+    incomeCode = product.code;
   }
 
-  // Otherwise, lookup from fee service or use defaults
-  const defaultFees = {
-    "General All Grades": 500.00,
-    "Associate": 300.00,
-    "Student": 150.00,
-  };
+  if (annualFee == null && product?._id) {
+    const effectiveDate = parseDate(startDate) || new Date();
+    const pricing = await Pricing.findOne({
+      tenantId,
+      productId: product._id,
+      isDeleted: false,
+      isActive: true,
+      effectiveFrom: { $lte: effectiveDate },
+      $or: [{ effectiveTo: { $gte: effectiveDate } }, { effectiveTo: null }],
+    })
+      .sort({ effectiveFrom: -1 })
+      .lean();
 
-  return defaultFees[categoryName] || 500.00;
+    if (pricing) {
+      annualFee =
+        pricing.price ?? pricing.memberPrice ?? pricing.nonMemberPrice ?? null;
+    }
+  }
+
+  if (incomeCode == null) {
+    incomeCode = await getIncomeCodeForCategory(categoryName);
+  }
+
+  if (annualFee == null) {
+    // fallback defaults if no pricing found
+    const defaultFees = {
+      "General All Grades": 500.0,
+      Associate: 300.0,
+      Student: 0.0,
+    };
+    annualFee = defaultFees[categoryName] || 500.0;
+  }
+
+  return { incomeCode, annualFee };
 }
 
 /**
@@ -98,9 +150,13 @@ export async function handleApplicationApproved(payload) {
     const memberId =
       payloadMemberId || subscriptionAttributes?.memberId || `profile:${profileId}`;
 
-    // Get income code and annual fee
-    const incomeCode = await getIncomeCodeForCategory(categoryName);
-    const annualFee = await getAnnualFeeForCategory(categoryName, subDetails);
+    // Get income code and annual fee (from pricing if available)
+    const { incomeCode, annualFee } = await getMembershipPricing({
+      categoryName,
+      subscriptionDetails: subDetails,
+      startDate: dateJoined,
+      tenantId,
+    });
 
     // Generate invoice document number
     const year = new Date().getFullYear();
