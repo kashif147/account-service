@@ -397,9 +397,11 @@ export async function postJournalForPayment(payment, ctx) {
   // 1250 = Direct Debit Clearing
   const clearingCode = payment.mode === "stripe" ? "1220" : "1210";
   
-  // Determine effective member ID (use applicationId format if no memberId)
-  const effectiveMemberId = payment.memberId || 
-    (payment.applicationId ? `app:${payment.applicationId}` : null);
+  // Determine effective member ID (prioritize memberId over applicationId)
+  // Receipt should be against memberId if present, otherwise against applicationId
+  const effectiveMemberId = payment.memberId 
+    ? payment.memberId 
+    : (payment.applicationId ? `app:${payment.applicationId}` : null);
   
   if (!effectiveMemberId) {
     // Log warning but don't throw - payment is recorded, journal entry can be created manually
@@ -424,15 +426,19 @@ export async function postJournalForPayment(payment, ctx) {
   
   // Add Stripe fee entries if payment is via Stripe
   if (payment.mode === "stripe") {
-    const { feeNoVat, feeVat, feeTotal } = stripeFeeBreakdown(amount);
+    const { feeNoVat } = stripeFeeBreakdown(amount);
     lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Payment processing fees
-    lines.push({ accountCode: "1160", dc: "D", amount: feeVat }); // VAT recoverable on fees
-    lines.push({ accountCode: clearingCode, dc: "C", amount: feeTotal }); // Credit clearing for fees
+    lines.push({ accountCode: clearingCode, dc: "C", amount: feeNoVat }); // Credit clearing for fees
   }
   
   // Generate document number
   const docNo = `RCP-${payment._id}`;
   const date = new Date().toISOString().split("T")[0];
+  
+  // Create receipt memo - prioritize memberId if present, otherwise use applicationId
+  const memo = payment.memberId 
+    ? `Receipt (member ${payment.memberId})` 
+    : (payment.applicationId ? `Receipt (app ${payment.applicationId})` : "Receipt");
   
   // Create journal entry using the exported function
   // Note: postBalancedJournal needs to be exported from journal.controller.js
@@ -440,9 +446,7 @@ export async function postJournalForPayment(payment, ctx) {
     date,
     docType: "Receipt",
     docNo,
-    memo: payment.applicationId 
-      ? `Receipt (app ${payment.applicationId})` 
-      : `Receipt (member ${payment.memberId})`,
+    memo,
     lines,
   });
   

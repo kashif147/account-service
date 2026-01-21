@@ -29,10 +29,10 @@ async function getIncomeCodeForCategory(categoryName) {
     "Short-term / Relief": "4010",
     "Private nursing home": "4040",
     "Affiliate members": "4050",
-    "Lecturing": "4060",
-    "Associate": "4070",
+    Lecturing: "4060",
+    Associate: "4070",
     "Retired Associate": "4080",
-    "Students": "4090",
+    Students: "4090",
     // Add more mappings as needed
   };
 
@@ -148,7 +148,9 @@ export async function handleApplicationApproved(payload) {
     // Get memberId from subscription service or use profileId temporarily
     // Note: memberId should be available after member is created
     const memberId =
-      payloadMemberId || subscriptionAttributes?.memberId || `profile:${profileId}`;
+      payloadMemberId ||
+      subscriptionAttributes?.memberId ||
+      `profile:${profileId}`;
 
     // Get income code and annual fee (from pricing if available)
     const { incomeCode, annualFee } = await getMembershipPricing({

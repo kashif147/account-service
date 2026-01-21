@@ -414,8 +414,10 @@ export async function receipt(req, res, next) {
       bucket = "current",
       provider,
     } = req.body;
-    const effectiveMemberId =
-      memberId || (applicationId ? `app:${applicationId}` : null);
+    // Prioritize memberId over applicationId for receipt generation
+    const effectiveMemberId = memberId 
+      ? memberId 
+      : (applicationId ? `app:${applicationId}` : null);
     if (!effectiveMemberId)
       throw AppError.badRequest("memberId or applicationId is required", {
         memberId,
@@ -433,19 +435,23 @@ export async function receipt(req, res, next) {
       }, // Payment on Account - Member credits (2020)
     ];
 
-    // Stripe fee and VAT (Ireland), applied against the clearing account
+    // Stripe fee applied against the clearing account
     if (provider === "stripe") {
-      const { feeNoVat, feeVat, feeTotal } = stripeFeeBreakdown(amount);
+      const { feeNoVat } = stripeFeeBreakdown(amount);
       lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Payment processing fees
-      lines.push({ accountCode: "1160", dc: "D", amount: feeVat }); // VAT recoverable on fees
-      lines.push({ accountCode: clearingCode, dc: "C", amount: feeTotal });
+      lines.push({ accountCode: clearingCode, dc: "C", amount: feeNoVat }); // Credit clearing for fees
     }
+
+    // Create receipt memo - prioritize memberId if present, otherwise use applicationId
+    const memo = memberId 
+      ? `Receipt (member ${memberId})` 
+      : (applicationId ? `Receipt (app ${applicationId})` : "Receipt");
 
     const out = await postBalancedJournal({
       date,
       docType: "Receipt",
       docNo,
-      memo: applicationId ? `Receipt (app ${applicationId})` : "Receipt",
+      memo,
       lines,
     });
     res.status(201).json(out);
