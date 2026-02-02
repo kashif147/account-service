@@ -36,7 +36,7 @@ async function buildIntentResponse(payment, stripe) {
   // Use stored values if available, otherwise fetch from Stripe (fallback)
   let clientSecret = payment?.stripe?.clientSecret;
   let checkoutUrl = payment?.stripe?.checkoutUrl;
-  
+
   // Only fetch from Stripe if stored values are missing (backward compatibility)
   if (!clientSecret && payment?.stripe?.paymentIntentId) {
     try {
@@ -75,7 +75,9 @@ export async function createIntent(input, ctx) {
     const existingByIdem = await Payment.findOne({
       tenantId: ctx.tenantId,
       idempotencyKey: ctx.idempotencyKey,
-    }).select("stripe status _id").lean();
+    })
+      .select("stripe status _id")
+      .lean();
     if (existingByIdem) {
       return await buildIntentResponse(existingByIdem, stripe);
     }
@@ -178,7 +180,9 @@ export async function createIntent(input, ctx) {
         const existing = await Payment.findOne({
           tenantId: ctx.tenantId,
           idempotencyKey: ctx.idempotencyKey,
-        }).select("stripe status _id").lean();
+        })
+          .select("stripe status _id")
+          .lean();
         if (existing) {
           return await buildIntentResponse(existing, stripe);
         }
@@ -189,7 +193,9 @@ export async function createIntent(input, ctx) {
         const existingByPi = await Payment.findOne({
           tenantId: ctx.tenantId,
           "stripe.paymentIntentId": stripeIds.paymentIntentId,
-        }).select("stripe status _id").lean();
+        })
+          .select("stripe status _id")
+          .lean();
         if (existingByPi) {
           return await buildIntentResponse(existingByPi, stripe);
         }
@@ -226,6 +232,19 @@ export async function reconcileStripeEvent(input, ctx) {
     tenantId: ctx.tenantId,
     "stripe.paymentIntentId": parsed.payment.paymentIntentId,
   };
+
+  // Extract memberId and applicationId from metadata
+  // Support multiple naming conventions: memberId, member_id, userId
+  const metadata = parsed.payment.metadata || {};
+  const memberId =
+    metadata.memberId ||
+    metadata.member_id ||
+    metadata.userId ||
+    metadata.user_id ||
+    undefined;
+  const applicationId =
+    metadata.applicationId || metadata.application_id || undefined;
+
   const update = {
     $set: {
       amount: parsed.payment.amount,
@@ -234,7 +253,7 @@ export async function reconcileStripeEvent(input, ctx) {
       "stripe.chargeId": parsed.payment.chargeId,
       "stripe.customerId": parsed.payment.customerId,
       "stripe.paymentMethodId": parsed.payment.paymentMethodId,
-      metadata: parsed.payment.metadata || {},
+      metadata: metadata,
       "audit.updatedBy": ctx.userId || ctx.memberId || "system",
     },
     $setOnInsert: {
@@ -243,6 +262,15 @@ export async function reconcileStripeEvent(input, ctx) {
       "audit.createdBy": ctx.userId || ctx.memberId || "system",
     },
   };
+
+  // Set memberId and applicationId if present in metadata
+  if (memberId) {
+    update.$set.memberId = memberId;
+  }
+  if (applicationId) {
+    update.$set.applicationId = applicationId;
+  }
+
   const options = { upsert: true, new: true, setDefaultsOnInsert: true };
   const doc = await Payment.findOneAndUpdate(filter, update, options);
 
@@ -383,12 +411,14 @@ export async function createRefund(input, ctx) {
 
 export async function postJournalForPayment(payment, ctx) {
   // Import required modules
-  const { postBalancedJournal } = await import("../controllers/journal.controller.js");
+  const { postBalancedJournal } = await import(
+    "../controllers/journal.controller.js"
+  );
   const { stripeFeeBreakdown } = await import("../helpers/fees.js");
-  
+
   // Convert amount from cents to currency units
   const amount = payment.amount / 100;
-  
+
   // Determine clearing code based on payment method
   // 1220 = Card Gateway Clearing (for Stripe/card payments)
   // 1210 = Undeposited Cheques
@@ -396,23 +426,55 @@ export async function postJournalForPayment(payment, ctx) {
   // 1240 = Standing Order Clearing
   // 1250 = Direct Debit Clearing
   const clearingCode = payment.mode === "stripe" ? "1220" : "1210";
-  
+
+  // Extract memberId and applicationId from payment document or metadata
+  // Handle metadata as Map (MongoDB) or plain object
+  let metadataObj = {};
+  if (payment.metadata) {
+    if (payment.metadata instanceof Map) {
+      metadataObj = Object.fromEntries(payment.metadata);
+    } else if (typeof payment.metadata === "object") {
+      metadataObj = payment.metadata;
+    }
+  }
+
+  // Get memberId/applicationId from document first, then fallback to metadata
+  const memberId =
+    payment.memberId ||
+    metadataObj.memberId ||
+    metadataObj.member_id ||
+    metadataObj.userId ||
+    metadataObj.user_id ||
+    null;
+  const applicationId =
+    payment.applicationId ||
+    metadataObj.applicationId ||
+    metadataObj.application_id ||
+    null;
+
   // Determine effective member ID (prioritize memberId over applicationId)
   // Receipt should be against memberId if present, otherwise against applicationId
-  const effectiveMemberId = payment.memberId 
-    ? payment.memberId 
-    : (payment.applicationId ? `app:${payment.applicationId}` : null);
-  
+  const effectiveMemberId = memberId
+    ? memberId
+    : applicationId
+    ? `app:${applicationId}`
+    : null;
+
   if (!effectiveMemberId) {
     // Log warning but don't throw - payment is recorded, journal entry can be created manually
     const logger = (await import("../config/logger.js")).default;
     logger.warn(
-      { paymentId: payment._id, memberId: payment.memberId, applicationId: payment.applicationId },
+      {
+        paymentId: payment._id,
+        memberId: payment.memberId,
+        applicationId: payment.applicationId,
+        metadata: metadataObj,
+      },
       "Skipping journal entry - memberId or applicationId required"
     );
     return null;
   }
-  
+
   const lines = [
     { accountCode: clearingCode, dc: "D", amount }, // Debit clearing account
     {
@@ -423,23 +485,25 @@ export async function postJournalForPayment(payment, ctx) {
       periodBucket: "current",
     }, // Credit Payment on Account - Member credits (2020)
   ];
-  
+
   // Add Stripe fee entries if payment is via Stripe
   if (payment.mode === "stripe") {
     const { feeNoVat } = stripeFeeBreakdown(amount);
     lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Payment processing fees
     lines.push({ accountCode: clearingCode, dc: "C", amount: feeNoVat }); // Credit clearing for fees
   }
-  
+
   // Generate document number
   const docNo = `RCP-${payment._id}`;
   const date = new Date().toISOString().split("T")[0];
-  
+
   // Create receipt memo - prioritize memberId if present, otherwise use applicationId
-  const memo = payment.memberId 
-    ? `Receipt (member ${payment.memberId})` 
-    : (payment.applicationId ? `Receipt (app ${payment.applicationId})` : "Receipt");
-  
+  const memo = memberId
+    ? `Receipt (member ${memberId})`
+    : applicationId
+    ? `Receipt (app ${applicationId})`
+    : "Receipt";
+
   // Create journal entry using the exported function
   // Note: postBalancedJournal needs to be exported from journal.controller.js
   const journal = await postBalancedJournal({
@@ -449,7 +513,7 @@ export async function postJournalForPayment(payment, ctx) {
     memo,
     lines,
   });
-  
+
   return journal;
 }
 
