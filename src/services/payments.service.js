@@ -68,6 +68,11 @@ export async function createIntent(input, ctx) {
   const parsed = zCreateIntent.parse(input);
   ensureIntegerCents(parsed.amount);
 
+  // Normalize currency to lowercase (Stripe requires lowercase)
+  const normalizedCurrency = parsed.currency
+    ? parsed.currency.toLowerCase()
+    : "eur";
+
   const stripe = getStripe();
 
   // Idempotency and duplicate protection: check for existing payments BEFORE Stripe API call
@@ -93,11 +98,11 @@ export async function createIntent(input, ctx) {
       {
         mode: "payment",
         payment_method_types: ["card"],
-        currency: parsed.currency || "eur",
+        currency: normalizedCurrency,
         line_items: [
           {
             price_data: {
-              currency: parsed.currency || "eur",
+              currency: normalizedCurrency,
               product_data: { name: parsed.purpose },
               unit_amount: parsed.amount,
             },
@@ -123,7 +128,7 @@ export async function createIntent(input, ctx) {
     const intent = await stripe.paymentIntents.create(
       {
         amount: parsed.amount,
-        currency: parsed.currency || "eur",
+        currency: normalizedCurrency,
         payment_method_types: ["card"],
         metadata: parsed.metadata || {},
       },
@@ -138,19 +143,29 @@ export async function createIntent(input, ctx) {
   }
 
   try {
+    // Extract memberId and applicationId from metadata if not provided directly
+    const metadata = parsed.metadata || {};
+    const memberIdFromMetadata =
+      metadata.memberId ||
+      metadata.member_id ||
+      metadata.userId ||
+      metadata.user_id;
+    const applicationIdFromMetadata =
+      metadata.applicationId || metadata.application_id;
+
     const paymentData = {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
-      currency: parsed.currency || "eur",
+      currency: normalizedCurrency,
       status,
-      memberId: parsed.memberId,
-      applicationId: parsed.applicationId,
+      memberId: parsed.memberId || memberIdFromMetadata,
+      applicationId: parsed.applicationId || applicationIdFromMetadata,
       invoiceId: parsed.invoiceId,
       source: "portal",
       mode,
       stripe: stripeIds,
-      metadata: parsed.metadata || {},
+      metadata: metadata,
       audit: {
         createdBy: ctx.userId || ctx.memberId || "system",
         updatedBy: ctx.userId || ctx.memberId || "system",
