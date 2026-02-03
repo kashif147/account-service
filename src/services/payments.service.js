@@ -244,28 +244,35 @@ export async function reconcileStripeEvent(input, ctx) {
   const parsed = zReconcile.parse(input);
   ensureIntegerCents(parsed.payment.amount);
 
-  // First, try to find existing payment by paymentIntentId (with or without tenantId)
-  // This handles cases where payment was created via createIntent() but webhook has different tenantId
+  // ALWAYS search by paymentIntentId first (without tenantId filter)
+  // This ensures we find the existing payment regardless of tenantId mismatch
   let existingPayment = null;
   if (parsed.payment.paymentIntentId) {
-    // Try with tenantId first (most specific)
-    if (ctx.tenantId) {
-      existingPayment = await Payment.findOne({
-        tenantId: ctx.tenantId,
-        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
-      }).lean();
-    }
+    // Search by paymentIntentId alone first (most reliable)
+    existingPayment = await Payment.findOne({
+      "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+    }).lean();
 
-    // If not found and tenantId was provided, also try without tenantId filter
-    // (in case payment was created before tenantId was set)
-    if (!existingPayment && parsed.payment.paymentIntentId) {
-      existingPayment = await Payment.findOne({
-        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
-      }).lean();
+    // If found, log tenantId comparison for debugging
+    if (
+      existingPayment &&
+      ctx.tenantId &&
+      existingPayment.tenantId !== ctx.tenantId
+    ) {
+      const logger = (await import("../config/logger.js")).default;
+      logger.warn(
+        {
+          paymentId: existingPayment._id,
+          paymentIntentId: parsed.payment.paymentIntentId,
+          existingTenantId: existingPayment.tenantId,
+          webhookTenantId: ctx.tenantId,
+        },
+        "TenantId mismatch in webhook reconciliation - using existing payment's tenantId"
+      );
     }
   }
 
-  // Log if we found an existing payment (helps debug duplicates)
+  // Log if we found an existing payment
   if (existingPayment) {
     const logger = (await import("../config/logger.js")).default;
     logger.info(
@@ -291,16 +298,17 @@ export async function reconcileStripeEvent(input, ctx) {
   const applicationId =
     metadata.applicationId || metadata.application_id || undefined;
 
-  // Build filter - use existing payment's tenantId if found, otherwise use ctx.tenantId
+  // Build filter - ALWAYS use existing payment's tenantId if found
+  // This prevents creating duplicates when tenantId doesn't match
   const filter = {
     tenantId: existingPayment?.tenantId || ctx.tenantId,
     "stripe.paymentIntentId": parsed.payment.paymentIntentId,
   };
 
-  // If tenantId is missing, we can't safely upsert (would violate unique constraint)
-  if (!filter.tenantId) {
+  // If no existing payment and no tenantId, we can't safely upsert
+  if (!existingPayment && !filter.tenantId) {
     throw AppError.badRequest(
-      "tenantId is required for payment reconciliation",
+      "tenantId is required for payment reconciliation when no existing payment found",
       { paymentIntentId: parsed.payment.paymentIntentId }
     );
   }
@@ -366,9 +374,8 @@ export async function reconcileStripeEvent(input, ctx) {
   } catch (error) {
     // Handle duplicate key errors (race condition)
     if (error.code === 11000) {
-      // Try to find the existing payment
+      // Try to find the existing payment by paymentIntentId alone
       const existing = await Payment.findOne({
-        tenantId: filter.tenantId,
         "stripe.paymentIntentId": parsed.payment.paymentIntentId,
       }).lean();
 
