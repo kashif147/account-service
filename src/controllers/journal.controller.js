@@ -415,9 +415,11 @@ export async function receipt(req, res, next) {
       provider,
     } = req.body;
     // Prioritize memberId over applicationId for receipt generation
-    const effectiveMemberId = memberId 
-      ? memberId 
-      : (applicationId ? `app:${applicationId}` : null);
+    const effectiveMemberId = memberId
+      ? memberId
+      : applicationId
+      ? `app:${applicationId}`
+      : null;
     if (!effectiveMemberId)
       throw AppError.badRequest("memberId or applicationId is required", {
         memberId,
@@ -443,9 +445,11 @@ export async function receipt(req, res, next) {
     }
 
     // Create receipt memo - prioritize memberId if present, otherwise use applicationId
-    const memo = memberId 
-      ? `Receipt (member ${memberId})` 
-      : (applicationId ? `Receipt (app ${applicationId})` : "Receipt");
+    const memo = memberId
+      ? `Receipt (member ${memberId})`
+      : applicationId
+      ? `Receipt (app ${applicationId})`
+      : "Receipt";
 
     const out = await postBalancedJournal({
       date,
@@ -573,11 +577,27 @@ export async function listJournals(req, res, next) {
     const query = {};
     if (from || to) {
       query.date = {};
-      if (from) query.date.$gte = new Date(from);
-      if (to) query.date.$lte = new Date(to);
+      if (from) {
+        const fromDate = new Date(from);
+        fromDate.setHours(0, 0, 0, 0);
+        query.date.$gte = fromDate;
+      }
+      if (to) {
+        const toDate = new Date(to);
+        toDate.setHours(23, 59, 59, 999);
+        query.date.$lte = toDate;
+      }
     }
-    if (docType) query.docType = docType;
+    if (docType) {
+      // Case-insensitive docType matching
+      query.docType = { $regex: new RegExp(`^${docType}$`, "i") };
+    }
     if (memberId) query["entries.memberId"] = memberId;
+
+    logInfo("Journal query", {
+      query,
+      params: { from, to, docType, memberId },
+    });
 
     const pageSize = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(skip, 10) || 0, 0);
@@ -590,6 +610,8 @@ export async function listJournals(req, res, next) {
         .lean(),
       GLTransaction.countDocuments(query),
     ]);
+
+    logInfo("Journal query results", { total, itemsCount: items.length });
 
     res.success({
       total,
