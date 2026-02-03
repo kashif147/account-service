@@ -45,9 +45,13 @@ function rollupMemberBalances({ date, entries }) {
   const totals = new Map();
 
   for (const e of entries) {
-    if (!e.memberId || !e.periodBucket) continue;
+    if (!e.periodBucket) continue;
+    // Use memberId if present, otherwise use applicationId (prefixed with "app:")
+    const identifier =
+      e.memberId || (e.applicationId ? `app:${e.applicationId}` : null);
+    if (!identifier) continue;
     const signed = e.dc === "D" ? e.amount : -e.amount;
-    const key = `${e.memberId}|${e.accountCode}|${e.periodBucket}|${year}`;
+    const key = `${identifier}|${e.accountCode}|${e.periodBucket}|${year}`;
     totals.set(key, (totals.get(key) || 0) + signed);
   }
 
@@ -60,6 +64,7 @@ export async function postBalancedJournal({
   docNo,
   memo,
   lines,
+  settlement,
 }) {
   const enriched = await enrichLines(lines);
 
@@ -83,20 +88,25 @@ export async function postBalancedJournal({
       { accountCode: "1200", docType }
     );
   }
-  // - require memberId/periodBucket on member-tracked accounts (1400, 2020)
+  // - require memberId OR applicationId and periodBucket on member-tracked accounts (1400, 2020)
   for (const e of enriched) {
-    if (
-      (e.accountCode === "1400" || e.accountCode === "2020") &&
-      (!e.memberId || !e.periodBucket)
-    ) {
-      throw AppError.badRequest(
-        `memberId and periodBucket required on ${e.accountCode}`,
-        {
+    if (e.accountCode === "1400" || e.accountCode === "2020") {
+      if (!e.periodBucket) {
+        throw AppError.badRequest(`periodBucket required on ${e.accountCode}`, {
           accountCode: e.accountCode,
-          memberId: e.memberId,
           periodBucket: e.periodBucket,
-        }
-      );
+        });
+      }
+      if (!e.memberId && !e.applicationId) {
+        throw AppError.badRequest(
+          `memberId or applicationId required on ${e.accountCode}`,
+          {
+            accountCode: e.accountCode,
+            memberId: e.memberId,
+            applicationId: e.applicationId,
+          }
+        );
+      }
     }
   }
 
@@ -112,6 +122,7 @@ export async function postBalancedJournal({
     docNo,
     memo,
     entries,
+    ...(settlement && { settlement }),
   });
 
   const { year, totals } = rollupMemberBalances({ date, entries });
@@ -414,34 +425,42 @@ export async function receipt(req, res, next) {
       bucket = "current",
       provider,
     } = req.body;
-    // Prioritize memberId over applicationId for receipt generation
-    const effectiveMemberId = memberId
-      ? memberId
-      : applicationId
-      ? `app:${applicationId}`
-      : null;
-    if (!effectiveMemberId)
+    if (!memberId && !applicationId)
       throw AppError.badRequest("memberId or applicationId is required", {
         memberId,
         applicationId,
       });
 
+    // Build entry for account 2020 - use memberId if present, otherwise applicationId
+    const entry2020 = {
+      accountCode: "2020",
+      dc: "C",
+      amount,
+      periodBucket: bucket,
+    };
+
+    if (memberId) {
+      entry2020.memberId = memberId;
+    } else if (applicationId) {
+      entry2020.applicationId = applicationId;
+    }
+
     const lines = [
       { accountCode: clearingCode, dc: "D", amount }, // 1210..1250
-      {
-        accountCode: "2020",
-        dc: "C",
-        amount,
-        memberId: effectiveMemberId,
-        periodBucket: bucket,
-      }, // Payment on Account - Member credits (2020)
+      entry2020, // Payment on Account - Member credits (2020)
     ];
 
     // Stripe fee applied against the clearing account
-    if (provider === "stripe") {
+    let settlement = null;
+    if (provider === "stripe" || provider === "Stripe") {
       const { feeNoVat } = stripeFeeBreakdown(amount);
       lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Payment processing fees
       lines.push({ accountCode: clearingCode, dc: "C", amount: feeNoVat }); // Credit clearing for fees
+      // Set settlement info for Stripe payments
+      settlement = {
+        provider: "Stripe",
+        status: "PENDING",
+      };
     }
 
     // Create receipt memo - prioritize memberId if present, otherwise use applicationId
@@ -457,6 +476,7 @@ export async function receipt(req, res, next) {
       docNo,
       memo,
       lines,
+      settlement,
     });
     res.status(201).json(out);
   } catch (e) {
@@ -481,14 +501,17 @@ export async function claimApplicationCredit(req, res, next) {
       });
     }
 
-    const appMember = `app:${applicationId}`;
-
     // Find the credit entry for this application
+    // Check both new format (applicationId) and old format (memberId: "app:...")
+    const appMember = `app:${applicationId}`;
     const creditEntry = await GLTransaction.aggregate([
       { $unwind: "$entries" },
       {
         $match: {
-          "entries.memberId": appMember,
+          $or: [
+            { "entries.applicationId": applicationId },
+            { "entries.memberId": appMember },
+          ],
           "entries.accountCode": "2020",
           "entries.dc": "C",
         },
@@ -511,14 +534,30 @@ export async function claimApplicationCredit(req, res, next) {
       );
     }
 
+    // Build debit entry - use applicationId if the original entry had it, otherwise use memberId
+    const originalEntry = creditEntry[0].entries;
+    const debitEntry = {
+      accountCode: "2020",
+      dc: "D",
+      amount,
+      periodBucket: bucket,
+    };
+
+    if (originalEntry.applicationId) {
+      debitEntry.applicationId = originalEntry.applicationId;
+    } else if (
+      originalEntry.memberId &&
+      originalEntry.memberId.startsWith("app:")
+    ) {
+      // Old format - keep using memberId for backward compatibility
+      debitEntry.memberId = originalEntry.memberId;
+    } else {
+      // Fallback to applicationId
+      debitEntry.applicationId = applicationId;
+    }
+
     const lines = [
-      {
-        accountCode: "2020",
-        dc: "D",
-        amount,
-        memberId: appMember,
-        periodBucket: bucket,
-      },
+      debitEntry,
       { accountCode: "2020", dc: "C", amount, memberId, periodBucket: bucket },
     ];
 
@@ -643,13 +682,26 @@ export async function listStripePayments(req, res, next) {
 
     if (from || to) {
       query.date = {};
-      if (from) query.date.$gte = new Date(from);
-      if (to) query.date.$lte = new Date(to);
+      if (from) {
+        const fromDate = new Date(from);
+        fromDate.setHours(0, 0, 0, 0);
+        query.date.$gte = fromDate;
+      }
+      if (to) {
+        const toDate = new Date(to);
+        toDate.setHours(23, 59, 59, 999);
+        query.date.$lte = toDate;
+      }
     }
 
     if (status && status !== "ALL") {
       query["settlement.status"] = status;
     }
+
+    logInfo("Stripe payments query", {
+      query,
+      params: { from, to, status },
+    });
 
     const pageSize = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(skip, 10) || 0, 0);
@@ -662,6 +714,11 @@ export async function listStripePayments(req, res, next) {
         .lean(),
       GLTransaction.countDocuments(query),
     ]);
+
+    logInfo("Stripe payments query results", {
+      total,
+      itemsCount: items.length,
+    });
 
     res.success({
       total,

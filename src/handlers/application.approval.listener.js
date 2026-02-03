@@ -53,6 +53,7 @@ async function getIncomeCodeForCategory(categoryName) {
 
 /**
  * Gets annual fee for membership category
+ * Matches products by code OR name against membershipCategory
  * This should integrate with your subscription/fee service
  */
 async function getMembershipPricing({
@@ -60,37 +61,151 @@ async function getMembershipPricing({
   subscriptionDetails,
   startDate,
   tenantId,
+  profileId,
+  applicationId,
 }) {
   let annualFee = subscriptionDetails?.annualFee ?? null;
   let incomeCode = null;
+  let product = null;
 
-  const product = await Product.findOne({
-    tenantId,
-    isDeleted: false,
-    isActive: true,
-    name: new RegExp(`^${escapeRegex(categoryName)}$`, "i"),
-  }).lean();
+  if (!tenantId) {
+    logger.warn(
+      { categoryName, profileId, applicationId },
+      "Missing tenantId for product lookup"
+    );
+  } else {
+    // Try to match product by code first (exact match, case-insensitive)
+    // Then try by name (case-insensitive)
+    const categoryUpper = categoryName?.toUpperCase().trim();
+    const categoryRegex = new RegExp(`^${escapeRegex(categoryName)}$`, "i");
 
-  if (product?.code) {
-    incomeCode = product.code;
-  }
-
-  if (annualFee == null && product?._id) {
-    const effectiveDate = parseDate(startDate) || new Date();
-    const pricing = await Pricing.findOne({
+    product = await Product.findOne({
       tenantId,
-      productId: product._id,
       isDeleted: false,
       isActive: true,
-      effectiveFrom: { $lte: effectiveDate },
-      $or: [{ effectiveTo: { $gte: effectiveDate } }, { effectiveTo: null }],
-    })
-      .sort({ effectiveFrom: -1 })
-      .lean();
+      $or: [{ code: categoryUpper }, { name: categoryRegex }],
+    }).lean();
 
-    if (pricing) {
-      annualFee =
-        pricing.price ?? pricing.memberPrice ?? pricing.nonMemberPrice ?? null;
+    if (product) {
+      logger.info(
+        {
+          categoryName,
+          productId: product._id,
+          productCode: product.code,
+          productName: product.name,
+          profileId,
+          applicationId,
+        },
+        "Found matching product for membership category"
+      );
+
+      if (product.code) {
+        incomeCode = product.code;
+      }
+
+      // Get pricing for the matched product
+      // Pricing must be active and subscription startDate must be between effectiveFrom and effectiveTo
+      if (annualFee == null && product._id) {
+        // Use subscription startDate (dateJoined) for pricing lookup
+        // Ensure it's a proper Date object for comparison
+        const subscriptionStartDate = parseDate(startDate);
+        if (!subscriptionStartDate) {
+          logger.warn(
+            {
+              productId: product._id,
+              startDate,
+              categoryName,
+              profileId,
+              applicationId,
+            },
+            "Invalid subscription startDate for pricing lookup"
+          );
+        } else {
+          // Find pricing where:
+          // - effectiveFrom <= subscriptionStartDate (pricing has started)
+          // - effectiveTo >= subscriptionStartDate OR effectiveTo is null (pricing hasn't ended or has no end date)
+          const pricing = await Pricing.findOne({
+            tenantId,
+            productId: product._id,
+            isDeleted: false,
+            isActive: true,
+            effectiveFrom: { $lte: subscriptionStartDate },
+            $or: [
+              { effectiveTo: { $gte: subscriptionStartDate } },
+              { effectiveTo: null },
+            ],
+          })
+            .sort({ effectiveFrom: -1 })
+            .lean();
+
+          if (pricing) {
+            annualFee =
+              pricing.price ??
+              pricing.memberPrice ??
+              pricing.nonMemberPrice ??
+              null;
+            logger.info(
+              {
+                productId: product._id,
+                pricingId: pricing._id,
+                annualFee,
+                subscriptionStartDate: subscriptionStartDate.toISOString(),
+                pricingEffectiveFrom: pricing.effectiveFrom
+                  ? new Date(pricing.effectiveFrom).toISOString()
+                  : null,
+                pricingEffectiveTo: pricing.effectiveTo
+                  ? new Date(pricing.effectiveTo).toISOString()
+                  : null,
+                profileId,
+                applicationId,
+              },
+              "Found pricing for product matching subscription start date"
+            );
+          } else {
+            // Log all available pricings for debugging
+            const allPricings = await Pricing.find({
+              tenantId,
+              productId: product._id,
+              isDeleted: false,
+              isActive: true,
+            })
+              .sort({ effectiveFrom: -1 })
+              .lean();
+
+            logger.warn(
+              {
+                productId: product._id,
+                subscriptionStartDate: subscriptionStartDate.toISOString(),
+                categoryName,
+                availablePricings: allPricings.map((p) => ({
+                  pricingId: p._id,
+                  effectiveFrom: p.effectiveFrom
+                    ? new Date(p.effectiveFrom).toISOString()
+                    : null,
+                  effectiveTo: p.effectiveTo
+                    ? new Date(p.effectiveTo).toISOString()
+                    : null,
+                  price: p.price ?? p.memberPrice ?? p.nonMemberPrice,
+                })),
+                profileId,
+                applicationId,
+              },
+              "No active pricing found for product matching subscription start date range"
+            );
+          }
+        }
+      }
+    } else {
+      logger.warn(
+        {
+          categoryName,
+          categoryUpper,
+          tenantId,
+          profileId,
+          applicationId,
+        },
+        "No product found matching code or name for membership category"
+      );
     }
   }
 
@@ -106,6 +221,15 @@ async function getMembershipPricing({
       Student: 0.0,
     };
     annualFee = defaultFees[categoryName] || 500.0;
+    logger.warn(
+      {
+        categoryName,
+        annualFee,
+        profileId,
+        applicationId,
+      },
+      "Using default annual fee - no product or pricing found"
+    );
   }
 
   return { incomeCode, annualFee };
@@ -141,9 +265,24 @@ export async function handleApplicationApproved(payload) {
       effective?.professionalDetails?.membershipCategory ||
       "General All Grades";
 
-    const dateJoined = subDetails.dateJoined
-      ? new Date(subDetails.dateJoined).toISOString().split("T")[0]
-      : new Date().toISOString().split("T")[0];
+    // Use subscription startDate (from subscription service) if available,
+    // otherwise fall back to dateJoined from subscriptionDetails
+    // This is the date that should be used for pricing lookup
+    // Normalize to ISO date string (YYYY-MM-DD) for consistency
+    let subscriptionStartDate =
+      subscriptionAttributes?.startDate || subDetails.dateJoined || new Date();
+
+    // Ensure it's a Date object first, then convert to ISO string
+    if (subscriptionStartDate instanceof Date) {
+      subscriptionStartDate = subscriptionStartDate.toISOString().split("T")[0];
+    } else if (typeof subscriptionStartDate === "string") {
+      // If it's already a string, ensure it's in YYYY-MM-DD format
+      subscriptionStartDate = subscriptionStartDate.split("T")[0];
+    } else {
+      subscriptionStartDate = new Date().toISOString().split("T")[0];
+    }
+
+    const dateJoined = subscriptionStartDate;
 
     // Get memberId from subscription service or use profileId temporarily
     // Note: memberId should be available after member is created
@@ -153,11 +292,14 @@ export async function handleApplicationApproved(payload) {
       `profile:${profileId}`;
 
     // Get income code and annual fee (from pricing if available)
+    // Match products by code OR name against membershipCategory
     const { incomeCode, annualFee } = await getMembershipPricing({
       categoryName,
       subscriptionDetails: subDetails,
       startDate: dateJoined,
       tenantId,
+      profileId,
+      applicationId,
     });
 
     // Generate invoice document number

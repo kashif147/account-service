@@ -243,10 +243,41 @@ export async function findByStripePaymentIntent(paymentIntentId, ctx) {
 export async function reconcileStripeEvent(input, ctx) {
   const parsed = zReconcile.parse(input);
   ensureIntegerCents(parsed.payment.amount);
-  const filter = {
-    tenantId: ctx.tenantId,
-    "stripe.paymentIntentId": parsed.payment.paymentIntentId,
-  };
+
+  // First, try to find existing payment by paymentIntentId (with or without tenantId)
+  // This handles cases where payment was created via createIntent() but webhook has different tenantId
+  let existingPayment = null;
+  if (parsed.payment.paymentIntentId) {
+    // Try with tenantId first (most specific)
+    if (ctx.tenantId) {
+      existingPayment = await Payment.findOne({
+        tenantId: ctx.tenantId,
+        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+      }).lean();
+    }
+
+    // If not found and tenantId was provided, also try without tenantId filter
+    // (in case payment was created before tenantId was set)
+    if (!existingPayment && parsed.payment.paymentIntentId) {
+      existingPayment = await Payment.findOne({
+        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+      }).lean();
+    }
+  }
+
+  // Log if we found an existing payment (helps debug duplicates)
+  if (existingPayment) {
+    const logger = (await import("../config/logger.js")).default;
+    logger.info(
+      {
+        paymentId: existingPayment._id,
+        paymentIntentId: parsed.payment.paymentIntentId,
+        existingTenantId: existingPayment.tenantId,
+        webhookTenantId: ctx.tenantId,
+      },
+      "Found existing payment for webhook reconciliation"
+    );
+  }
 
   // Extract memberId and applicationId from metadata
   // Support multiple naming conventions: memberId, member_id, userId
@@ -260,6 +291,20 @@ export async function reconcileStripeEvent(input, ctx) {
   const applicationId =
     metadata.applicationId || metadata.application_id || undefined;
 
+  // Build filter - use existing payment's tenantId if found, otherwise use ctx.tenantId
+  const filter = {
+    tenantId: existingPayment?.tenantId || ctx.tenantId,
+    "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+  };
+
+  // If tenantId is missing, we can't safely upsert (would violate unique constraint)
+  if (!filter.tenantId) {
+    throw AppError.badRequest(
+      "tenantId is required for payment reconciliation",
+      { paymentIntentId: parsed.payment.paymentIntentId }
+    );
+  }
+
   const update = {
     $set: {
       amount: parsed.payment.amount,
@@ -268,10 +313,12 @@ export async function reconcileStripeEvent(input, ctx) {
       "stripe.chargeId": parsed.payment.chargeId,
       "stripe.customerId": parsed.payment.customerId,
       "stripe.paymentMethodId": parsed.payment.paymentMethodId,
+      "stripe.paymentIntentId": parsed.payment.paymentIntentId, // Ensure it's set
       metadata: metadata,
       "audit.updatedBy": ctx.userId || ctx.memberId || "system",
     },
     $setOnInsert: {
+      tenantId: filter.tenantId, // Ensure tenantId is set on insert
       purpose: "subscriptionFee",
       mode: "stripe",
       "audit.createdBy": ctx.userId || ctx.memberId || "system",
@@ -286,14 +333,84 @@ export async function reconcileStripeEvent(input, ctx) {
     update.$set.applicationId = applicationId;
   }
 
-  const options = { upsert: true, new: true, setDefaultsOnInsert: true };
-  const doc = await Payment.findOneAndUpdate(filter, update, options);
-
-  if (parsed.payment.status === "succeeded") {
-    await postJournalForPayment(doc, ctx);
+  // If existing payment found, ensure we update the correct one
+  if (existingPayment) {
+    filter._id = existingPayment._id;
   }
 
-  return { ok: true };
+  const options = {
+    upsert: !existingPayment,
+    new: true,
+    setDefaultsOnInsert: true,
+  };
+
+  try {
+    const doc = await Payment.findOneAndUpdate(filter, update, options);
+
+    // Only create journal entry if status is succeeded and we haven't already created one
+    if (parsed.payment.status === "succeeded") {
+      // Check if journal entry already exists for this payment
+      const { GLTransaction } = await import(
+        "../models/glTransaction.model.js"
+      );
+      const existingJournal = await GLTransaction.findOne({
+        docNo: `RCP-${doc._id}`,
+      }).lean();
+
+      if (!existingJournal) {
+        await postJournalForPayment(doc, ctx);
+      }
+    }
+
+    return { ok: true };
+  } catch (error) {
+    // Handle duplicate key errors (race condition)
+    if (error.code === 11000) {
+      // Try to find the existing payment
+      const existing = await Payment.findOne({
+        tenantId: filter.tenantId,
+        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+      }).lean();
+
+      if (existing) {
+        // Update the existing payment instead
+        const updateOnly = {
+          $set: {
+            amount: parsed.payment.amount,
+            currency: parsed.payment.currency,
+            status: parsed.payment.status,
+            "stripe.chargeId": parsed.payment.chargeId,
+            "stripe.customerId": parsed.payment.customerId,
+            "stripe.paymentMethodId": parsed.payment.paymentMethodId,
+            metadata: metadata,
+            "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+          },
+        };
+        if (memberId) updateOnly.$set.memberId = memberId;
+        if (applicationId) updateOnly.$set.applicationId = applicationId;
+
+        const doc = await Payment.findByIdAndUpdate(existing._id, updateOnly, {
+          new: true,
+        });
+
+        if (parsed.payment.status === "succeeded") {
+          const { GLTransaction } = await import(
+            "../models/glTransaction.model.js"
+          );
+          const existingJournal = await GLTransaction.findOne({
+            docNo: `RCP-${doc._id}`,
+          }).lean();
+
+          if (!existingJournal) {
+            await postJournalForPayment(doc, ctx);
+          }
+        }
+
+        return { ok: true };
+      }
+    }
+    throw error;
+  }
 }
 
 export async function recordExternal(input, ctx) {
@@ -467,15 +584,7 @@ export async function postJournalForPayment(payment, ctx) {
     metadataObj.application_id ||
     null;
 
-  // Determine effective member ID (prioritize memberId over applicationId)
-  // Receipt should be against memberId if present, otherwise against applicationId
-  const effectiveMemberId = memberId
-    ? memberId
-    : applicationId
-    ? `app:${applicationId}`
-    : null;
-
-  if (!effectiveMemberId) {
+  if (!memberId && !applicationId) {
     // Log warning but don't throw - payment is recorded, journal entry can be created manually
     const logger = (await import("../config/logger.js")).default;
     logger.warn(
@@ -490,22 +599,36 @@ export async function postJournalForPayment(payment, ctx) {
     return null;
   }
 
+  // Build entry for account 2020 - use memberId if present, otherwise applicationId
+  const entry2020 = {
+    accountCode: "2020",
+    dc: "C",
+    amount,
+    periodBucket: "current",
+  };
+
+  if (memberId) {
+    entry2020.memberId = memberId;
+  } else if (applicationId) {
+    entry2020.applicationId = applicationId;
+  }
+
   const lines = [
     { accountCode: clearingCode, dc: "D", amount }, // Debit clearing account
-    {
-      accountCode: "2020",
-      dc: "C",
-      amount,
-      memberId: effectiveMemberId,
-      periodBucket: "current",
-    }, // Credit Payment on Account - Member credits (2020)
+    entry2020, // Credit Payment on Account - Member credits (2020)
   ];
 
   // Add Stripe fee entries if payment is via Stripe
+  let settlement = null;
   if (payment.mode === "stripe") {
     const { feeNoVat } = stripeFeeBreakdown(amount);
     lines.push({ accountCode: "5100", dc: "D", amount: feeNoVat }); // Payment processing fees
     lines.push({ accountCode: clearingCode, dc: "C", amount: feeNoVat }); // Credit clearing for fees
+    // Set settlement info for Stripe payments
+    settlement = {
+      provider: "Stripe",
+      status: "PENDING",
+    };
   }
 
   // Generate document number
@@ -527,6 +650,7 @@ export async function postJournalForPayment(payment, ctx) {
     docNo,
     memo,
     lines,
+    settlement,
   });
 
   return journal;
