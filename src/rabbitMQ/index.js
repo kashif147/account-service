@@ -5,6 +5,7 @@ import {
   consumer,
   EVENT_TYPES as MIDDLEWARE_EVENT_TYPES,
   shutdown,
+  connectionManager,
 } from "@projectShell/rabbitmq-middleware";
 
 import logger from "../config/logger.js";
@@ -93,27 +94,50 @@ export async function setupConsumers() {
       messageTtl: 3600000, // 1 hour
     });
 
-    await consumer.bindQueue(USER_QUEUE, "user.events", [
-      "user.crm.created.v1",
-      "user.crm.updated.v1",
-    ]);
+    // Ensure user.events exchange exists on consumer channel before binding
+    try {
+      const consumerChannel = await connectionManager.getNamedChannel(
+        "consumer",
+        10
+      );
+      await consumerChannel.assertExchange("user.events", "topic", {
+        durable: true,
+      });
+    } catch (error) {
+      logger.warn(
+        { error: error.message },
+        "Failed to assert user.events exchange, will attempt binding anyway"
+      );
+    }
 
-    consumer.registerHandler(
-      "user.crm.created.v1",
-      async (payload, context) => {
-        await handleCrmUserCreated(payload);
-      }
-    );
+    try {
+      await consumer.bindQueue(USER_QUEUE, "user.events", [
+        "user.crm.created.v1",
+        "user.crm.updated.v1",
+      ]);
 
-    consumer.registerHandler(
-      "user.crm.updated.v1",
-      async (payload, context) => {
-        await handleCrmUserUpdated(payload);
-      }
-    );
+      consumer.registerHandler(
+        "user.crm.created.v1",
+        async (payload, context) => {
+          await handleCrmUserCreated(payload);
+        }
+      );
 
-    await consumer.consume(USER_QUEUE, { prefetch: 10 });
-    logger.info("CRM user events consumer ready", { queue: USER_QUEUE });
+      consumer.registerHandler(
+        "user.crm.updated.v1",
+        async (payload, context) => {
+          await handleCrmUserUpdated(payload);
+        }
+      );
+
+      await consumer.consume(USER_QUEUE, { prefetch: 10 });
+      logger.info("CRM user events consumer ready", { queue: USER_QUEUE });
+    } catch (error) {
+      logger.error(
+        { error: error.message, queue: USER_QUEUE },
+        "Failed to set up CRM user events consumer, continuing without it"
+      );
+    }
 
     // Application approval events queue (application.events exchange)
     const APPLICATION_QUEUE = "accounts.application.events";
@@ -128,19 +152,44 @@ export async function setupConsumers() {
       messageTtl: 3600000, // 1 hour
     });
 
-    await consumer.bindQueue(APPLICATION_QUEUE, "application.events", [
-      "applications.review.approved.v1",
-    ]);
+    // Ensure application.events exchange exists on consumer channel before binding
+    try {
+      const consumerChannel = await connectionManager.getNamedChannel(
+        "consumer",
+        10
+      );
+      await consumerChannel.assertExchange("application.events", "topic", {
+        durable: true,
+      });
+    } catch (error) {
+      logger.warn(
+        { error: error.message },
+        "Failed to assert application.events exchange, will attempt binding anyway"
+      );
+    }
 
-    consumer.registerHandler(
-      "applications.review.approved.v1",
-      async (payload) => {
-        await handleApplicationApproved(payload);
-      }
-    );
+    try {
+      await consumer.bindQueue(APPLICATION_QUEUE, "application.events", [
+        "applications.review.approved.v1",
+      ]);
 
-    await consumer.consume(APPLICATION_QUEUE, { prefetch: 10 });
-    logger.info("Application events consumer ready", { queue: APPLICATION_QUEUE });
+      consumer.registerHandler(
+        "applications.review.approved.v1",
+        async (payload) => {
+          await handleApplicationApproved(payload);
+        }
+      );
+
+      await consumer.consume(APPLICATION_QUEUE, { prefetch: 10 });
+      logger.info("Application events consumer ready", {
+        queue: APPLICATION_QUEUE,
+      });
+    } catch (error) {
+      logger.error(
+        { error: error.message, queue: APPLICATION_QUEUE },
+        "Failed to set up application events consumer, continuing without it"
+      );
+    }
 
     // Product events queue (product.events exchange)
     const PRODUCT_QUEUE = "accounts.product.events";
@@ -165,75 +214,72 @@ export async function setupConsumers() {
       messageTtl: 3600000, // 1 hour
     });
 
-    await consumer.bindQueue(PRODUCT_QUEUE, "product.events", [
-      "product.type.created.v1",
-      "product.type.updated.v1",
-      "product.type.deleted.v1",
-      "product.created.v1",
-      "product.updated.v1",
-      "product.deleted.v1",
-      "pricing.created.v1",
-      "pricing.updated.v1",
-      "pricing.deleted.v1",
-    ]);
+    // Ensure product.events exchange exists on consumer channel before binding
+    try {
+      const consumerChannel = await connectionManager.getNamedChannel(
+        "consumer",
+        10
+      );
+      await consumerChannel.assertExchange("product.events", "topic", {
+        durable: true,
+      });
+      logger.info("Product.events exchange asserted on consumer channel");
+    } catch (error) {
+      logger.warn(
+        { error: error.message },
+        "Failed to assert product.events exchange, will attempt binding anyway"
+      );
+    }
 
-    consumer.registerHandler(
-      "product.type.created.v1",
-      async (payload) => {
+    try {
+      await consumer.bindQueue(PRODUCT_QUEUE, "product.events", [
+        "product.type.created.v1",
+        "product.type.updated.v1",
+        "product.type.deleted.v1",
+        "product.created.v1",
+        "product.updated.v1",
+        "product.deleted.v1",
+        "pricing.created.v1",
+        "pricing.updated.v1",
+        "pricing.deleted.v1",
+      ]);
+
+      consumer.registerHandler("product.type.created.v1", async (payload) => {
         await handleProductTypeCreated(payload);
-      }
-    );
-    consumer.registerHandler(
-      "product.type.updated.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("product.type.updated.v1", async (payload) => {
         await handleProductTypeUpdated(payload);
-      }
-    );
-    consumer.registerHandler(
-      "product.type.deleted.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("product.type.deleted.v1", async (payload) => {
         await handleProductTypeDeleted(payload);
-      }
-    );
-    consumer.registerHandler(
-      "product.created.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("product.created.v1", async (payload) => {
         await handleProductCreated(payload);
-      }
-    );
-    consumer.registerHandler(
-      "product.updated.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("product.updated.v1", async (payload) => {
         await handleProductUpdated(payload);
-      }
-    );
-    consumer.registerHandler(
-      "product.deleted.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("product.deleted.v1", async (payload) => {
         await handleProductDeleted(payload);
-      }
-    );
-    consumer.registerHandler(
-      "pricing.created.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("pricing.created.v1", async (payload) => {
         await handlePricingCreated(payload);
-      }
-    );
-    consumer.registerHandler(
-      "pricing.updated.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("pricing.updated.v1", async (payload) => {
         await handlePricingUpdated(payload);
-      }
-    );
-    consumer.registerHandler(
-      "pricing.deleted.v1",
-      async (payload) => {
+      });
+      consumer.registerHandler("pricing.deleted.v1", async (payload) => {
         await handlePricingDeleted(payload);
-      }
-    );
+      });
 
-    await consumer.consume(PRODUCT_QUEUE, { prefetch: 10 });
-    logger.info("Product events consumer ready", { queue: PRODUCT_QUEUE });
+      await consumer.consume(PRODUCT_QUEUE, { prefetch: 10 });
+      logger.info("Product events consumer ready", { queue: PRODUCT_QUEUE });
+    } catch (error) {
+      logger.error(
+        { error: error.message, queue: PRODUCT_QUEUE },
+        "Failed to set up product events consumer, continuing without it"
+      );
+    }
 
     logger.info("All consumers set up successfully");
   } catch (error) {
