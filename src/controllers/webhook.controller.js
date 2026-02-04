@@ -6,10 +6,12 @@ import logger from "../config/logger.js";
 
 export async function handleStripeWebhook(req, res) {
   const sig = req.headers["stripe-signature"];
-  
+
   // Ensure body is a Buffer (raw body from express.raw())
-  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
-  
+  const rawBody = Buffer.isBuffer(req.body)
+    ? req.body
+    : Buffer.from(JSON.stringify(req.body));
+
   let event;
   try {
     event = stripe.webhooks.constructEvent(
@@ -126,6 +128,68 @@ async function processStripeEvent(event) {
       }
       break;
     }
+    case "charge.succeeded": {
+      // Handle charge.succeeded idempotently
+      // Since payment_intent.succeeded already handles the reconciliation,
+      // we check if payment already reconciled to avoid duplicate processing
+      const charge = obj;
+      const paymentIntentId = charge.payment_intent;
+
+      if (!paymentIntentId) {
+        logger.warn(
+          {
+            eventId: event.id,
+            eventType: event.type,
+            chargeId: charge.id,
+          },
+          "charge.succeeded event received but no payment_intent found - skipping"
+        );
+        return;
+      }
+
+      // Check if payment already reconciled via payment_intent.succeeded
+      const { default: Payment } = await import("../models/payment.model.js");
+      const existingPayment = await Payment.findOne({
+        "stripe.paymentIntentId": paymentIntentId,
+        status: "succeeded",
+      }).lean();
+
+      if (existingPayment) {
+        logger.info(
+          {
+            eventId: event.id,
+            eventType: event.type,
+            paymentIntentId,
+            paymentId: existingPayment._id,
+          },
+          "charge.succeeded event received but payment already reconciled via payment_intent.succeeded - skipping"
+        );
+        return; // Skip reconciliation - already handled
+      }
+
+      // If payment not found or not succeeded, reconcile it (fallback)
+      logger.info(
+        {
+          eventId: event.id,
+          eventType: event.type,
+          paymentIntentId,
+          chargeId: charge.id,
+        },
+        "charge.succeeded event received - attempting reconciliation (payment not yet succeeded)"
+      );
+
+      paymentData = {
+        paymentIntentId: paymentIntentId,
+        amount: charge.amount,
+        currency: charge.currency,
+        status: "succeeded",
+        chargeId: charge.id,
+        customerId: charge.customer || undefined,
+        paymentMethodId: charge.payment_method || undefined,
+        metadata: charge.metadata || {},
+      };
+      break;
+    }
     case "payment_intent.payment_failed": {
       const pi = obj;
       paymentData = {
@@ -146,12 +210,15 @@ async function processStripeEvent(event) {
     }
   }
 
-  await reconcileStripeEvent(
-    {
-      eventId: event.id,
-      type: event.type,
-      payment: paymentData,
-    },
-    { tenantId }
-  );
+  // Only reconcile if paymentData was set (not all cases set it)
+  if (paymentData && paymentData.paymentIntentId) {
+    await reconcileStripeEvent(
+      {
+        eventId: event.id,
+        type: event.type,
+        payment: paymentData,
+      },
+      { tenantId }
+    );
+  }
 }

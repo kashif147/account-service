@@ -144,6 +144,36 @@ export async function createIntent(input, ctx) {
         },
         "Duplicate payment detected - returning existing payment"
       );
+
+      // Ensure the existing payment has memberId/applicationId if they're missing
+      // This is important for journal entry creation later
+      if (
+        (memberId || applicationId) &&
+        !existingDuplicate.memberId &&
+        !existingDuplicate.applicationId
+      ) {
+        const updateFields = {};
+        if (memberId && !existingDuplicate.memberId) {
+          updateFields.memberId = memberId;
+        }
+        if (applicationId && !existingDuplicate.applicationId) {
+          updateFields.applicationId = applicationId;
+        }
+
+        if (Object.keys(updateFields).length > 0) {
+          await Payment.findByIdAndUpdate(existingDuplicate._id, {
+            $set: updateFields,
+          });
+          logger.info(
+            {
+              paymentId: existingDuplicate._id,
+              updatedFields: updateFields,
+            },
+            "Updated existing payment with memberId/applicationId"
+          );
+        }
+      }
+
       return await buildIntentResponse(existingDuplicate, stripe);
     }
   }
@@ -190,6 +220,36 @@ export async function createIntent(input, ctx) {
         },
         "Race condition detected - payment created within last minute, returning existing payment"
       );
+
+      // Ensure the existing payment has memberId/applicationId if they're missing
+      // This is important for journal entry creation later
+      if (
+        (memberId || applicationId) &&
+        !recentPayment.memberId &&
+        !recentPayment.applicationId
+      ) {
+        const updateFields = {};
+        if (memberId && !recentPayment.memberId) {
+          updateFields.memberId = memberId;
+        }
+        if (applicationId && !recentPayment.applicationId) {
+          updateFields.applicationId = applicationId;
+        }
+
+        if (Object.keys(updateFields).length > 0) {
+          await Payment.findByIdAndUpdate(recentPayment._id, {
+            $set: updateFields,
+          });
+          logger.info(
+            {
+              paymentId: recentPayment._id,
+              updatedFields: updateFields,
+            },
+            "Updated existing payment with memberId/applicationId (race condition)"
+          );
+        }
+      }
+
       return await buildIntentResponse(recentPayment, stripe);
     }
   }
@@ -460,15 +520,23 @@ export async function reconcileStripeEvent(input, ctx) {
 
   // Extract memberId and applicationId from metadata
   // Support multiple naming conventions: memberId, member_id, userId
+  // Also preserve existing memberId/applicationId from payment if metadata doesn't have them
   const metadata = parsed.payment.metadata || {};
-  const memberId =
+  const memberIdFromMetadata =
     metadata.memberId ||
     metadata.member_id ||
     metadata.userId ||
     metadata.user_id ||
     undefined;
-  const applicationId =
+  const applicationIdFromMetadata =
     metadata.applicationId || metadata.application_id || undefined;
+
+  // Use metadata values if present, otherwise preserve existing payment values
+  // This ensures journal entries can be created even if webhook metadata is incomplete
+  const memberId =
+    memberIdFromMetadata || existingPayment?.memberId || undefined;
+  const applicationId =
+    applicationIdFromMetadata || existingPayment?.applicationId || undefined;
 
   // Build filter - ALWAYS use existing payment's tenantId if found
   // This prevents creating duplicates when tenantId doesn't match
@@ -505,12 +573,19 @@ export async function reconcileStripeEvent(input, ctx) {
     },
   };
 
-  // Set memberId and applicationId if present in metadata
+  // Set memberId and applicationId - prefer metadata, but preserve existing if metadata missing
+  // This is critical for journal entry creation
   if (memberId) {
     update.$set.memberId = memberId;
+  } else if (existingPayment?.memberId) {
+    // Preserve existing memberId if metadata doesn't have it
+    update.$set.memberId = existingPayment.memberId;
   }
   if (applicationId) {
     update.$set.applicationId = applicationId;
+  } else if (existingPayment?.applicationId) {
+    // Preserve existing applicationId if metadata doesn't have it
+    update.$set.applicationId = existingPayment.applicationId;
   }
 
   // If existing payment found, ensure we update the correct one
@@ -538,7 +613,59 @@ export async function reconcileStripeEvent(input, ctx) {
       }).lean();
 
       if (!existingJournal) {
-        await postJournalForPayment(doc, ctx);
+        const logger = (await import("../config/logger.js")).default;
+        logger.info(
+          {
+            paymentId: doc._id,
+            paymentIntentId: parsed.payment.paymentIntentId,
+            memberId: doc.memberId,
+            applicationId: doc.applicationId,
+            status: doc.status,
+          },
+          "Creating journal entry for succeeded payment"
+        );
+        try {
+          const journal = await postJournalForPayment(doc, ctx);
+          if (journal) {
+            logger.info(
+              {
+                paymentId: doc._id,
+                journalId: journal._id,
+                docNo: journal.docNo,
+              },
+              "Journal entry created successfully for payment"
+            );
+          } else {
+            logger.warn(
+              {
+                paymentId: doc._id,
+                memberId: doc.memberId,
+                applicationId: doc.applicationId,
+              },
+              "Journal entry creation returned null - missing memberId or applicationId"
+            );
+          }
+        } catch (journalError) {
+          logger.error(
+            {
+              paymentId: doc._id,
+              error: journalError.message,
+              stack: journalError.stack,
+            },
+            "Failed to create journal entry for payment"
+          );
+          // Don't throw - payment is reconciled, journal can be created manually
+        }
+      } else {
+        const logger = (await import("../config/logger.js")).default;
+        logger.info(
+          {
+            paymentId: doc._id,
+            journalId: existingJournal._id,
+            docNo: existingJournal.docNo,
+          },
+          "Journal entry already exists for payment"
+        );
       }
     }
 
@@ -553,6 +680,10 @@ export async function reconcileStripeEvent(input, ctx) {
 
       if (existing) {
         // Update the existing payment instead
+        // Preserve existing memberId/applicationId if metadata doesn't have them
+        const memberIdToUse = memberId || existing.memberId;
+        const applicationIdToUse = applicationId || existing.applicationId;
+
         const updateOnly = {
           $set: {
             amount: parsed.payment.amount,
@@ -565,8 +696,9 @@ export async function reconcileStripeEvent(input, ctx) {
             "audit.updatedBy": ctx.userId || ctx.memberId || "system",
           },
         };
-        if (memberId) updateOnly.$set.memberId = memberId;
-        if (applicationId) updateOnly.$set.applicationId = applicationId;
+        if (memberIdToUse) updateOnly.$set.memberId = memberIdToUse;
+        if (applicationIdToUse)
+          updateOnly.$set.applicationId = applicationIdToUse;
 
         const doc = await Payment.findByIdAndUpdate(existing._id, updateOnly, {
           new: true,
@@ -581,7 +713,49 @@ export async function reconcileStripeEvent(input, ctx) {
           }).lean();
 
           if (!existingJournal) {
-            await postJournalForPayment(doc, ctx);
+            const logger = (await import("../config/logger.js")).default;
+            logger.info(
+              {
+                paymentId: doc._id,
+                paymentIntentId: parsed.payment.paymentIntentId,
+                memberId: doc.memberId,
+                applicationId: doc.applicationId,
+                status: doc.status,
+              },
+              "Creating journal entry for succeeded payment (duplicate key recovery)"
+            );
+            try {
+              const journal = await postJournalForPayment(doc, ctx);
+              if (journal) {
+                logger.info(
+                  {
+                    paymentId: doc._id,
+                    journalId: journal._id,
+                    docNo: journal.docNo,
+                  },
+                  "Journal entry created successfully for payment (duplicate key recovery)"
+                );
+              } else {
+                logger.warn(
+                  {
+                    paymentId: doc._id,
+                    memberId: doc.memberId,
+                    applicationId: doc.applicationId,
+                  },
+                  "Journal entry creation returned null - missing memberId or applicationId (duplicate key recovery)"
+                );
+              }
+            } catch (journalError) {
+              logger.error(
+                {
+                  paymentId: doc._id,
+                  error: journalError.message,
+                  stack: journalError.stack,
+                },
+                "Failed to create journal entry for payment (duplicate key recovery)"
+              );
+              // Don't throw - payment is reconciled, journal can be created manually
+            }
           }
         }
 
@@ -726,9 +900,21 @@ export async function postJournalForPayment(payment, ctx) {
     "../controllers/journal.controller.js"
   );
   const { stripeFeeBreakdown } = await import("../helpers/fees.js");
+  const logger = (await import("../config/logger.js")).default;
 
   // Convert amount from cents to currency units
   const amount = payment.amount / 100;
+
+  logger.info(
+    {
+      paymentId: payment._id,
+      amount,
+      mode: payment.mode,
+      memberId: payment.memberId,
+      applicationId: payment.applicationId,
+    },
+    "postJournalForPayment called"
+  );
 
   // Determine clearing code based on payment method
   // 1220 = Card Gateway Clearing (for Stripe/card payments)
