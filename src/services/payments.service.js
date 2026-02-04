@@ -254,35 +254,52 @@ export async function createIntent(input, ctx) {
     }
   }
 
-  // Generate deterministic Stripe idempotency key based on payment parameters
-  // This ensures Stripe returns the same payment intent even if client sends different keys
-  // Format: payment-{tenantId}-{memberId|applicationId}-{amount}-{purpose}-{currency}
+  // Use client's idempotency key for Stripe if provided, otherwise generate a unique one
+  // Stripe requires idempotency keys to be used with exact same parameters, so we can't use
+  // a deterministic key based on payment parameters (they might vary between requests)
+  // We already have duplicate payment checks in place, so we don't need deterministic keys
   const crypto = await import("crypto");
-  const stripeIdempotencyKeyParts = [
-    "payment",
-    ctx.tenantId,
-    memberId || applicationId || "unknown",
-    parsed.amount.toString(),
-    parsed.purpose,
-    normalizedCurrency,
-  ];
-  const deterministicStripeKey = crypto
-    .createHash("sha256")
-    .update(stripeIdempotencyKeyParts.join("-"))
-    .digest("hex")
-    .substring(0, 64); // Stripe idempotency keys are max 64 chars
+  let stripeIdempotencyKey = null;
+
+  if (ctx.idempotencyKey) {
+    // Use client's idempotency key - hash it to ensure it's valid format for Stripe
+    // Stripe keys must be max 64 chars, so we hash if longer
+    if (ctx.idempotencyKey.length <= 64) {
+      stripeIdempotencyKey = ctx.idempotencyKey;
+    } else {
+      stripeIdempotencyKey = crypto
+        .createHash("sha256")
+        .update(ctx.idempotencyKey)
+        .digest("hex")
+        .substring(0, 64);
+    }
+  } else {
+    // Generate a unique key for this request
+    // Include timestamp to ensure uniqueness
+    const uniqueKeyParts = [
+      "payment",
+      ctx.tenantId,
+      Date.now().toString(),
+      crypto.randomBytes(16).toString("hex"),
+    ];
+    stripeIdempotencyKey = crypto
+      .createHash("sha256")
+      .update(uniqueKeyParts.join("-"))
+      .digest("hex")
+      .substring(0, 64);
+  }
 
   const logger = (await import("../config/logger.js")).default;
   logger.info(
     {
       clientIdempotencyKey: ctx.idempotencyKey,
-      deterministicStripeKey,
+      stripeIdempotencyKey,
       memberId,
       applicationId,
       amount: parsed.amount,
       purpose: parsed.purpose,
     },
-    "Creating Stripe payment intent with deterministic idempotency key"
+    "Creating Stripe payment intent with idempotency key"
   );
 
   let stripeResult = {};
@@ -313,7 +330,7 @@ export async function createIntent(input, ctx) {
           process.env.PORTAL_BASE_URL || "https://example.com"
         }/payments/cancel`,
       },
-      { idempotencyKey: deterministicStripeKey }
+      { idempotencyKey: stripeIdempotencyKey }
     );
     stripeResult = session;
     status = "requires_action";
@@ -344,15 +361,44 @@ export async function createIntent(input, ctx) {
       }
     }
   } else {
-    const intent = await stripe.paymentIntents.create(
-      {
-        amount: parsed.amount,
-        currency: normalizedCurrency,
-        payment_method_types: ["card"],
-        metadata: parsed.metadata || {},
-      },
-      { idempotencyKey: deterministicStripeKey }
-    );
+    let intent;
+    try {
+      intent = await stripe.paymentIntents.create(
+        {
+          amount: parsed.amount,
+          currency: normalizedCurrency,
+          payment_method_types: ["card"],
+          metadata: parsed.metadata || {},
+        },
+        { idempotencyKey: stripeIdempotencyKey }
+      );
+    } catch (stripeError) {
+      // Handle Stripe idempotency errors - retry without idempotency key
+      // This happens when the same key was used with different parameters
+      if (
+        stripeError.type === "StripeIdempotencyError" ||
+        stripeError.rawType === "idempotency_error"
+      ) {
+        logger.warn(
+          {
+            stripeIdempotencyKey,
+            error: stripeError.message,
+            clientIdempotencyKey: ctx.idempotencyKey,
+          },
+          "Stripe idempotency error - retrying without idempotency key"
+        );
+        // Retry without idempotency key
+        intent = await stripe.paymentIntents.create({
+          amount: parsed.amount,
+          currency: normalizedCurrency,
+          payment_method_types: ["card"],
+          metadata: parsed.metadata || {},
+        });
+      } else {
+        throw stripeError;
+      }
+    }
+
     stripeResult = intent;
     status = mapStripeStatusToDomain(intent.status) || "requires_action";
     stripeIds = {
@@ -369,7 +415,6 @@ export async function createIntent(input, ctx) {
         .select("stripe status _id")
         .lean();
       if (existingByIntent) {
-        const logger = (await import("../config/logger.js")).default;
         logger.warn(
           {
             existingPaymentId: existingByIntent._id,
