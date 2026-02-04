@@ -361,6 +361,59 @@ export async function createIntent(input, ctx) {
       }
     }
   } else {
+    // Check if we already have a payment with a paymentIntentId before creating a new one
+    // This prevents creating duplicate payment intents if two requests come in simultaneously
+    // We check by looking for any recent payment with same parameters that might have a paymentIntentId
+    if (memberId || applicationId) {
+      const recentCheck = {
+        tenantId: ctx.tenantId,
+        purpose: parsed.purpose,
+        amount: parsed.amount,
+        createdAt: { $gte: new Date(Date.now() - 2 * 60 * 1000) }, // Last 2 minutes
+        "stripe.paymentIntentId": { $exists: true, $ne: null },
+      };
+      if (memberId) recentCheck.memberId = memberId;
+      if (applicationId) recentCheck.applicationId = applicationId;
+
+      const recentWithIntent = await Payment.findOne(recentCheck)
+        .select("stripe status _id memberId applicationId")
+        .lean();
+
+      if (recentWithIntent && recentWithIntent.stripe?.paymentIntentId) {
+        logger.warn(
+          {
+            existingPaymentId: recentWithIntent._id,
+            existingPaymentIntentId: recentWithIntent.stripe.paymentIntentId,
+            memberId,
+            applicationId,
+            amount: parsed.amount,
+          },
+          "Recent payment with paymentIntentId found - returning existing payment to prevent duplicate Stripe intent"
+        );
+
+        // Ensure memberId/applicationId are set
+        if (
+          (memberId || applicationId) &&
+          !recentWithIntent.memberId &&
+          !recentWithIntent.applicationId
+        ) {
+          const updateFields = {};
+          if (memberId && !recentWithIntent.memberId)
+            updateFields.memberId = memberId;
+          if (applicationId && !recentWithIntent.applicationId)
+            updateFields.applicationId = applicationId;
+
+          if (Object.keys(updateFields).length > 0) {
+            await Payment.findByIdAndUpdate(recentWithIntent._id, {
+              $set: updateFields,
+            });
+          }
+        }
+
+        return await buildIntentResponse(recentWithIntent, stripe);
+      }
+    }
+
     let intent;
     try {
       intent = await stripe.paymentIntents.create(
@@ -412,7 +465,7 @@ export async function createIntent(input, ctx) {
       const existingByIntent = await Payment.findOne({
         "stripe.paymentIntentId": stripeIds.paymentIntentId,
       })
-        .select("stripe status _id")
+        .select("stripe status _id memberId applicationId")
         .lean();
       if (existingByIntent) {
         logger.warn(
@@ -423,6 +476,35 @@ export async function createIntent(input, ctx) {
           },
           "Payment with this Stripe payment intent ID already exists - returning existing payment"
         );
+
+        // Ensure memberId/applicationId are set if missing
+        if (
+          (memberId || applicationId) &&
+          !existingByIntent.memberId &&
+          !existingByIntent.applicationId
+        ) {
+          const updateFields = {};
+          if (memberId && !existingByIntent.memberId) {
+            updateFields.memberId = memberId;
+          }
+          if (applicationId && !existingByIntent.applicationId) {
+            updateFields.applicationId = applicationId;
+          }
+
+          if (Object.keys(updateFields).length > 0) {
+            await Payment.findByIdAndUpdate(existingByIntent._id, {
+              $set: updateFields,
+            });
+            logger.info(
+              {
+                paymentId: existingByIntent._id,
+                updatedFields: updateFields,
+              },
+              "Updated existing payment with memberId/applicationId (paymentIntentId check)"
+            );
+          }
+        }
+
         return await buildIntentResponse(existingByIntent, stripe);
       }
     }
@@ -647,6 +729,21 @@ export async function reconcileStripeEvent(input, ctx) {
   try {
     const doc = await Payment.findOneAndUpdate(filter, update, options);
 
+    if (!doc) {
+      const logger = (await import("../config/logger.js")).default;
+      logger.error(
+        {
+          paymentIntentId: parsed.payment.paymentIntentId,
+          filter,
+          existingPayment: existingPayment?._id,
+        },
+        "Payment.findOneAndUpdate returned null - payment not found or not updated"
+      );
+      throw new Error(
+        `Failed to update or create payment for paymentIntentId: ${parsed.payment.paymentIntentId}`
+      );
+    }
+
     // Only create journal entry if status is succeeded and we haven't already created one
     if (parsed.payment.status === "succeeded") {
       // Check if journal entry already exists for this payment
@@ -716,6 +813,64 @@ export async function reconcileStripeEvent(input, ctx) {
 
     return { ok: true };
   } catch (error) {
+    const logger = (await import("../config/logger.js")).default;
+
+    // If payment already exists and is succeeded, that's okay - just ensure journal entry exists
+    if (
+      existingPayment &&
+      existingPayment.status === "succeeded" &&
+      parsed.payment.status === "succeeded"
+    ) {
+      logger.info(
+        {
+          paymentId: existingPayment._id,
+          paymentIntentId: parsed.payment.paymentIntentId,
+          existingStatus: existingPayment.status,
+        },
+        "Payment already succeeded - ensuring journal entry exists"
+      );
+
+      // Check if journal entry exists
+      const { GLTransaction } = await import(
+        "../models/glTransaction.model.js"
+      );
+      const existingJournal = await GLTransaction.findOne({
+        docNo: `RCP-${existingPayment._id}`,
+      }).lean();
+
+      if (!existingJournal) {
+        // Try to get the full payment document
+        const fullPayment = await Payment.findById(existingPayment._id).lean();
+        if (fullPayment) {
+          try {
+            // postJournalForPayment is defined in this file, call it directly
+            // We need to import it at the top level, but for now use the function reference
+            const journal = await postJournalForPayment(fullPayment, ctx);
+            if (journal) {
+              logger.info(
+                {
+                  paymentId: fullPayment._id,
+                  journalId: journal._id,
+                  docNo: journal.docNo,
+                },
+                "Journal entry created for already-succeeded payment"
+              );
+            }
+          } catch (journalError) {
+            logger.error(
+              {
+                paymentId: fullPayment._id,
+                error: journalError.message,
+              },
+              "Failed to create journal entry for already-succeeded payment"
+            );
+          }
+        }
+      }
+
+      return { ok: true };
+    }
+
     // Handle duplicate key errors (race condition)
     if (error.code === 11000) {
       // Try to find the existing payment by paymentIntentId alone

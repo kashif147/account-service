@@ -130,8 +130,8 @@ async function processStripeEvent(event) {
     }
     case "charge.succeeded": {
       // Handle charge.succeeded idempotently
-      // Since payment_intent.succeeded already handles the reconciliation,
-      // we check if payment already reconciled to avoid duplicate processing
+      // Since payment_intent.succeeded is the primary event, we should skip charge.succeeded
+      // to avoid processing the same payment twice and causing conflicts
       const charge = obj;
       const paymentIntentId = charge.payment_intent;
 
@@ -147,11 +147,11 @@ async function processStripeEvent(event) {
         return;
       }
 
-      // Check if payment already reconciled via payment_intent.succeeded
+      // Always skip charge.succeeded - payment_intent.succeeded is the source of truth
+      // This prevents conflicts when charge.succeeded arrives first
       const { default: Payment } = await import("../models/payment.model.js");
       const existingPayment = await Payment.findOne({
         "stripe.paymentIntentId": paymentIntentId,
-        status: "succeeded",
       }).lean();
 
       if (existingPayment) {
@@ -161,13 +161,14 @@ async function processStripeEvent(event) {
             eventType: event.type,
             paymentIntentId,
             paymentId: existingPayment._id,
+            existingStatus: existingPayment.status,
           },
-          "charge.succeeded event received but payment already reconciled via payment_intent.succeeded - skipping"
+          "charge.succeeded event received but payment already exists - skipping (payment_intent.succeeded is primary)"
         );
-        return; // Skip reconciliation - already handled
+        return; // Skip - payment_intent.succeeded will handle it
       }
 
-      // If payment not found or not succeeded, reconcile it (fallback)
+      // Only process if payment doesn't exist at all (very rare edge case)
       logger.info(
         {
           eventId: event.id,
@@ -175,20 +176,9 @@ async function processStripeEvent(event) {
           paymentIntentId,
           chargeId: charge.id,
         },
-        "charge.succeeded event received - attempting reconciliation (payment not yet succeeded)"
+        "charge.succeeded event received but payment not found - will be handled by payment_intent.succeeded"
       );
-
-      paymentData = {
-        paymentIntentId: paymentIntentId,
-        amount: charge.amount,
-        currency: charge.currency,
-        status: "succeeded",
-        chargeId: charge.id,
-        customerId: charge.customer || undefined,
-        paymentMethodId: charge.payment_method || undefined,
-        metadata: charge.metadata || {},
-      };
-      break;
+      return; // Skip - let payment_intent.succeeded handle it
     }
     case "payment_intent.payment_failed": {
       const pi = obj;
