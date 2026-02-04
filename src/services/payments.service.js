@@ -75,7 +75,22 @@ export async function createIntent(input, ctx) {
 
   const stripe = getStripe();
 
+  // Extract memberId and applicationId from metadata if not provided directly
+  // (needed for duplicate check before Stripe API call)
+  const metadata = parsed.metadata || {};
+  const memberIdFromMetadata =
+    metadata.memberId ||
+    metadata.member_id ||
+    metadata.userId ||
+    metadata.user_id;
+  const applicationIdFromMetadata =
+    metadata.applicationId || metadata.application_id;
+
+  const memberId = parsed.memberId || memberIdFromMetadata;
+  const applicationId = parsed.applicationId || applicationIdFromMetadata;
+
   // Idempotency and duplicate protection: check for existing payments BEFORE Stripe API call
+  // 1. Check by idempotency key (if provided)
   if (ctx.idempotencyKey) {
     const existingByIdem = await Payment.findOne({
       tenantId: ctx.tenantId,
@@ -87,6 +102,128 @@ export async function createIntent(input, ctx) {
       return await buildIntentResponse(existingByIdem, stripe);
     }
   }
+
+  // 2. Check for recent duplicate payments (same member/application, amount, purpose)
+  // This prevents duplicates even when different idempotency keys are used
+  // Only check for payments created in the last 5 minutes that are still in progress
+  if (memberId || applicationId) {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const duplicateCheck = {
+      tenantId: ctx.tenantId,
+      purpose: parsed.purpose,
+      amount: parsed.amount,
+      createdAt: { $gte: fiveMinutesAgo },
+      status: {
+        $in: ["created", "requires_action", "processing"],
+      },
+    };
+
+    if (memberId) {
+      duplicateCheck.memberId = memberId;
+    }
+    if (applicationId) {
+      duplicateCheck.applicationId = applicationId;
+    }
+
+    const existingDuplicate = await Payment.findOne(duplicateCheck)
+      .select("stripe status _id")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (existingDuplicate) {
+      const logger = (await import("../config/logger.js")).default;
+      logger.warn(
+        {
+          existingPaymentId: existingDuplicate._id,
+          existingStatus: existingDuplicate.status,
+          memberId,
+          applicationId,
+          amount: parsed.amount,
+          purpose: parsed.purpose,
+          idempotencyKey: ctx.idempotencyKey,
+        },
+        "Duplicate payment detected - returning existing payment"
+      );
+      return await buildIntentResponse(existingDuplicate, stripe);
+    }
+  }
+
+  // Final duplicate check right before Stripe API call to catch race conditions
+  // This is the last chance to prevent duplicate Stripe payment intents
+  if (memberId || applicationId) {
+    const oneMinuteAgo = new Date(Date.now() - 60 * 1000); // Check last 1 minute
+    const lastSecondCheck = {
+      tenantId: ctx.tenantId,
+      purpose: parsed.purpose,
+      amount: parsed.amount,
+      createdAt: { $gte: oneMinuteAgo },
+      status: {
+        $in: ["created", "requires_action", "processing"],
+      },
+    };
+
+    if (memberId) {
+      lastSecondCheck.memberId = memberId;
+    }
+    if (applicationId) {
+      lastSecondCheck.applicationId = applicationId;
+    }
+
+    const recentPayment = await Payment.findOne(lastSecondCheck)
+      .select("stripe status _id")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (recentPayment) {
+      const logger = (await import("../config/logger.js")).default;
+      logger.warn(
+        {
+          existingPaymentId: recentPayment._id,
+          existingStatus: recentPayment.status,
+          memberId,
+          applicationId,
+          amount: parsed.amount,
+          purpose: parsed.purpose,
+          idempotencyKey: ctx.idempotencyKey,
+          timeSinceCreation:
+            Date.now() - new Date(recentPayment.createdAt).getTime(),
+        },
+        "Race condition detected - payment created within last minute, returning existing payment"
+      );
+      return await buildIntentResponse(recentPayment, stripe);
+    }
+  }
+
+  // Generate deterministic Stripe idempotency key based on payment parameters
+  // This ensures Stripe returns the same payment intent even if client sends different keys
+  // Format: payment-{tenantId}-{memberId|applicationId}-{amount}-{purpose}-{currency}
+  const crypto = await import("crypto");
+  const stripeIdempotencyKeyParts = [
+    "payment",
+    ctx.tenantId,
+    memberId || applicationId || "unknown",
+    parsed.amount.toString(),
+    parsed.purpose,
+    normalizedCurrency,
+  ];
+  const deterministicStripeKey = crypto
+    .createHash("sha256")
+    .update(stripeIdempotencyKeyParts.join("-"))
+    .digest("hex")
+    .substring(0, 64); // Stripe idempotency keys are max 64 chars
+
+  const logger = (await import("../config/logger.js")).default;
+  logger.info(
+    {
+      clientIdempotencyKey: ctx.idempotencyKey,
+      deterministicStripeKey,
+      memberId,
+      applicationId,
+      amount: parsed.amount,
+      purpose: parsed.purpose,
+    },
+    "Creating Stripe payment intent with deterministic idempotency key"
+  );
 
   let stripeResult = {};
   let status = "created";
@@ -116,7 +253,7 @@ export async function createIntent(input, ctx) {
           process.env.PORTAL_BASE_URL || "https://example.com"
         }/payments/cancel`,
       },
-      { idempotencyKey: ctx.idempotencyKey || undefined }
+      { idempotencyKey: deterministicStripeKey }
     );
     stripeResult = session;
     status = "requires_action";
@@ -124,6 +261,28 @@ export async function createIntent(input, ctx) {
       checkoutSessionId: session.id,
       checkoutUrl: session.url,
     };
+
+    // After creating Stripe checkout session, check if a payment with this session ID already exists
+    // This catches race conditions where two requests create sessions simultaneously
+    if (stripeIds.checkoutSessionId) {
+      const existingBySession = await Payment.findOne({
+        "stripe.checkoutSessionId": stripeIds.checkoutSessionId,
+      })
+        .select("stripe status _id")
+        .lean();
+      if (existingBySession) {
+        const logger = (await import("../config/logger.js")).default;
+        logger.warn(
+          {
+            existingPaymentId: existingBySession._id,
+            checkoutSessionId: stripeIds.checkoutSessionId,
+            existingStatus: existingBySession.status,
+          },
+          "Payment with this Stripe checkout session ID already exists - returning existing payment"
+        );
+        return await buildIntentResponse(existingBySession, stripe);
+      }
+    }
   } else {
     const intent = await stripe.paymentIntents.create(
       {
@@ -132,7 +291,7 @@ export async function createIntent(input, ctx) {
         payment_method_types: ["card"],
         metadata: parsed.metadata || {},
       },
-      { idempotencyKey: ctx.idempotencyKey || undefined }
+      { idempotencyKey: deterministicStripeKey }
     );
     stripeResult = intent;
     status = mapStripeStatusToDomain(intent.status) || "requires_action";
@@ -140,27 +299,40 @@ export async function createIntent(input, ctx) {
       paymentIntentId: intent.id,
       clientSecret: intent.client_secret,
     };
+
+    // After creating Stripe payment intent, check if a payment with this intent ID already exists
+    // This catches race conditions where two requests create intents simultaneously
+    if (stripeIds.paymentIntentId) {
+      const existingByIntent = await Payment.findOne({
+        "stripe.paymentIntentId": stripeIds.paymentIntentId,
+      })
+        .select("stripe status _id")
+        .lean();
+      if (existingByIntent) {
+        const logger = (await import("../config/logger.js")).default;
+        logger.warn(
+          {
+            existingPaymentId: existingByIntent._id,
+            paymentIntentId: stripeIds.paymentIntentId,
+            existingStatus: existingByIntent.status,
+          },
+          "Payment with this Stripe payment intent ID already exists - returning existing payment"
+        );
+        return await buildIntentResponse(existingByIntent, stripe);
+      }
+    }
   }
 
   try {
-    // Extract memberId and applicationId from metadata if not provided directly
-    const metadata = parsed.metadata || {};
-    const memberIdFromMetadata =
-      metadata.memberId ||
-      metadata.member_id ||
-      metadata.userId ||
-      metadata.user_id;
-    const applicationIdFromMetadata =
-      metadata.applicationId || metadata.application_id;
-
+    // memberId and applicationId already extracted above for duplicate check
     const paymentData = {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
       currency: normalizedCurrency,
       status,
-      memberId: parsed.memberId || memberIdFromMetadata,
-      applicationId: parsed.applicationId || applicationIdFromMetadata,
+      memberId,
+      applicationId,
       invoiceId: parsed.invoiceId,
       source: "portal",
       mode,
