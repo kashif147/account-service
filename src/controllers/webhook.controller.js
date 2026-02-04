@@ -32,8 +32,20 @@ export async function handleStripeWebhook(req, res) {
     await processStripeEvent(event);
     return res.json({ received: true });
   } catch (err) {
-    logger.error({ err: err.message }, "Error processing Stripe webhook");
-    return res.status(500).json({ received: false });
+    logger.error(
+      {
+        error: err.message,
+        stack: err.stack,
+        eventType: event?.type,
+        eventId: event?.id,
+        paymentIntentId:
+          event?.data?.object?.id || event?.data?.object?.payment_intent,
+      },
+      "Error processing Stripe webhook"
+    );
+    // Don't return 500 - log the error but return 200 to prevent Stripe retries
+    // The payment can be reconciled manually if needed
+    return res.status(200).json({ received: true, error: err.message });
   }
 }
 

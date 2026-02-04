@@ -96,26 +96,34 @@ export async function createIntent(input, ctx) {
       tenantId: ctx.tenantId,
       idempotencyKey: ctx.idempotencyKey,
     })
-      .select("stripe status _id")
+      .select("stripe status _id memberId applicationId")
       .lean();
     if (existingByIdem) {
+      const logger = (await import("../config/logger.js")).default;
+      logger.info(
+        {
+          existingPaymentId: existingByIdem._id,
+          idempotencyKey: ctx.idempotencyKey,
+          existingStatus: existingByIdem.status,
+        },
+        "Found existing payment by idempotency key - returning existing payment"
+      );
       return await buildIntentResponse(existingByIdem, stripe);
     }
   }
 
   // 2. Check for recent duplicate payments (same member/application, amount, purpose)
   // This prevents duplicates even when different idempotency keys are used
-  // Only check for payments created in the last 5 minutes that are still in progress
+  // Check for payments created in the last 10 minutes (increased window for race conditions)
+  // Include ALL statuses to catch any recent payment attempt
   if (memberId || applicationId) {
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
     const duplicateCheck = {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
-      createdAt: { $gte: fiveMinutesAgo },
-      status: {
-        $in: ["created", "requires_action", "processing"],
-      },
+      createdAt: { $gte: tenMinutesAgo },
+      // Don't filter by status - check ALL recent payments to prevent duplicates
     };
 
     if (memberId) {
@@ -126,7 +134,7 @@ export async function createIntent(input, ctx) {
     }
 
     const existingDuplicate = await Payment.findOne(duplicateCheck)
-      .select("stripe status _id")
+      .select("stripe status _id memberId applicationId")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -136,6 +144,7 @@ export async function createIntent(input, ctx) {
         {
           existingPaymentId: existingDuplicate._id,
           existingStatus: existingDuplicate.status,
+          existingPaymentIntentId: existingDuplicate.stripe?.paymentIntentId,
           memberId,
           applicationId,
           amount: parsed.amount,
@@ -180,16 +189,15 @@ export async function createIntent(input, ctx) {
 
   // Final duplicate check right before Stripe API call to catch race conditions
   // This is the last chance to prevent duplicate Stripe payment intents
+  // Check for ANY recent payment with same parameters (not just in-progress)
   if (memberId || applicationId) {
-    const oneMinuteAgo = new Date(Date.now() - 60 * 1000); // Check last 1 minute
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000); // Check last 2 minutes
     const lastSecondCheck = {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
-      createdAt: { $gte: oneMinuteAgo },
-      status: {
-        $in: ["created", "requires_action", "processing"],
-      },
+      createdAt: { $gte: twoMinutesAgo },
+      // Check ALL statuses to catch any recent payment attempt
     };
 
     if (memberId) {
@@ -200,7 +208,7 @@ export async function createIntent(input, ctx) {
     }
 
     const recentPayment = await Payment.findOne(lastSecondCheck)
-      .select("stripe status _id")
+      .select("stripe status _id memberId applicationId createdAt")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -210,6 +218,7 @@ export async function createIntent(input, ctx) {
         {
           existingPaymentId: recentPayment._id,
           existingStatus: recentPayment.status,
+          existingPaymentIntentId: recentPayment.stripe?.paymentIntentId,
           memberId,
           applicationId,
           amount: parsed.amount,
@@ -218,7 +227,7 @@ export async function createIntent(input, ctx) {
           timeSinceCreation:
             Date.now() - new Date(recentPayment.createdAt).getTime(),
         },
-        "Race condition detected - payment created within last minute, returning existing payment"
+        "Race condition detected - payment created within last 2 minutes, returning existing payment"
       );
 
       // Ensure the existing payment has memberId/applicationId if they're missing
@@ -511,6 +520,51 @@ export async function createIntent(input, ctx) {
   }
 
   try {
+    // Final check: if we just created a Stripe payment intent, check if another request
+    // already created a payment document with this paymentIntentId (race condition)
+    if (stripeIds.paymentIntentId) {
+      const existingByIntentId = await Payment.findOne({
+        "stripe.paymentIntentId": stripeIds.paymentIntentId,
+      })
+        .select("stripe status _id memberId applicationId")
+        .lean();
+
+      if (existingByIntentId) {
+        const logger = (await import("../config/logger.js")).default;
+        logger.warn(
+          {
+            existingPaymentId: existingByIntentId._id,
+            paymentIntentId: stripeIds.paymentIntentId,
+            existingStatus: existingByIntentId.status,
+          },
+          "Payment with this paymentIntentId already exists - another request created it first"
+        );
+
+        // Ensure memberId/applicationId are set
+        if (
+          (memberId || applicationId) &&
+          !existingByIntentId.memberId &&
+          !existingByIntentId.applicationId
+        ) {
+          const updateFields = {};
+          if (memberId && !existingByIntentId.memberId) {
+            updateFields.memberId = memberId;
+          }
+          if (applicationId && !existingByIntentId.applicationId) {
+            updateFields.applicationId = applicationId;
+          }
+
+          if (Object.keys(updateFields).length > 0) {
+            await Payment.findByIdAndUpdate(existingByIntentId._id, {
+              $set: updateFields,
+            });
+          }
+        }
+
+        return await buildIntentResponse(existingByIntentId, stripe);
+      }
+    }
+
     // memberId and applicationId already extracted above for duplicate check
     const paymentData = {
       tenantId: ctx.tenantId,
@@ -736,9 +790,68 @@ export async function reconcileStripeEvent(input, ctx) {
           paymentIntentId: parsed.payment.paymentIntentId,
           filter,
           existingPayment: existingPayment?._id,
+          update,
+          options,
         },
         "Payment.findOneAndUpdate returned null - payment not found or not updated"
       );
+
+      // Try to find the payment again - maybe it was created by another request
+      const retryPayment = await Payment.findOne({
+        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+      }).lean();
+
+      if (retryPayment) {
+        logger.info(
+          {
+            paymentId: retryPayment._id,
+            paymentIntentId: parsed.payment.paymentIntentId,
+            status: retryPayment.status,
+          },
+          "Found payment on retry - payment was created by another request"
+        );
+
+        // Ensure journal entry exists if status is succeeded
+        if (
+          parsed.payment.status === "succeeded" &&
+          retryPayment.status === "succeeded"
+        ) {
+          const GLTransactionModule = await import(
+            "../models/glTransaction.model.js"
+          );
+          const GLTransaction = GLTransactionModule.default;
+          const existingJournal = await GLTransaction.findOne({
+            docNo: `RCP-${retryPayment._id}`,
+          }).lean();
+
+          if (!existingJournal) {
+            try {
+              const journal = await postJournalForPayment(retryPayment, ctx);
+              if (journal) {
+                logger.info(
+                  {
+                    paymentId: retryPayment._id,
+                    journalId: journal._id,
+                    docNo: journal.docNo,
+                  },
+                  "Journal entry created for payment found on retry"
+                );
+              }
+            } catch (journalError) {
+              logger.error(
+                {
+                  paymentId: retryPayment._id,
+                  error: journalError.message,
+                },
+                "Failed to create journal entry for payment found on retry"
+              );
+            }
+          }
+        }
+
+        return { ok: true };
+      }
+
       throw new Error(
         `Failed to update or create payment for paymentIntentId: ${parsed.payment.paymentIntentId}`
       );
@@ -747,9 +860,10 @@ export async function reconcileStripeEvent(input, ctx) {
     // Only create journal entry if status is succeeded and we haven't already created one
     if (parsed.payment.status === "succeeded") {
       // Check if journal entry already exists for this payment
-      const { GLTransaction } = await import(
+      const GLTransactionModule = await import(
         "../models/glTransaction.model.js"
       );
+      const GLTransaction = GLTransactionModule.default;
       const existingJournal = await GLTransaction.findOne({
         docNo: `RCP-${doc._id}`,
       }).lean();
@@ -815,6 +929,17 @@ export async function reconcileStripeEvent(input, ctx) {
   } catch (error) {
     const logger = (await import("../config/logger.js")).default;
 
+    logger.error(
+      {
+        error: error.message,
+        stack: error.stack,
+        paymentIntentId: parsed.payment.paymentIntentId,
+        existingPayment: existingPayment?._id,
+        status: parsed.payment.status,
+      },
+      "Error in reconcileStripeEvent"
+    );
+
     // If payment already exists and is succeeded, that's okay - just ensure journal entry exists
     if (
       existingPayment &&
@@ -831,9 +956,10 @@ export async function reconcileStripeEvent(input, ctx) {
       );
 
       // Check if journal entry exists
-      const { GLTransaction } = await import(
+      const GLTransactionModule = await import(
         "../models/glTransaction.model.js"
       );
+      const GLTransaction = GLTransactionModule.default;
       const existingJournal = await GLTransaction.findOne({
         docNo: `RCP-${existingPayment._id}`,
       }).lean();
@@ -905,9 +1031,10 @@ export async function reconcileStripeEvent(input, ctx) {
         });
 
         if (parsed.payment.status === "succeeded") {
-          const { GLTransaction } = await import(
+          const GLTransactionModule = await import(
             "../models/glTransaction.model.js"
           );
+          const GLTransaction = GLTransactionModule.default;
           const existingJournal = await GLTransaction.findOne({
             docNo: `RCP-${doc._id}`,
           }).lean();
@@ -962,7 +1089,79 @@ export async function reconcileStripeEvent(input, ctx) {
         return { ok: true };
       }
     }
-    throw error;
+
+    // If we get here, it's an unexpected error
+    // Try one more time to find the payment and create journal entry if needed
+    if (
+      parsed.payment.paymentIntentId &&
+      parsed.payment.status === "succeeded"
+    ) {
+      const finalRetry = await Payment.findOne({
+        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+      }).lean();
+
+      if (finalRetry && finalRetry.status === "succeeded") {
+        logger.info(
+          {
+            paymentId: finalRetry._id,
+            paymentIntentId: parsed.payment.paymentIntentId,
+          },
+          "Found payment on final retry - ensuring journal entry exists"
+        );
+
+        const GLTransactionModule = await import(
+          "../models/glTransaction.model.js"
+        );
+        const GLTransaction = GLTransactionModule.default;
+        const existingJournal = await GLTransaction.findOne({
+          docNo: `RCP-${finalRetry._id}`,
+        }).lean();
+
+        if (!existingJournal) {
+          try {
+            const journal = await postJournalForPayment(finalRetry, ctx);
+            if (journal) {
+              logger.info(
+                {
+                  paymentId: finalRetry._id,
+                  journalId: journal._id,
+                  docNo: journal.docNo,
+                },
+                "Journal entry created on final retry"
+              );
+            }
+          } catch (journalError) {
+            logger.error(
+              {
+                paymentId: finalRetry._id,
+                error: journalError.message,
+              },
+              "Failed to create journal entry on final retry"
+            );
+          }
+        }
+
+        // Return success even if original update failed - payment exists and journal is handled
+        return { ok: true };
+      }
+    }
+
+    // Log the error but don't throw - allow webhook to return 200
+    // This prevents Stripe from retrying and creating more errors
+    logger.error(
+      {
+        error: error.message,
+        stack: error.stack,
+        paymentIntentId: parsed.payment.paymentIntentId,
+      },
+      "reconcileStripeEvent failed - payment may need manual reconciliation"
+    );
+
+    // Return success to prevent webhook retries
+    return {
+      ok: true,
+      warning: "Payment reconciliation had errors but was attempted",
+    };
   }
 }
 
