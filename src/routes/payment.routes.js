@@ -9,6 +9,7 @@ import {
   getPaymentByStripeId,
   recordExternalPayment,
   createPaymentRefund,
+  listPaymentsBatch,
 } from "../controllers/payment.controller.js";
 import {
   zCreateIntent,
@@ -40,6 +41,9 @@ router.post(
 );
 
 router.get("/by-stripe/:paymentIntentId", getPaymentByStripeId);
+
+// Gateway aggregation: list payments by member IDs (subscription service)
+router.post("/batch", listPaymentsBatch);
 
 router.post(
   "/record-external",

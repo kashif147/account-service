@@ -1420,6 +1420,27 @@ export async function postJournalForPayment(payment, ctx) {
   return journal;
 }
 
+/**
+ * List payments by member IDs (for gateway aggregation / subscription service).
+ * @param {Object} ctx - { tenantId }
+ * @param {string[]} memberIds - membership numbers
+ * @param {Object} options - { status?, purpose? }
+ * @returns {Promise<Object[]>} payments (lean)
+ */
+export async function listByMemberIds(memberIds, ctx, options = {}) {
+  if (!memberIds || memberIds.length === 0) return [];
+  const query = {
+    tenantId: ctx.tenantId,
+    memberId: { $in: memberIds },
+  };
+  if (options.status) query.status = options.status;
+  if (options.purpose) query.purpose = options.purpose;
+  const payments = await Payment.find(query)
+    .sort({ createdAt: -1 })
+    .lean();
+  return payments;
+}
+
 export default {
   createIntent,
   findByStripePaymentIntent,
@@ -1427,4 +1448,5 @@ export default {
   recordExternal,
   createRefund,
   postJournalForPayment,
+  listByMemberIds,
 };

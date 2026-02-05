@@ -5,6 +5,7 @@ import {
   reconcileStripeEvent,
   recordExternal,
   createRefund,
+  listByMemberIds,
 } from "../services/payments.service.js";
 import { AppError } from "../errors/AppError.js";
 
@@ -54,6 +55,27 @@ export async function createPaymentRefund(req, res, next) {
   try {
     const resp = await createRefund(req.validated, req.ctx);
     res.success(resp);
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
+ * Batch list payments by member IDs (for gateway aggregation / subscription service).
+ * POST /api/payments/batch
+ * Body: { memberIds: string[], status?: string, purpose?: string }
+ */
+export async function listPaymentsBatch(req, res, next) {
+  try {
+    const { memberIds, status, purpose } = req.body || {};
+    if (!memberIds || !Array.isArray(memberIds)) {
+      return res.appError(AppError.badRequest("memberIds array is required"));
+    }
+    const payments = await listByMemberIds(memberIds, req.ctx, {
+      status: status || undefined,
+      purpose: purpose || undefined,
+    });
+    res.success(payments);
   } catch (e) {
     next(e);
   }
