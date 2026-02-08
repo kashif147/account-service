@@ -8,6 +8,7 @@ import CoA from "../models/coa.model.js";
 import Product from "../models/product.model.js";
 import Pricing from "../models/pricing.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
+import { globalDBLimiter } from "../config/globalLimiter.js";
 
 /**
  * Maps membership category to income account code
@@ -414,13 +415,16 @@ export async function handleMemberCreated(payload) {
     const dateJoined = subscriptionStartDate;
 
     // Get income code and annual fee (from pricing if available)
-    const { incomeCode, annualFee } = await getMembershipPricing({
-      categoryName,
-      subscriptionDetails: subDetails,
-      startDate: dateJoined,
-      tenantId,
-      profileId,
-      applicationId,
+    // Wrap in global limiter to prevent connection pool exhaustion
+    const { incomeCode, annualFee } = await globalDBLimiter(async () => {
+      return await getMembershipPricing({
+        categoryName,
+        subscriptionDetails: subDetails,
+        startDate: dateJoined,
+        tenantId,
+        profileId,
+        applicationId,
+      });
     });
 
     // Generate invoice document number
@@ -429,9 +433,12 @@ export async function handleMemberCreated(payload) {
     const invoiceDate = new Date().toISOString().split("T")[0];
 
     // Idempotency check: Check if invoice already exists before creating
-    const existingInvoice = await GLTransaction.findOne({
-      docNo: docNo,
-    }).lean();
+    // Wrap in global limiter to prevent connection pool exhaustion
+    const existingInvoice = await globalDBLimiter(async () => {
+      return await GLTransaction.findOne({
+        docNo: docNo,
+      }).lean();
+    });
 
     if (existingInvoice) {
       logger.info(
@@ -519,6 +526,8 @@ export async function handleMemberCreated(payload) {
       };
 
       try {
+        // Invoice creation is already limited via postBalancedJournal wrapper
+        // No need to wrap here - postBalancedJournal handles the limiting
         await invoice(invoiceReq, invoiceRes, invoiceNext);
       } catch (invoiceError) {
         // Check if error is due to duplicate docNo (idempotency)
@@ -557,9 +566,12 @@ export async function handleMemberCreated(payload) {
     const claimDocNo = `CLAIM-${applicationId}`;
 
     // Idempotency check: Check if claim already exists before creating
-    const existingClaim = await GLTransaction.findOne({
-      docNo: claimDocNo,
-    }).lean();
+    // Wrap in global limiter to prevent connection pool exhaustion
+    const existingClaim = await globalDBLimiter(async () => {
+      return await GLTransaction.findOne({
+        docNo: claimDocNo,
+      }).lean();
+    });
 
     if (existingClaim) {
       logger.info(
@@ -642,6 +654,8 @@ export async function handleMemberCreated(payload) {
       };
 
       try {
+        // Credit claim is already limited via postBalancedJournal wrapper
+        // No need to wrap here - postBalancedJournal handles the limiting
         await claimApplicationCredit(claimReq, claimRes, claimNext);
       } catch (claimError) {
         // If no credit entry found, that's fine - just means no payment was received

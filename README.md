@@ -201,6 +201,24 @@ Use dotenv-flow to provide these:
 - ACCOUNTS_API_KEY: Shared API key for requests
 - PORTAL_BASE_URL: Portal base for checkout success/cancel URLs
 
+### Database Connection Pool Configuration
+
+- MONGODB_MAX_POOL_SIZE: Maximum MongoDB connection pool size (default: 150)
+- MONGODB_MIN_POOL_SIZE: Minimum MongoDB connection pool size (default: 20)
+- MONGODB_MAX_IDLE_TIME_MS: Maximum idle time for connections in ms (default: 30000)
+
+### Global Database Operations Limiter
+
+- GLOBAL_DB_OPERATIONS_LIMIT: Maximum concurrent database operations across all account-service operations (default: 120)
+  - This ensures that batch application approvals and batch payment processing don't overwhelm the MongoDB connection pool
+  - Should be set to ~80% of MONGODB_MAX_POOL_SIZE to reserve connections for other services
+
+### RabbitMQ Prefetch Configuration
+
+- APPLICATION_EVENTS_PREFETCH: Number of application events to prefetch (default: 50)
+- MEMBERSHIP_EVENTS_PREFETCH: Number of membership events to prefetch (default: 50)
+  - Reduced from 100 to work with global DB limiter and prevent connection pool exhaustion
+
 ## Available Scripts
 
 - `npm start` - Start production server

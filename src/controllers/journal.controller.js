@@ -13,6 +13,7 @@ import {
 } from "../helpers/prorata.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
+import { globalDBLimiter } from "../config/globalLimiter.js";
 
 function sumArray(arr, sel) {
   return Number(arr.reduce((s, x) => s + sel(x), 0).toFixed(2));
@@ -58,6 +59,8 @@ function rollupMemberBalances({ date, entries }) {
   return { year, totals };
 }
 
+// Wrapped in global limiter to prevent connection pool exhaustion
+// when multiple heavy operations (batch approvals, batch payments) run simultaneously
 export async function postBalancedJournal({
   date,
   docType,
@@ -66,110 +69,117 @@ export async function postBalancedJournal({
   lines,
   settlement,
 }) {
-  const enriched = await enrichLines(lines);
+  // Wrap entire function in global DB limiter
+  // This ensures all journal operations share the same resource pool
+  return globalDBLimiter(async () => {
+    const enriched = await enrichLines(lines);
 
-  // basic balance check
-  const deb = sumArray(enriched, (x) => (x.dc === "D" ? x.amount : 0));
-  const cre = sumArray(enriched, (x) => (x.dc === "C" ? x.amount : 0));
-  if (deb !== cre)
-    throw AppError.badRequest(`Unbalanced journal D ${deb} vs C ${cre}`, {
-      debit: deb,
-      credit: cre,
+    // basic balance check
+    const deb = sumArray(enriched, (x) => (x.dc === "D" ? x.amount : 0));
+    const cre = sumArray(enriched, (x) => (x.dc === "C" ? x.amount : 0));
+    if (deb !== cre)
+      throw AppError.badRequest(`Unbalanced journal D ${deb} vs C ${cre}`, {
+        debit: deb,
+        credit: cre,
+      });
+
+    // optional: simple guardrails (kept light; extend as you like)
+    // - prevent posting to 1200 (Bank) except via settlements
+    if (
+      docType !== "Settlement" &&
+      enriched.some((e) => e.accountCode === "1200")
+    ) {
+      throw AppError.badRequest(
+        "Only Settlement documents may post to 1200 (Bank)",
+        { accountCode: "1200", docType }
+      );
+    }
+    // - require memberId OR applicationId and periodBucket on member-tracked accounts (1400, 2020)
+    for (const e of enriched) {
+      if (e.accountCode === "1400" || e.accountCode === "2020") {
+        if (!e.periodBucket) {
+          throw AppError.badRequest(
+            `periodBucket required on ${e.accountCode}`,
+            {
+              accountCode: e.accountCode,
+              periodBucket: e.periodBucket,
+            }
+          );
+        }
+        if (!e.memberId && !e.applicationId) {
+          throw AppError.badRequest(
+            `memberId or applicationId required on ${e.accountCode}`,
+            {
+              accountCode: e.accountCode,
+              memberId: e.memberId,
+              applicationId: e.applicationId,
+            }
+          );
+        }
+      }
+    }
+
+    // idempotency on docNo
+    const exists = await GLTransaction.findOne({ docNo }).lean();
+    if (exists) return exists;
+
+    // strip helper and persist
+    const entries = enriched.map(({ _a, ...rest }) => rest);
+    const txn = await GLTransaction.create({
+      date,
+      docType,
+      docNo,
+      memo,
+      entries,
+      ...(settlement && { settlement }),
     });
 
-  // optional: simple guardrails (kept light; extend as you like)
-  // - prevent posting to 1200 (Bank) except via settlements
-  if (
-    docType !== "Settlement" &&
-    enriched.some((e) => e.accountCode === "1200")
-  ) {
-    throw AppError.badRequest(
-      "Only Settlement documents may post to 1200 (Bank)",
-      { accountCode: "1200", docType }
-    );
-  }
-  // - require memberId OR applicationId and periodBucket on member-tracked accounts (1400, 2020)
-  for (const e of enriched) {
-    if (e.accountCode === "1400" || e.accountCode === "2020") {
-      if (!e.periodBucket) {
-        throw AppError.badRequest(`periodBucket required on ${e.accountCode}`, {
-          accountCode: e.accountCode,
-          periodBucket: e.periodBucket,
+    const { year, totals } = rollupMemberBalances({ date, entries });
+    if (totals.size) {
+      const ops = [];
+      for (const [key, amount] of totals.entries()) {
+        const [memberId, accountCode, bucket] = key.split("|");
+        ops.push({
+          updateOne: {
+            filter: { memberId, accountCode, bucket, year },
+            update: {
+              $inc: { amount },
+              $set: { updatedAt: new Date() },
+            },
+            upsert: true,
+          },
         });
       }
-      if (!e.memberId && !e.applicationId) {
-        throw AppError.badRequest(
-          `memberId or applicationId required on ${e.accountCode}`,
-          {
-            accountCode: e.accountCode,
-            memberId: e.memberId,
-            applicationId: e.applicationId,
-          }
-        );
+      await MaterializedBalance.bulkWrite(ops, { ordered: false });
+    }
+
+    // Publish journal created event
+    await publishDomainEvent(
+      EVENT_TYPES.JOURNAL_CREATED,
+      {
+        journalId: txn._id,
+        docNo: txn.docNo,
+        docType: txn.docType,
+        date: txn.date,
+        memo: txn.memo,
+        entries: txn.entries,
+        totalDebit: deb,
+        totalCredit: cre,
+      },
+      {
+        source: "journal.controller",
+        operation: "postBalancedJournal",
       }
-    }
-  }
+    );
 
-  // idempotency on docNo
-  const exists = await GLTransaction.findOne({ docNo }).lean();
-  if (exists) return exists;
-
-  // strip helper and persist
-  const entries = enriched.map(({ _a, ...rest }) => rest);
-  const txn = await GLTransaction.create({
-    date,
-    docType,
-    docNo,
-    memo,
-    entries,
-    ...(settlement && { settlement }),
+    // add a friendly label in the response
+    const obj = txn.toObject();
+    obj.entries = obj.entries.map((e) => ({
+      ...e,
+      accountLabel: `${e.accountCode} (${e.accountName})`,
+    }));
+    return obj;
   });
-
-  const { year, totals } = rollupMemberBalances({ date, entries });
-  if (totals.size) {
-    const ops = [];
-    for (const [key, amount] of totals.entries()) {
-      const [memberId, accountCode, bucket] = key.split("|");
-      ops.push({
-        updateOne: {
-          filter: { memberId, accountCode, bucket, year },
-          update: {
-            $inc: { amount },
-            $set: { updatedAt: new Date() },
-          },
-          upsert: true,
-        },
-      });
-    }
-    await MaterializedBalance.bulkWrite(ops, { ordered: false });
-  }
-
-  // Publish journal created event
-  await publishDomainEvent(
-    EVENT_TYPES.JOURNAL_CREATED,
-    {
-      journalId: txn._id,
-      docNo: txn.docNo,
-      docType: txn.docType,
-      date: txn.date,
-      memo: txn.memo,
-      entries: txn.entries,
-      totalDebit: deb,
-      totalCredit: cre,
-    },
-    {
-      source: "journal.controller",
-      operation: "postBalancedJournal",
-    }
-  );
-
-  // add a friendly label in the response
-  const obj = txn.toObject();
-  obj.entries = obj.entries.map((e) => ({
-    ...e,
-    accountLabel: `${e.accountCode} (${e.accountName})`,
-  }));
-  return obj;
 }
 
 // Invoice → 1400 (Accounts receivable - Members) debit, income credit

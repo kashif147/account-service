@@ -146,8 +146,10 @@ export async function setupConsumers() {
     const APPLICATION_QUEUE = "accounts.application.events";
 
     // Parse prefetch from environment variable with default
+    // Reduced from 100 to 50 to work with global DB limiter
+    // Global limiter ensures total concurrent operations don't exceed connection pool
     const APPLICATION_PREFETCH = parseInt(
-      process.env.APPLICATION_EVENTS_PREFETCH || "100",
+      process.env.APPLICATION_EVENTS_PREFETCH || "50",
       10
     );
 
@@ -299,9 +301,10 @@ export async function setupConsumers() {
     // Listen to subscription current updated events which happen after member creation
     const MEMBERSHIP_QUEUE = "accounts.membership.events";
 
-    // Parse prefetch from environment variable with default
+    // Reduced from 100 to 50 to work with global DB limiter
+    // Global limiter ensures total concurrent operations don't exceed connection pool
     const MEMBERSHIP_PREFETCH = parseInt(
-      process.env.MEMBERSHIP_EVENTS_PREFETCH || "100",
+      process.env.MEMBERSHIP_EVENTS_PREFETCH || "50",
       10
     );
 
