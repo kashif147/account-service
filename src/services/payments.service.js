@@ -77,12 +77,11 @@ export async function createIntent(input, ctx) {
 
   // Extract memberId and applicationId from metadata if not provided directly
   // (needed for duplicate check before Stripe API call)
+  // IMPORTANT: Do NOT use userId as memberId - userId is just a user identifier, not a member identifier
+  // For application payments, applicationId should be used, not memberId
   const metadata = parsed.metadata || {};
   const memberIdFromMetadata =
-    metadata.memberId ||
-    metadata.member_id ||
-    metadata.userId ||
-    metadata.user_id;
+    metadata.memberId || metadata.member_id || undefined; // Do not use userId as memberId
   const applicationIdFromMetadata =
     metadata.applicationId || metadata.application_id;
 
@@ -566,14 +565,15 @@ export async function createIntent(input, ctx) {
     }
 
     // memberId and applicationId already extracted above for duplicate check
+    // Prioritize applicationId over memberId - if applicationId is present, don't set memberId
     const paymentData = {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
       currency: normalizedCurrency,
       status,
-      memberId,
-      applicationId,
+      // Only set memberId if applicationId is not present
+      ...(applicationId ? { applicationId } : memberId ? { memberId } : {}),
       invoiceId: parsed.invoiceId,
       source: "portal",
       mode,
@@ -700,24 +700,24 @@ export async function reconcileStripeEvent(input, ctx) {
   }
 
   // Extract memberId and applicationId from metadata
-  // Support multiple naming conventions: memberId, member_id, userId
+  // IMPORTANT: Do NOT use userId as memberId - userId is just a user identifier, not a member identifier
+  // For application payments, applicationId should be used, not memberId
   // Also preserve existing memberId/applicationId from payment if metadata doesn't have them
   const metadata = parsed.payment.metadata || {};
   const memberIdFromMetadata =
-    metadata.memberId ||
-    metadata.member_id ||
-    metadata.userId ||
-    metadata.user_id ||
-    undefined;
+    metadata.memberId || metadata.member_id || undefined; // Do not use userId as memberId
   const applicationIdFromMetadata =
     metadata.applicationId || metadata.application_id || undefined;
 
   // Use metadata values if present, otherwise preserve existing payment values
   // This ensures journal entries can be created even if webhook metadata is incomplete
-  const memberId =
-    memberIdFromMetadata || existingPayment?.memberId || undefined;
+  // Prioritize applicationId - if it exists in metadata, use it (even if existing payment has memberId)
   const applicationId =
     applicationIdFromMetadata || existingPayment?.applicationId || undefined;
+  const memberId =
+    // Only use memberId if applicationId is not present
+    (!applicationId && (memberIdFromMetadata || existingPayment?.memberId)) ||
+    undefined;
 
   // Build filter - ALWAYS use existing payment's tenantId if found
   // This prevents creating duplicates when tenantId doesn't match
@@ -754,19 +754,26 @@ export async function reconcileStripeEvent(input, ctx) {
     },
   };
 
-  // Set memberId and applicationId - prefer metadata, but preserve existing if metadata missing
+  // Set memberId and applicationId - prioritize applicationId over memberId
+  // If applicationId is present, do not set memberId (payment is for an application, not an approved member)
   // This is critical for journal entry creation
-  if (memberId) {
-    update.$set.memberId = memberId;
-  } else if (existingPayment?.memberId) {
-    // Preserve existing memberId if metadata doesn't have it
-    update.$set.memberId = existingPayment.memberId;
-  }
   if (applicationId) {
+    // Application payment - use applicationId, clear memberId if it was incorrectly set
     update.$set.applicationId = applicationId;
-  } else if (existingPayment?.applicationId) {
-    // Preserve existing applicationId if metadata doesn't have it
-    update.$set.applicationId = existingPayment.applicationId;
+    update.$unset = update.$unset || {};
+    update.$unset.memberId = "";
+  } else if (memberId) {
+    // Member payment - only set memberId if applicationId is not present
+    update.$set.memberId = memberId;
+  } else {
+    // Preserve existing values if metadata doesn't have them
+    if (existingPayment?.applicationId) {
+      update.$set.applicationId = existingPayment.applicationId;
+      update.$unset = update.$unset || {};
+      update.$unset.memberId = "";
+    } else if (existingPayment?.memberId) {
+      update.$set.memberId = existingPayment.memberId;
+    }
   }
 
   // If existing payment found, ensure we update the correct one
@@ -1335,13 +1342,10 @@ export async function postJournalForPayment(payment, ctx) {
   }
 
   // Get memberId/applicationId from document first, then fallback to metadata
+  // IMPORTANT: Do NOT use userId as memberId - userId is just a user identifier, not a member identifier
+  // For application payments, applicationId should be used, not memberId
   const memberId =
-    payment.memberId ||
-    metadataObj.memberId ||
-    metadataObj.member_id ||
-    metadataObj.userId ||
-    metadataObj.user_id ||
-    null;
+    payment.memberId || metadataObj.memberId || metadataObj.member_id || null;
   const applicationId =
     payment.applicationId ||
     metadataObj.applicationId ||
@@ -1363,7 +1367,9 @@ export async function postJournalForPayment(payment, ctx) {
     return null;
   }
 
-  // Build entry for account 2020 - use memberId if present, otherwise applicationId
+  // Build entry for account 2020 - prioritize applicationId over memberId
+  // If applicationId exists, use it (payment is for an application, not an approved member)
+  // Only use memberId if applicationId is not present
   const entry2020 = {
     accountCode: "2020",
     dc: "C",
@@ -1371,10 +1377,12 @@ export async function postJournalForPayment(payment, ctx) {
     periodBucket: "current",
   };
 
-  if (memberId) {
-    entry2020.memberId = memberId;
-  } else if (applicationId) {
+  if (applicationId) {
+    // Prioritize applicationId - this is a payment for an application, not an approved member
     entry2020.applicationId = applicationId;
+  } else if (memberId) {
+    // Only use memberId if applicationId is not present
+    entry2020.memberId = memberId;
   }
 
   const lines = [
@@ -1399,11 +1407,11 @@ export async function postJournalForPayment(payment, ctx) {
   const docNo = `RCP-${payment._id}`;
   const date = new Date().toISOString().split("T")[0];
 
-  // Create receipt memo - prioritize memberId if present, otherwise use applicationId
-  const memo = memberId
-    ? `Receipt (member ${memberId})`
-    : applicationId
+  // Create receipt memo - prioritize applicationId if present, otherwise use memberId
+  const memo = applicationId
     ? `Receipt (app ${applicationId})`
+    : memberId
+    ? `Receipt (member ${memberId})`
     : "Receipt";
 
   // Create journal entry using the exported function

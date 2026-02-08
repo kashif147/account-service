@@ -27,7 +27,10 @@ import {
   handlePricingUpdated,
   handlePricingDeleted,
 } from "./listeners/product.sync.listener.js";
-import { handleApplicationApproved } from "../handlers/application.approval.listener.js";
+import {
+  handleApplicationApproved,
+  handleMemberCreated,
+} from "../handlers/application.approval.listener.js";
 
 // Re-export for convenience
 export { APPLICATION_EVENTS };
@@ -278,6 +281,79 @@ export async function setupConsumers() {
       logger.error(
         { error: error.message, queue: PRODUCT_QUEUE },
         "Failed to set up product events consumer, continuing without it"
+      );
+    }
+
+    // Membership events queue (membership.events exchange)
+    // Listen to subscription current updated events which happen after member creation
+    const MEMBERSHIP_QUEUE = "accounts.membership.events";
+    logger.info("Creating membership events queue...", {
+      queue: MEMBERSHIP_QUEUE,
+      exchange: "membership.events",
+      routingKeys: ["members.subscription.current.updated.v1"],
+    });
+
+    await consumer.createQueue(MEMBERSHIP_QUEUE, {
+      durable: true,
+      messageTtl: 3600000, // 1 hour
+    });
+
+    // Ensure membership.events exchange exists on consumer channel before binding
+    try {
+      const consumerChannel = await connectionManager.getNamedChannel(
+        "consumer",
+        10
+      );
+      await consumerChannel.assertExchange("membership.events", "topic", {
+        durable: true,
+      });
+      logger.info("Membership.events exchange asserted on consumer channel");
+    } catch (error) {
+      logger.warn(
+        { error: error.message },
+        "Failed to assert membership.events exchange, will attempt binding anyway"
+      );
+    }
+
+    try {
+      await consumer.bindQueue(MEMBERSHIP_QUEUE, "membership.events", [
+        "members.subscription.current.updated.v1",
+      ]);
+
+      consumer.registerHandler(
+        "members.subscription.current.updated.v1",
+        async (payload) => {
+          // Check if this is a new member creation (has applicationId)
+          const data = payload.data || payload;
+          if (data.applicationId && data.memberId) {
+            logger.info(
+              {
+                applicationId: data.applicationId,
+                memberId: data.memberId,
+              },
+              "Subscription updated for new member - creating invoice and claiming credit"
+            );
+            await handleMemberCreated(payload);
+          } else {
+            logger.debug(
+              {
+                memberId: data.memberId,
+                applicationId: data.applicationId,
+              },
+              "Subscription updated but not a new member creation - skipping invoice creation"
+            );
+          }
+        }
+      );
+
+      await consumer.consume(MEMBERSHIP_QUEUE, { prefetch: 10 });
+      logger.info("Membership events consumer ready", {
+        queue: MEMBERSHIP_QUEUE,
+      });
+    } catch (error) {
+      logger.error(
+        { error: error.message, queue: MEMBERSHIP_QUEUE },
+        "Failed to set up membership events consumer, continuing without it"
       );
     }
 

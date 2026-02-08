@@ -291,92 +291,27 @@ export async function handleApplicationApproved(payload) {
       subscriptionAttributes?.memberId ||
       `profile:${profileId}`;
 
-    // Get income code and annual fee (from pricing if available)
-    // Match products by code OR name against membershipCategory
-    const { incomeCode, annualFee } = await getMembershipPricing({
-      categoryName,
-      subscriptionDetails: subDetails,
-      startDate: dateJoined,
-      tenantId,
-      profileId,
-      applicationId,
-    });
-
-    // Generate invoice document number
-    const year = new Date().getFullYear();
-    const docNo = `INV-${year}-${applicationId}`;
-
-    // Create invoice
-    const invoiceDate = new Date().toISOString().split("T")[0];
-
-    logger.info(
-      {
-        applicationId,
-        memberId,
-        categoryName,
-        annualFee,
-        incomeCode,
-        docNo,
-      },
-      "Creating invoice for approved application"
-    );
-
-    // Call invoice controller
-    const req = {
-      body: {
-        date: invoiceDate,
-        docNo,
-        memberId,
-        annualFee,
-        incomeCode,
-        categoryName,
-        periodBucket: "current",
-        joinDate: dateJoined !== invoiceDate ? dateJoined : undefined,
-      },
-    };
-
-    const res = {
-      created: (data) => {
-        logger.info(
-          { docNo, invoiceCount: Array.isArray(data) ? data.length : 1 },
-          "Invoice created successfully"
-        );
-      },
-      status: () => res,
-      json: () => {},
-    };
-
-    const next = (err) => {
-      if (err) {
-        logger.error(
-          { error: err.message, applicationId, docNo },
-          "Failed to create invoice"
-        );
-        throw err;
-      }
-    };
-
-    await invoice(req, res, next);
-
-    // If payment was received before approval, claim the credit
-    if (memberId && applicationId) {
-      const claimReq = {
-        body: {
-          date: invoiceDate,
-          docNo: `CLAIM-${applicationId}`,
+    // IMPORTANT: Invoice creation and credit claiming should happen AFTER member is created
+    // If memberId is not yet available (temporary profile: prefix), skip invoice creation here
+    // The handleMemberCreated function will handle both invoice creation and credit claiming
+    if (memberId && !memberId.startsWith("profile:")) {
+      logger.info(
+        {
           applicationId,
           memberId,
-          bucket: "current",
         },
-      };
-      try {
-        await claimApplicationCredit(claimReq, res, next);
-      } catch (claimError) {
-        logger.warn(
-          { applicationId, memberId, error: claimError.message },
-          "Claim credit skipped or failed"
-        );
-      }
+        "MemberId is available - will create invoice and claim credit in member created event"
+      );
+      // Store the data for later use in handleMemberCreated
+      // The invoice will be created when the member is actually created
+    } else {
+      logger.info(
+        {
+          applicationId,
+          memberId,
+        },
+        "MemberId not yet available - invoice creation will be handled by member created event"
+      );
     }
   } catch (error) {
     logger.error(
@@ -390,28 +325,147 @@ export async function handleApplicationApproved(payload) {
 
 /**
  * Handles member created event
- * Claims application credit if payment was received before approval
+ * Creates invoice and claims application credit after member is created
+ * This ensures memberId is available before creating accounting entries
  */
 export async function handleMemberCreated(payload) {
   try {
-    const { applicationId, memberId, tenantId } = payload.data || payload;
+    const {
+      applicationId,
+      memberId,
+      tenantId,
+      profileId,
+      effective,
+      subscriptionAttributes,
+    } = payload.data || payload;
 
     if (!applicationId || !memberId) {
       logger.warn(
         { applicationId, memberId },
-        "Missing required fields for credit claim"
+        "Missing required fields (applicationId or memberId) for invoice creation and credit claim"
       );
       return;
     }
 
     logger.info(
-      { applicationId, memberId },
-      "Claiming application credit for new member"
+      { applicationId, memberId, profileId },
+      "Member created - creating invoice and claiming application credit"
     );
 
-    const req = {
+    // Extract subscription details for invoice creation
+    const subDetails = effective?.subscriptionDetails || {};
+    const categoryName =
+      subDetails.membershipCategory ||
+      effective?.professionalDetails?.membershipCategory ||
+      "General All Grades";
+
+    // Use subscription startDate (from subscription service) if available,
+    // otherwise fall back to dateJoined from subscriptionDetails
+    let subscriptionStartDate =
+      subscriptionAttributes?.startDate || subDetails.dateJoined || new Date();
+
+    // Ensure it's a Date object first, then convert to ISO string
+    if (subscriptionStartDate instanceof Date) {
+      subscriptionStartDate = subscriptionStartDate.toISOString().split("T")[0];
+    } else if (typeof subscriptionStartDate === "string") {
+      subscriptionStartDate = subscriptionStartDate.split("T")[0];
+    } else {
+      subscriptionStartDate = new Date().toISOString().split("T")[0];
+    }
+
+    const dateJoined = subscriptionStartDate;
+
+    // Get income code and annual fee (from pricing if available)
+    const { incomeCode, annualFee } = await getMembershipPricing({
+      categoryName,
+      subscriptionDetails: subDetails,
+      startDate: dateJoined,
+      tenantId,
+      profileId,
+      applicationId,
+    });
+
+    // Generate invoice document number
+    const year = new Date().getFullYear();
+    const docNo = `INV-${year}-${applicationId}`;
+    const invoiceDate = new Date().toISOString().split("T")[0];
+
+    logger.info(
+      {
+        applicationId,
+        memberId,
+        categoryName,
+        annualFee,
+        incomeCode,
+        docNo,
+      },
+      "Creating invoice for newly created member"
+    );
+
+    // Step 1: Create invoice
+    const invoiceReq = {
       body: {
-        date: new Date().toISOString().split("T")[0],
+        date: invoiceDate,
+        docNo,
+        memberId,
+        annualFee,
+        incomeCode,
+        categoryName,
+        periodBucket: "current",
+        joinDate: dateJoined !== invoiceDate ? dateJoined : undefined,
+      },
+    };
+
+    const invoiceRes = {
+      created: (data) => {
+        logger.info(
+          {
+            docNo,
+            memberId,
+            invoiceCount: Array.isArray(data) ? data.length : 1,
+          },
+          "Invoice created successfully for new member"
+        );
+      },
+      status: () => invoiceRes,
+      json: () => {},
+    };
+
+    const invoiceNext = (err) => {
+      if (err) {
+        logger.error(
+          { error: err.message, applicationId, memberId, docNo },
+          "Failed to create invoice for new member"
+        );
+        throw err;
+      }
+    };
+
+    try {
+      await invoice(invoiceReq, invoiceRes, invoiceNext);
+    } catch (invoiceError) {
+      logger.error(
+        {
+          error: invoiceError.message,
+          applicationId,
+          memberId,
+          docNo,
+        },
+        "Failed to create invoice - will not claim credit"
+      );
+      // Don't proceed to claim credit if invoice creation failed
+      return;
+    }
+
+    // Step 2: Claim application credit (if payment was received before approval)
+    logger.info(
+      { applicationId, memberId },
+      "Attempting to claim application credit for new member"
+    );
+
+    const claimReq = {
+      body: {
+        date: invoiceDate,
         docNo: `CLAIM-${applicationId}`,
         applicationId,
         memberId,
@@ -419,28 +473,80 @@ export async function handleMemberCreated(payload) {
       },
     };
 
-    const res = {
+    const claimRes = {
       created: (data) => {
-        logger.info({ docNo: req.body.docNo }, "Credit claimed successfully");
+        logger.info(
+          {
+            applicationId,
+            memberId,
+            docNo: claimReq.body.docNo,
+          },
+          "Application credit claimed successfully for new member"
+        );
       },
-      status: () => res,
+      status: () => claimRes,
       json: () => {},
     };
 
-    const next = (err) => {
+    const claimNext = (err) => {
       if (err) {
-        logger.error(
-          { error: err.message, applicationId, memberId },
-          "Failed to claim application credit"
-        );
+        // If no credit found, that's okay - just means no payment was received before approval
+        if (err.message?.includes("No credit entry found")) {
+          logger.info(
+            {
+              applicationId,
+              memberId,
+            },
+            "No application credit to claim - no payment received before approval"
+          );
+        } else {
+          logger.warn(
+            {
+              applicationId,
+              memberId,
+              error: err.message,
+            },
+            "Failed to claim application credit"
+          );
+        }
       }
     };
 
-    await claimApplicationCredit(req, res, next);
+    try {
+      await claimApplicationCredit(claimReq, claimRes, claimNext);
+    } catch (claimError) {
+      // If no credit entry found, that's fine - just means no payment was received
+      if (
+        claimError.message?.includes("No credit entry found") ||
+        claimError.statusCode === 404
+      ) {
+        logger.info(
+          {
+            applicationId,
+            memberId,
+          },
+          "No application credit to claim - no payment received before approval"
+        );
+      } else {
+        logger.warn(
+          {
+            applicationId,
+            memberId,
+            error: claimError.message,
+          },
+          "Failed to claim application credit"
+        );
+      }
+    }
   } catch (error) {
     logger.error(
-      { error: error.message, memberId: payload?.data?.memberId },
+      {
+        error: error.message,
+        memberId: payload?.data?.memberId,
+        applicationId: payload?.data?.applicationId,
+      },
       "Error handling member created event"
     );
+    // Don't throw - allow event processing to continue
   }
 }
