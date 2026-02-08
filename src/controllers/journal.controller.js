@@ -226,15 +226,15 @@ export async function invoice(req, res, next) {
         const { endISO } = yearBoundsFrom(joinDate);
         const cn = await postBalancedJournal({
           date,
-          docType: "CreditNote",
+          docType: "Adjustment",
           docNo: `${docNo}-PRORATA`,
-          memo: `Credit note – Pro-rata (${categoryName}) ${joinDate} → ${endISO}`,
+          memo: `Adjustment – Pro-rata fee (${categoryName}) ${joinDate} → ${endISO}`,
           lines: [
             {
               accountCode: "4900",
               dc: "D",
               amount: reduction,
-              adjSubType: "prorata",
+              adjSubType: "prorata-fee-adjustment",
               categoryName,
             },
             {
@@ -317,20 +317,24 @@ export async function changeCategory(req, res, next) {
     );
 
     // 2) Credit unused portion of OLD category: changeDate → year end (explicit daysInYear)
+    // For upgrade: credits unused portion of OLD (lower) category
+    // For downgrade: credits unused portion of OLD (higher) category
     const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, endISO);
     if (creditOldUnused > 0) {
       results.push(
         await postBalancedJournal({
           date,
-          docType: "CreditNote",
+          docType: "Adjustment",
           docNo: `${docNoBase}-COLD`,
-          memo: `Credit note – Unused period (${oldCategoryName}) ${changeDate} → ${endISO}`,
+          memo: `Adjustment – Unused period credit (${oldCategoryName}) ${changeDate} → ${endISO}`,
           lines: [
             {
               accountCode: "4900",
               dc: "D",
               amount: creditOldUnused,
-              adjSubType: isUpgrade ? "fee-increase-credit" : "downgrade",
+              adjSubType: isUpgrade
+                ? "category-upgrade-unused-credit"
+                : "category-downgrade-unused-credit",
               categoryName: oldCategoryName,
             },
             {
@@ -355,15 +359,15 @@ export async function changeCategory(req, res, next) {
       results.push(
         await postBalancedJournal({
           date,
-          docType: "CreditNote",
+          docType: "Adjustment",
           docNo: `${docNoBase}-CNEW`,
-          memo: `Credit note – Pre-change portion (${newCategoryName}) ${startISO} → ${changeMinusISO}`,
+          memo: `Adjustment – Pre-change portion credit (${newCategoryName}) ${startISO} → ${changeMinusISO}`,
           lines: [
             {
               accountCode: "4900",
               dc: "D",
               amount: creditNewPre,
-              adjSubType: "prorata",
+              adjSubType: "category-change-prorata-credit",
               categoryName: newCategoryName,
             },
             {
@@ -392,14 +396,14 @@ export async function creditNote(req, res, next) {
       memberId,
       amount,
       periodBucket = "current",
-      adjSubType = "discount",
+      adjSubType = "manual-discount",
       categoryName,
     } = req.body;
     const out = await postBalancedJournal({
       date,
-      docType: "CreditNote",
+      docType: "Adjustment",
       docNo,
-      memo: `Credit note – ${categoryName || adjSubType}`,
+      memo: `Adjustment – ${categoryName || adjSubType}`,
       lines: [
         { accountCode: "4900", dc: "D", amount, adjSubType, categoryName },
         { accountCode: "1400", dc: "C", amount, memberId, periodBucket },
@@ -605,7 +609,7 @@ export async function writeOff(req, res, next) {
  * GET /api/journal
  * Query params:
  *  - from, to: ISO dates
- *  - docType: e.g. Invoice, CreditNote, Receipt, Settlement
+ *  - docType: e.g. Invoice, Adjustment, Receipt, Settlement
  *  - memberId: exact match on entries.memberId
  *  - skip, limit: pagination (defaults: 0, 50; max limit 200)
  */
