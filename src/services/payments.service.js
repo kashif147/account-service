@@ -1443,9 +1443,7 @@ export async function listByMemberIds(memberIds, ctx, options = {}) {
   };
   if (options.status) query.status = options.status;
   if (options.purpose) query.purpose = options.purpose;
-  const payments = await Payment.find(query)
-    .sort({ createdAt: -1 })
-    .lean();
+  const payments = await Payment.find(query).sort({ createdAt: -1 }).lean();
   return payments;
 }
 
