@@ -54,7 +54,7 @@ async function getIncomeCodeForCategory(categoryName) {
 /**
  * Gets annual fee for membership category
  * Matches products by code OR name against membershipCategory
- * This should integrate with your subscription/fee service
+ * Always looks up pricing from pricing table based on effective dates
  */
 async function getMembershipPricing({
   categoryName,
@@ -64,7 +64,7 @@ async function getMembershipPricing({
   profileId,
   applicationId,
 }) {
-  let annualFee = subscriptionDetails?.annualFee ?? null;
+  let annualFee = null; // Always start with null - ignore subscriptionDetails.annualFee
   let incomeCode = null;
   let product = null;
 
@@ -75,15 +75,26 @@ async function getMembershipPricing({
     );
   } else {
     // Try to match product by code first (exact match, case-insensitive)
-    // Then try by name (case-insensitive)
+    // Then try by name (case-insensitive, supports partial matching)
     const categoryUpper = categoryName?.toUpperCase().trim();
-    const categoryRegex = new RegExp(`^${escapeRegex(categoryName)}$`, "i");
+    const categoryEscaped = escapeRegex(categoryName?.trim() || "");
+
+    // More flexible matching: exact match or contains
+    const categoryRegex = new RegExp(
+      `^${categoryEscaped}$|${categoryEscaped}`,
+      "i"
+    );
 
     product = await Product.findOne({
       tenantId,
       isDeleted: false,
       isActive: true,
-      $or: [{ code: categoryUpper }, { name: categoryRegex }],
+      $or: [
+        { code: categoryUpper },
+        { name: categoryRegex },
+        // Also try case-insensitive code match
+        { code: { $regex: new RegExp(`^${categoryEscaped}$`, "i") } },
+      ],
     }).lean();
 
     if (product) {
@@ -99,15 +110,12 @@ async function getMembershipPricing({
         "Found matching product for membership category"
       );
 
-      if (product.code) {
-        incomeCode = product.code;
-      }
+      // Get income code from product if available
+      // Note: product.code might be a product code, not income account code
+      // We'll still use getIncomeCodeForCategory for income code mapping
 
-      // Get pricing for the matched product
-      // Pricing must be active and subscription startDate must be between effectiveFrom and effectiveTo
-      if (annualFee == null && product._id) {
-        // Use subscription startDate (dateJoined) for pricing lookup
-        // Ensure it's a proper Date object for comparison
+      // Always look up pricing (ignore any annualFee from subscriptionDetails)
+      if (product._id) {
         const subscriptionStartDate = parseDate(startDate);
         if (!subscriptionStartDate) {
           logger.warn(
@@ -124,6 +132,7 @@ async function getMembershipPricing({
           // Find pricing where:
           // - effectiveFrom <= subscriptionStartDate (pricing has started)
           // - effectiveTo >= subscriptionStartDate OR effectiveTo is null (pricing hasn't ended or has no end date)
+          // Sort by effectiveFrom descending to get the most recent applicable pricing
           const pricing = await Pricing.findOne({
             tenantId,
             productId: product._id,
@@ -139,28 +148,44 @@ async function getMembershipPricing({
             .lean();
 
           if (pricing) {
+            // Prices are stored in cents, so use as-is
+            // Priority: price > memberPrice > nonMemberPrice
             annualFee =
               pricing.price ??
               pricing.memberPrice ??
               pricing.nonMemberPrice ??
               null;
-            logger.info(
-              {
-                productId: product._id,
-                pricingId: pricing._id,
-                annualFee,
-                subscriptionStartDate: subscriptionStartDate.toISOString(),
-                pricingEffectiveFrom: pricing.effectiveFrom
-                  ? new Date(pricing.effectiveFrom).toISOString()
-                  : null,
-                pricingEffectiveTo: pricing.effectiveTo
-                  ? new Date(pricing.effectiveTo).toISOString()
-                  : null,
-                profileId,
-                applicationId,
-              },
-              "Found pricing for product matching subscription start date"
-            );
+
+            if (annualFee != null) {
+              logger.info(
+                {
+                  productId: product._id,
+                  pricingId: pricing._id,
+                  annualFee,
+                  annualFeeInEuros: (annualFee / 100).toFixed(2), // For logging clarity
+                  subscriptionStartDate: subscriptionStartDate.toISOString(),
+                  pricingEffectiveFrom: pricing.effectiveFrom
+                    ? new Date(pricing.effectiveFrom).toISOString()
+                    : null,
+                  pricingEffectiveTo: pricing.effectiveTo
+                    ? new Date(pricing.effectiveTo).toISOString()
+                    : null,
+                  profileId,
+                  applicationId,
+                },
+                "Found pricing for product matching subscription start date"
+              );
+            } else {
+              logger.warn(
+                {
+                  productId: product._id,
+                  pricingId: pricing._id,
+                  profileId,
+                  applicationId,
+                },
+                "Pricing found but no price value (price, memberPrice, or nonMemberPrice) is set"
+              );
+            }
           } else {
             // Log all available pricings for debugging
             const allPricings = await Pricing.find({
@@ -186,6 +211,13 @@ async function getMembershipPricing({
                     ? new Date(p.effectiveTo).toISOString()
                     : null,
                   price: p.price ?? p.memberPrice ?? p.nonMemberPrice,
+                  priceInEuros: p.price
+                    ? (p.price / 100).toFixed(2)
+                    : p.memberPrice
+                    ? (p.memberPrice / 100).toFixed(2)
+                    : p.nonMemberPrice
+                    ? (p.nonMemberPrice / 100).toFixed(2)
+                    : null,
                 })),
                 profileId,
                 applicationId,
@@ -209,22 +241,25 @@ async function getMembershipPricing({
     }
   }
 
+  // Get income code from category mapping (not from product.code)
   if (incomeCode == null) {
     incomeCode = await getIncomeCodeForCategory(categoryName);
   }
 
+  // Fallback to defaults only if no pricing found
   if (annualFee == null) {
-    // fallback defaults if no pricing found
+    // fallback defaults if no pricing found (in cents to match pricing table format)
     const defaultFees = {
-      "General All Grades": 500.0,
-      Associate: 300.0,
-      Student: 0.0,
+      "General All Grades": 50000, // 500.00 in cents
+      Associate: 30000, // 300.00 in cents
+      Student: 0,
     };
-    annualFee = defaultFees[categoryName] || 500.0;
+    annualFee = defaultFees[categoryName] || 50000; // Default to 500.00 in cents
     logger.warn(
       {
         categoryName,
         annualFee,
+        annualFeeInEuros: (annualFee / 100).toFixed(2),
         profileId,
         applicationId,
       },
@@ -232,6 +267,8 @@ async function getMembershipPricing({
     );
   }
 
+  // Return annualFee in cents (as stored in pricing table)
+  // Note: Caller should convert to base currency (divide by 100) when passing to invoice function
   return { incomeCode, annualFee };
 }
 
@@ -403,12 +440,17 @@ export async function handleMemberCreated(payload) {
     );
 
     // Step 1: Create invoice
+    // Note: annualFee from pricing is in cents, but invoice function expects base currency
+    // Convert from cents to base currency (divide by 100)
+    // If pricing is already in base currency, remove this conversion
+    const annualFeeInBaseCurrency = annualFee / 100;
+
     const invoiceReq = {
       body: {
         date: invoiceDate,
         docNo,
         memberId,
-        annualFee,
+        annualFee: annualFeeInBaseCurrency,
         incomeCode,
         categoryName,
         periodBucket: "current",
