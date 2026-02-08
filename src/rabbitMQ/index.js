@@ -144,10 +144,18 @@ export async function setupConsumers() {
 
     // Application approval events queue (application.events exchange)
     const APPLICATION_QUEUE = "accounts.application.events";
+
+    // Parse prefetch from environment variable with default
+    const APPLICATION_PREFETCH = parseInt(
+      process.env.APPLICATION_EVENTS_PREFETCH || "100",
+      10
+    );
+
     logger.info("Creating application events queue...", {
       queue: APPLICATION_QUEUE,
       exchange: "application.events",
       routingKeys: ["applications.review.approved.v1"],
+      prefetch: APPLICATION_PREFETCH,
     });
 
     await consumer.createQueue(APPLICATION_QUEUE, {
@@ -183,9 +191,12 @@ export async function setupConsumers() {
         }
       );
 
-      await consumer.consume(APPLICATION_QUEUE, { prefetch: 10 });
+      await consumer.consume(APPLICATION_QUEUE, {
+        prefetch: APPLICATION_PREFETCH,
+      });
       logger.info("Application events consumer ready", {
         queue: APPLICATION_QUEUE,
+        prefetch: APPLICATION_PREFETCH,
       });
     } catch (error) {
       logger.error(
@@ -287,10 +298,18 @@ export async function setupConsumers() {
     // Membership events queue (membership.events exchange)
     // Listen to subscription current updated events which happen after member creation
     const MEMBERSHIP_QUEUE = "accounts.membership.events";
+
+    // Parse prefetch from environment variable with default
+    const MEMBERSHIP_PREFETCH = parseInt(
+      process.env.MEMBERSHIP_EVENTS_PREFETCH || "100",
+      10
+    );
+
     logger.info("Creating membership events queue...", {
       queue: MEMBERSHIP_QUEUE,
       exchange: "membership.events",
       routingKeys: ["members.subscription.current.updated.v1"],
+      prefetch: MEMBERSHIP_PREFETCH,
     });
 
     await consumer.createQueue(MEMBERSHIP_QUEUE, {
@@ -346,9 +365,12 @@ export async function setupConsumers() {
         }
       );
 
-      await consumer.consume(MEMBERSHIP_QUEUE, { prefetch: 10 });
+      await consumer.consume(MEMBERSHIP_QUEUE, {
+        prefetch: MEMBERSHIP_PREFETCH,
+      });
       logger.info("Membership events consumer ready", {
         queue: MEMBERSHIP_QUEUE,
+        prefetch: MEMBERSHIP_PREFETCH,
       });
     } catch (error) {
       logger.error(

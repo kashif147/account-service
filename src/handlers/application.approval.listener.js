@@ -7,6 +7,7 @@ import { claimApplicationCredit } from "../controllers/journal.controller.js";
 import CoA from "../models/coa.model.js";
 import Product from "../models/product.model.js";
 import Pricing from "../models/pricing.model.js";
+import GLTransaction from "../models/glTransaction.model.js";
 
 /**
  * Maps membership category to income account code
@@ -427,113 +428,227 @@ export async function handleMemberCreated(payload) {
     const docNo = `INV-${year}-${applicationId}`;
     const invoiceDate = new Date().toISOString().split("T")[0];
 
-    logger.info(
-      {
-        applicationId,
-        memberId,
-        categoryName,
-        annualFee,
-        incomeCode,
-        docNo,
-      },
-      "Creating invoice for newly created member"
-    );
+    // Idempotency check: Check if invoice already exists before creating
+    const existingInvoice = await GLTransaction.findOne({
+      docNo: docNo,
+    }).lean();
 
-    // Step 1: Create invoice
-    // Note: annualFee from pricing is in cents, but invoice function expects base currency
-    // Convert from cents to base currency (divide by 100)
-    // If pricing is already in base currency, remove this conversion
-    const annualFeeInBaseCurrency = annualFee / 100;
-
-    const invoiceReq = {
-      body: {
-        date: invoiceDate,
-        docNo,
-        memberId,
-        annualFee: annualFeeInBaseCurrency,
-        incomeCode,
-        categoryName,
-        periodBucket: "current",
-        joinDate: dateJoined !== invoiceDate ? dateJoined : undefined,
-      },
-    };
-
-    const invoiceRes = {
-      created: (data) => {
-        logger.info(
-          {
-            docNo,
-            memberId,
-            invoiceCount: Array.isArray(data) ? data.length : 1,
-          },
-          "Invoice created successfully for new member"
-        );
-      },
-      status: () => invoiceRes,
-      json: () => {},
-    };
-
-    const invoiceNext = (err) => {
-      if (err) {
-        logger.error(
-          { error: err.message, applicationId, memberId, docNo },
-          "Failed to create invoice for new member"
-        );
-        throw err;
-      }
-    };
-
-    try {
-      await invoice(invoiceReq, invoiceRes, invoiceNext);
-    } catch (invoiceError) {
-      logger.error(
+    if (existingInvoice) {
+      logger.info(
         {
-          error: invoiceError.message,
           applicationId,
           memberId,
           docNo,
+          existingInvoiceId: existingInvoice._id,
         },
-        "Failed to create invoice - will not claim credit"
+        "Invoice already exists - skipping creation (idempotency check)"
       );
-      // Don't proceed to claim credit if invoice creation failed
-      return;
+    } else {
+      logger.info(
+        {
+          applicationId,
+          memberId,
+          categoryName,
+          annualFee,
+          incomeCode,
+          docNo,
+        },
+        "Creating invoice for newly created member"
+      );
+
+      // Step 1: Create invoice
+      // Note: annualFee from pricing is in cents, but invoice function expects base currency
+      // Convert from cents to base currency (divide by 100)
+      // If pricing is already in base currency, remove this conversion
+      const annualFeeInBaseCurrency = annualFee / 100;
+
+      const invoiceReq = {
+        body: {
+          date: invoiceDate,
+          docNo,
+          memberId,
+          annualFee: annualFeeInBaseCurrency,
+          incomeCode,
+          categoryName,
+          periodBucket: "current",
+          joinDate: dateJoined !== invoiceDate ? dateJoined : undefined,
+        },
+      };
+
+      const invoiceRes = {
+        created: (data) => {
+          logger.info(
+            {
+              docNo,
+              memberId,
+              invoiceCount: Array.isArray(data) ? data.length : 1,
+            },
+            "Invoice created successfully for new member"
+          );
+        },
+        status: () => invoiceRes,
+        json: () => {},
+      };
+
+      const invoiceNext = (err) => {
+        if (err) {
+          // Check if error is due to duplicate docNo (idempotency)
+          if (
+            err.message?.includes("duplicate") ||
+            err.message?.includes("E11000") ||
+            err.code === 11000
+          ) {
+            logger.info(
+              {
+                applicationId,
+                memberId,
+                docNo,
+                error: err.message,
+              },
+              "Invoice creation failed due to duplicate - likely already exists (idempotency)"
+            );
+            // Don't throw - treat as success (idempotent operation)
+            return;
+          }
+          logger.error(
+            { error: err.message, applicationId, memberId, docNo },
+            "Failed to create invoice for new member"
+          );
+          throw err;
+        }
+      };
+
+      try {
+        await invoice(invoiceReq, invoiceRes, invoiceNext);
+      } catch (invoiceError) {
+        // Check if error is due to duplicate docNo (idempotency)
+        if (
+          invoiceError.message?.includes("duplicate") ||
+          invoiceError.message?.includes("E11000") ||
+          invoiceError.code === 11000
+        ) {
+          logger.info(
+            {
+              applicationId,
+              memberId,
+              docNo,
+              error: invoiceError.message,
+            },
+            "Invoice creation failed due to duplicate - likely already exists (idempotency)"
+          );
+          // Continue to claim credit even if duplicate error
+        } else {
+          logger.error(
+            {
+              error: invoiceError.message,
+              applicationId,
+              memberId,
+              docNo,
+            },
+            "Failed to create invoice - will not claim credit"
+          );
+          // Don't proceed to claim credit if invoice creation failed (non-duplicate error)
+          return;
+        }
+      }
     }
 
     // Step 2: Claim application credit (if payment was received before approval)
-    logger.info(
-      { applicationId, memberId },
-      "Attempting to claim application credit for new member"
-    );
+    const claimDocNo = `CLAIM-${applicationId}`;
 
-    const claimReq = {
-      body: {
-        date: invoiceDate,
-        docNo: `CLAIM-${applicationId}`,
-        applicationId,
-        memberId,
-        bucket: "current",
-      },
-    };
+    // Idempotency check: Check if claim already exists before creating
+    const existingClaim = await GLTransaction.findOne({
+      docNo: claimDocNo,
+    }).lean();
 
-    const claimRes = {
-      created: (data) => {
-        logger.info(
-          {
-            applicationId,
-            memberId,
-            docNo: claimReq.body.docNo,
-          },
-          "Application credit claimed successfully for new member"
-        );
-      },
-      status: () => claimRes,
-      json: () => {},
-    };
+    if (existingClaim) {
+      logger.info(
+        {
+          applicationId,
+          memberId,
+          claimDocNo,
+          existingClaimId: existingClaim._id,
+        },
+        "Credit already claimed - skipping (idempotency check)"
+      );
+    } else {
+      logger.info(
+        { applicationId, memberId },
+        "Attempting to claim application credit for new member"
+      );
 
-    const claimNext = (err) => {
-      if (err) {
-        // If no credit found, that's okay - just means no payment was received before approval
-        if (err.message?.includes("No credit entry found")) {
+      const claimReq = {
+        body: {
+          date: invoiceDate,
+          docNo: claimDocNo,
+          applicationId,
+          memberId,
+          bucket: "current",
+        },
+      };
+
+      const claimRes = {
+        created: (data) => {
+          logger.info(
+            {
+              applicationId,
+              memberId,
+              docNo: claimReq.body.docNo,
+            },
+            "Application credit claimed successfully for new member"
+          );
+        },
+        status: () => claimRes,
+        json: () => {},
+      };
+
+      const claimNext = (err) => {
+        if (err) {
+          // If no credit found, that's okay - just means no payment was received before approval
+          if (err.message?.includes("No credit entry found")) {
+            logger.info(
+              {
+                applicationId,
+                memberId,
+              },
+              "No application credit to claim - no payment received before approval"
+            );
+          } else if (
+            err.message?.includes("duplicate") ||
+            err.message?.includes("E11000") ||
+            err.code === 11000
+          ) {
+            logger.info(
+              {
+                applicationId,
+                memberId,
+                claimDocNo,
+                error: err.message,
+              },
+              "Credit claim failed due to duplicate - likely already exists (idempotency)"
+            );
+            // Don't throw - treat as success (idempotent operation)
+          } else {
+            logger.warn(
+              {
+                applicationId,
+                memberId,
+                error: err.message,
+              },
+              "Failed to claim application credit"
+            );
+          }
+        }
+      };
+
+      try {
+        await claimApplicationCredit(claimReq, claimRes, claimNext);
+      } catch (claimError) {
+        // If no credit entry found, that's fine - just means no payment was received
+        if (
+          claimError.message?.includes("No credit entry found") ||
+          claimError.statusCode === 404
+        ) {
           logger.info(
             {
               applicationId,
@@ -541,43 +656,31 @@ export async function handleMemberCreated(payload) {
             },
             "No application credit to claim - no payment received before approval"
           );
+        } else if (
+          claimError.message?.includes("duplicate") ||
+          claimError.message?.includes("E11000") ||
+          claimError.code === 11000
+        ) {
+          logger.info(
+            {
+              applicationId,
+              memberId,
+              claimDocNo,
+              error: claimError.message,
+            },
+            "Credit claim failed due to duplicate - likely already exists (idempotency)"
+          );
+          // Don't throw - treat as success (idempotent operation)
         } else {
           logger.warn(
             {
               applicationId,
               memberId,
-              error: err.message,
+              error: claimError.message,
             },
             "Failed to claim application credit"
           );
         }
-      }
-    };
-
-    try {
-      await claimApplicationCredit(claimReq, claimRes, claimNext);
-    } catch (claimError) {
-      // If no credit entry found, that's fine - just means no payment was received
-      if (
-        claimError.message?.includes("No credit entry found") ||
-        claimError.statusCode === 404
-      ) {
-        logger.info(
-          {
-            applicationId,
-            memberId,
-          },
-          "No application credit to claim - no payment received before approval"
-        );
-      } else {
-        logger.warn(
-          {
-            applicationId,
-            memberId,
-            error: claimError.message,
-          },
-          "Failed to claim application credit"
-        );
       }
     }
   } catch (error) {
