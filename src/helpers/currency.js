@@ -44,14 +44,8 @@ export function formatAmountsInResponse(data, fieldNames = ['amount', 'net', 'to
       if (fieldNames.includes(key) && typeof value === 'number') {
         formatted[key] = formatCurrency(value);
       } else if (key === 'entries' && Array.isArray(value)) {
-        // Format amounts in entries array
-        formatted[key] = value.map(entry => {
-          const formattedEntry = { ...entry };
-          if (typeof entry.amount === 'number') {
-            formattedEntry.amount = formatCurrency(entry.amount);
-          }
-          return formattedEntry;
-        });
+        // Format amounts in entries array (recursively process each entry)
+        formatted[key] = value.map(entry => formatAmountsInResponse(entry, fieldNames));
       } else if (typeof value === 'object') {
         formatted[key] = formatAmountsInResponse(value, fieldNames);
       } else {
