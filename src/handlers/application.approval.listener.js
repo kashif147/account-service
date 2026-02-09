@@ -464,17 +464,15 @@ export async function handleMemberCreated(payload) {
       );
 
       // Step 1: Create invoice
-      // Note: annualFee from pricing is in cents, but invoice function expects base currency
-      // Convert from cents to base currency (divide by 100)
-      // If pricing is already in base currency, remove this conversion
-      const annualFeeInBaseCurrency = annualFee / 100;
+      // annualFee is already in cents (minor units) - use directly
+      // All money is stored as integer cents throughout the system
 
       const invoiceReq = {
         body: {
           date: invoiceDate,
           docNo,
           memberId,
-          annualFee: annualFeeInBaseCurrency,
+          annualFee: annualFee, // Integer in cents
           incomeCode,
           categoryName,
           periodBucket: "current",

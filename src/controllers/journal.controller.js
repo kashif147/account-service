@@ -14,10 +14,10 @@ import {
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
-import { formatAmountsInResponse } from "../helpers/currency.js";
 
+// Amounts are stored as integer cents - sum them as integers
 function sumArray(arr, sel) {
-  return Number(arr.reduce((s, x) => s + sel(x), 0).toFixed(2));
+  return arr.reduce((s, x) => s + sel(x), 0);
 }
 
 // Load CoA rows for the accounts referenced in the journal,
@@ -173,14 +173,13 @@ export async function postBalancedJournal({
       }
     );
 
-    // add a friendly label in the response and format amounts as currency
+    // add a friendly label in the response
     const obj = txn.toObject();
     obj.entries = obj.entries.map((e) => ({
       ...e,
       accountLabel: `${e.accountCode} (${e.accountName})`,
     }));
-    // Format all amount fields as currency strings
-    return formatAmountsInResponse(obj);
+    return obj;
   });
 }
 
@@ -198,7 +197,20 @@ export async function invoice(req, res, next) {
       joinDate, // optional ISO for mid-year join
     } = req.body;
 
-    logInfo("Creating invoice", { docNo, memberId, annualFee, categoryName });
+    // Validate annualFee is integer (cents)
+    if (!Number.isInteger(annualFee) || annualFee <= 0) {
+      throw AppError.badRequest(
+        "annualFee must be a positive integer (minor units, e.g., 32600 for €326.00)"
+      );
+    }
+
+    logInfo("Creating invoice", {
+      docNo,
+      memberId,
+      annualFee,
+      annualFeeInEuros: (annualFee / 100).toFixed(2), // For logging clarity
+      categoryName,
+    });
 
     const year = new Date(date).getFullYear();
     const memoBase = `Subscription ${year} – ${categoryName}`;
@@ -229,10 +241,10 @@ export async function invoice(req, res, next) {
     const out = [inv];
 
     // 2) Daily pro-rata credit if joinDate given
+    // annualFee is in cents, prorata functions now return cents
     if (joinDate) {
-      const due = prorataFromJoinToYearEnd(annualFee, joinDate); // uses daysInYear() inside
-      const reduction =
-        Math.round((annualFee - due + Number.EPSILON) * 100) / 100;
+      const due = prorataFromJoinToYearEnd(annualFee, joinDate); // Returns cents
+      const reduction = annualFee - due; // Both in cents, result is cents
 
       if (reduction > 0) {
         const { endISO } = yearBoundsFrom(joinDate);
@@ -262,7 +274,7 @@ export async function invoice(req, res, next) {
       }
     }
 
-    res.created(formatAmountsInResponse(out));
+    res.created(out);
     logInfo("Invoice created successfully", {
       docNo,
       memberId,
@@ -290,6 +302,18 @@ export async function changeCategory(req, res, next) {
       periodBucket = "current",
     } = req.body;
 
+    // Validate fees are integers (cents)
+    if (!Number.isInteger(oldAnnualFee) || oldAnnualFee < 0) {
+      throw AppError.badRequest(
+        "oldAnnualFee must be a non-negative integer (minor units)"
+      );
+    }
+    if (!Number.isInteger(newAnnualFee) || newAnnualFee <= 0) {
+      throw AppError.badRequest(
+        "newAnnualFee must be a positive integer (minor units)"
+      );
+    }
+
     const { startISO, endISO, year } = yearBoundsFrom(changeDate);
     // pre-change ends the day before change
     const changeMinusISO = new Date(
@@ -298,7 +322,8 @@ export async function changeCategory(req, res, next) {
       .toISOString()
       .slice(0, 10);
 
-    const isUpgrade = Number(newAnnualFee) > Number(oldAnnualFee);
+    // Both fees are in cents - compare directly
+    const isUpgrade = newAnnualFee > oldAnnualFee;
 
     const results = [];
 
@@ -394,7 +419,7 @@ export async function changeCategory(req, res, next) {
       );
     }
 
-    res.created(formatAmountsInResponse(results));
+    res.created(results);
   } catch (e) {
     next(e);
   }
@@ -411,6 +436,13 @@ export async function creditNote(req, res, next) {
       adjSubType = "manual-discount",
       categoryName,
     } = req.body;
+
+    // Validate amount is integer (cents)
+    if (!Number.isInteger(amount) || amount <= 0) {
+      throw AppError.badRequest(
+        "amount must be a positive integer (minor units, e.g., 32600 for €326.00)"
+      );
+    }
     const out = await postBalancedJournal({
       date,
       docType: "Adjustment",
@@ -441,6 +473,14 @@ export async function receipt(req, res, next) {
       bucket = "current",
       provider,
     } = req.body;
+
+    // Validate amount is integer (cents)
+    if (!Number.isInteger(amount) || amount <= 0) {
+      throw AppError.badRequest(
+        "amount must be a positive integer (minor units, e.g., 32600 for €326.00)"
+      );
+    }
+
     if (!memberId && !applicationId)
       throw AppError.badRequest("memberId or applicationId is required", {
         memberId,
@@ -585,7 +625,7 @@ export async function claimApplicationCredit(req, res, next) {
       lines,
     });
 
-    res.created(formatAmountsInResponse(out));
+    res.created(out);
   } catch (e) {
     next(e);
   }
@@ -610,7 +650,7 @@ export async function writeOff(req, res, next) {
         { accountCode: "1400", dc: "C", amount, memberId, periodBucket },
       ],
     });
-    res.created(formatAmountsInResponse(out));
+    res.created(out);
   } catch (e) {
     next(e);
   }
@@ -668,14 +708,12 @@ export async function listJournals(req, res, next) {
 
     logInfo("Journal query results", { total, itemsCount: items.length });
 
-    res.success(
-      formatAmountsInResponse({
-        total,
-        skip: offset,
-        limit: pageSize,
-        items,
-      })
-    );
+    res.success({
+      total,
+      skip: offset,
+      limit: pageSize,
+      items,
+    });
   } catch (err) {
     next(err);
   }
@@ -738,14 +776,12 @@ export async function listStripePayments(req, res, next) {
       itemsCount: items.length,
     });
 
-    res.success(
-      formatAmountsInResponse({
-        total,
-        skip: offset,
-        limit: pageSize,
-        items,
-      })
-    );
+    res.success({
+      total,
+      skip: offset,
+      limit: pageSize,
+      items,
+    });
   } catch (err) {
     next(err);
   }

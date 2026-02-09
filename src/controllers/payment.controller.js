@@ -8,12 +8,11 @@ import {
   listByMemberIds,
 } from "../services/payments.service.js";
 import { AppError } from "../errors/AppError.js";
-import { formatAmountsInResponse } from "../helpers/currency.js";
 
 export async function createPaymentIntent(req, res, next) {
   try {
     const result = await createIntent(req.validated, req.ctx);
-    res.success(formatAmountsInResponse(result));
+    res.success(result);
   } catch (e) {
     next(e);
   }
@@ -37,7 +36,7 @@ export async function getPaymentByStripeId(req, res, next) {
     if (!doc) {
       return res.notFoundRecord("Payment not found");
     }
-    res.success(formatAmountsInResponse(doc));
+    res.success(doc);
   } catch (e) {
     next(e);
   }
@@ -46,7 +45,7 @@ export async function getPaymentByStripeId(req, res, next) {
 export async function recordExternalPayment(req, res, next) {
   try {
     const resp = await recordExternal(req.validated, req.ctx);
-    res.success(formatAmountsInResponse(resp));
+    res.success(resp);
   } catch (e) {
     next(e);
   }
@@ -55,7 +54,7 @@ export async function recordExternalPayment(req, res, next) {
 export async function createPaymentRefund(req, res, next) {
   try {
     const resp = await createRefund(req.validated, req.ctx);
-    res.success(formatAmountsInResponse(resp));
+    res.success(resp);
   } catch (e) {
     next(e);
   }
@@ -76,7 +75,7 @@ export async function listPaymentsBatch(req, res, next) {
       status: status || undefined,
       purpose: purpose || undefined,
     });
-    res.success(formatAmountsInResponse(payments));
+    res.success(payments);
   } catch (e) {
     next(e);
   }

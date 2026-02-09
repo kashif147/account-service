@@ -7,7 +7,6 @@ import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
-import { formatAmountsInResponse } from "../helpers/currency.js";
 
 export async function memberStatement(req, res, next) {
   try {
@@ -42,7 +41,7 @@ export async function memberStatement(req, res, next) {
       }
     );
 
-    res.success(formatAmountsInResponse({ memberId, txns }));
+    res.success({ memberId, txns });
     logInfo("Member statement generated", {
       memberId,
       transactionCount: txns.length,
@@ -74,7 +73,7 @@ export async function balancesSnapshot(req, res, next) {
         },
       },
     ]);
-    res.success(formatAmountsInResponse({ agg }));
+    res.success({ agg });
   } catch (e) {
     next(e);
   }
@@ -135,17 +134,18 @@ async function incomeStatement(startISO, endISO) {
     arr.reduce((s, x) => s + (x.type === "Income" ? -x.net : x.net), 0);
   // For Income accounts: credit positive → net is negative; flip sign when summing P&L
 
+  // Convert amounts from cents to euros for display
+  const { centsToEuros } = await import("../helpers/money.js");
+
   return {
     income,
     contraIncome,
     expenses,
     totals: {
-      income: Number(sum(income).toFixed(2)),
-      contraIncome: Number(sum(contraIncome).toFixed(2)),
-      expenses: Number(sum(expenses).toFixed(2)),
-      profit: Number(
-        (sum(income) - sum(contraIncome) - sum(expenses)).toFixed(2)
-      ),
+      income: centsToEuros(sum(income)),
+      contraIncome: centsToEuros(sum(contraIncome)),
+      expenses: centsToEuros(sum(expenses)),
+      profit: centsToEuros(sum(income) - sum(contraIncome) - sum(expenses)),
     },
   };
 }
@@ -190,19 +190,20 @@ async function membersBalancesAsOf(endISO) {
   ]);
 
   // Combine 1400 and 2020 into a single member net if you like, or return separately:
+  // Convert amounts from cents to euros for display
+  const { centsToEuros } = await import("../helpers/money.js");
+
   const byMember = {};
   for (const r of rows) {
     if (!byMember[r.memberId]) byMember[r.memberId] = { ar1400: 0, poa2020: 0 };
-    if (r.accountCode === "1400")
-      byMember[r.memberId].ar1400 = Number(r.amount.toFixed(2));
-    if (r.accountCode === "2020")
-      byMember[r.memberId].poa2020 = Number(r.amount.toFixed(2));
+    if (r.accountCode === "1400") byMember[r.memberId].ar1400 = r.amount; // Keep in cents for calculation
+    if (r.accountCode === "2020") byMember[r.memberId].poa2020 = r.amount; // Keep in cents for calculation
   }
   return Object.entries(byMember).map(([memberId, v]) => ({
     memberId,
-    ar1400: v.ar1400,
-    poa2020: v.poa2020,
-    net: Number((v.ar1400 - v.poa2020).toFixed(2)), // positive = owes us; negative = we owe them
+    ar1400: centsToEuros(v.ar1400), // Convert to euros for display
+    poa2020: centsToEuros(v.poa2020), // Convert to euros for display
+    net: centsToEuros(v.ar1400 - v.poa2020), // Convert to euros for display
   }));
 }
 
@@ -251,7 +252,7 @@ export async function balancesAsOf(req, res, next) {
 
     // On-demand recompute from GL (authoritative at a date)
     const mem = await membersBalancesAsOf(asOf);
-    res.success(formatAmountsInResponse({ asOf, members: mem }));
+    res.success({ asOf, members: mem });
   } catch (e) {
     next(e);
   }
@@ -278,20 +279,22 @@ export async function memberNetBalance(req, res, next) {
       byBucket[key] = (byBucket[key] || 0) + r.amount;
     }
 
-    const response = {
+    // Convert amounts from cents to euros for display
+    const { centsToEuros } = await import("../helpers/money.js");
+
+    res.success({
       memberId,
       year: y,
-      net: Number(net.toFixed(2)),
+      net: centsToEuros(net), // Convert from cents to euros for display
       accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
         accountCode,
-        amount: Number(amount.toFixed(2)),
+        amount: centsToEuros(amount), // Convert from cents to euros
       })),
       buckets: Object.entries(byBucket).map(([key, amount]) => {
         const [accountCode, bucket] = key.split(":");
-        return { accountCode, bucket, amount: Number(amount.toFixed(2)) };
+        return { accountCode, bucket, amount: centsToEuros(amount) };
       }),
-    };
-    res.success(formatAmountsInResponse(response));
+    });
   } catch (e) {
     next(e);
   }
@@ -321,7 +324,7 @@ function consolidateCategoryChanges(transactions) {
         });
       }
       const group = categoryChangeGroups.get(docNoBase);
-      
+
       if (txn.docNo.endsWith("-INVNEW")) {
         group.invoice = txn;
       } else if (txn.docNo.endsWith("-COLD")) {
@@ -335,16 +338,16 @@ function consolidateCategoryChanges(transactions) {
   // Second pass: process transactions
   for (const txn of transactions) {
     const match = txn.docNo.match(/^(.+?)-(INVNEW|COLD|CNEW)$/);
-    
+
     if (match) {
       const [, docNoBase] = match;
       const group = categoryChangeGroups.get(docNoBase);
-      
+
       // Only process when we encounter the invoice (INVNEW)
       // This ensures we create the consolidated entry once
       if (txn.docNo.endsWith("-INVNEW") && !processedDocNos.has(docNoBase)) {
         processedDocNos.add(docNoBase);
-        
+
         // Calculate net effect on account 1400 (Accounts Receivable)
         let netAmount = 0;
         const invoiceEntry = txn.entries.find(
@@ -380,11 +383,10 @@ function consolidateCategoryChanges(transactions) {
           txn.memo?.match(/Subscription\s+\d{4}\s*–\s*(.+)$/)?.[1] ||
           txn.memo?.match(/–\s*(.+)$/)?.[1] ||
           "Unknown";
-        
+
         // Old category adjustment memo format: "Adjustment – Unused period credit ({categoryName}) {date} → {date}"
         const oldCategoryName =
-          group.oldCategoryAdjustment?.entries
-            ?.find((e) => e.categoryName)
+          group.oldCategoryAdjustment?.entries?.find((e) => e.categoryName)
             ?.categoryName ||
           group.oldCategoryAdjustment?.memo?.match(/\(([^)]+)\)/)?.[1] ||
           "Unknown";
@@ -401,9 +403,17 @@ function consolidateCategoryChanges(transactions) {
           date: txn.date,
           docType: "CategoryChange",
           docNo: docNoBase, // Use base docNo without suffixes
-          memo: `Category Change: ${oldCategoryName} → ${newCategoryName} (${isUpgrade ? "Upgrade" : "Downgrade"})`,
-          netAmount: Math.round((netAmount + Number.EPSILON) * 100) / 100,
-          effect: netAmount > 0 ? "increase" : netAmount < 0 ? "decrease" : "no-change",
+          memo: `Category Change: ${oldCategoryName} → ${newCategoryName} (${
+            isUpgrade ? "Upgrade" : "Downgrade"
+          })`,
+          // netAmount is already in cents (from calculations), keep as integer
+          netAmount: netAmount,
+          effect:
+            netAmount > 0
+              ? "increase"
+              : netAmount < 0
+              ? "decrease"
+              : "no-change",
           originalEntries: {
             invoice: txn.docNo,
             oldCategoryAdjustment: group.oldCategoryAdjustment?.docNo,
@@ -427,10 +437,10 @@ function consolidateCategoryChanges(transactions) {
     // Filter out internal adjustments that are part of category changes
     if (txn.docType === "Adjustment") {
       const adjSubType = txn.entries.find((e) => e.adjSubType)?.adjSubType;
-      
+
       // Check if this adjustment is part of a category change group (by docNo pattern)
       const isPartOfCategoryChange = txn.docNo.match(/^(.+?)-(COLD|CNEW)$/);
-      
+
       // Skip category change adjustments (they're consolidated)
       if (isPartOfCategoryChange) {
         continue;
@@ -472,14 +482,12 @@ export async function memberLedger(req, res, next) {
     const q = { "entries.memberId": memberId };
     if (accountCode) q["entries.accountCode"] = accountCode;
 
-    const allItems = await GL.find(q)
-      .sort({ date: -1, createdAt: -1 })
-      .lean();
+    const allItems = await GL.find(q).sort({ date: -1, createdAt: -1 }).lean();
 
     // Consolidate category changes and filter for member-facing view
     const consolidatedItems = consolidateCategoryChanges(allItems);
 
-    res.success(formatAmountsInResponse({ memberId, items: consolidatedItems }));
+    res.success({ memberId, items: consolidatedItems });
   } catch (e) {
     next(e);
   }
@@ -522,7 +530,7 @@ export async function monthEnd(req, res, next) {
         )
       : await compute();
 
-    res.success(formatAmountsInResponse(report));
+    res.success(report);
   } catch (e) {
     next(e);
   }
@@ -563,7 +571,7 @@ export async function yearEnd(req, res, next) {
         )
       : await compute();
 
-    res.success(formatAmountsInResponse(report));
+    res.success(report);
   } catch (e) {
     next(e);
   }

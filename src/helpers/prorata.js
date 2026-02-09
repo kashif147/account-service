@@ -1,9 +1,7 @@
 import dayjs from "dayjs";
 import { AppError } from "../errors/AppError.js";
 
-function round2(n) {
-  return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
-}
+// Removed round2 - amounts are now stored as integer cents, no rounding needed
 
 /** Gregorian leap-year aware day count */
 export function daysInYear(year) {
@@ -45,10 +43,21 @@ export function totalDaysInYearOf(dateISO) {
 }
 
 /**
- * Pro-rate an annual fee over an inclusive period within a single calendar year,
- * using explicit daysInYear(year).
+ * Pro-rate an annual fee (in cents) over an inclusive period within a single calendar year
+ * @param {number} annualFeeCents - Annual fee in cents (integer)
+ * @param {string} fromISO - Start date (YYYY-MM-DD)
+ * @param {string} toISO - End date (YYYY-MM-DD)
+ * @returns {number} Pro-rated amount in cents (integer)
  */
-export function prorataForPeriod(annualFee, fromISO, toISO) {
+export function prorataForPeriod(annualFeeCents, fromISO, toISO) {
+  // Validate input is integer
+  if (!Number.isInteger(annualFeeCents)) {
+    throw AppError.badRequest(
+      "annualFeeCents must be an integer (minor units)",
+      { annualFeeCents, fromISO, toISO }
+    );
+  }
+  
   const fromY = dayjs(fromISO).year();
   const toY = dayjs(toISO).year();
   if (fromY !== toY)
@@ -58,15 +67,30 @@ export function prorataForPeriod(annualFee, fromISO, toISO) {
     );
   const numDays = diffDaysInclusive(fromISO, toISO);
   const denomDays = daysInYear(fromY);
-  const amount = (Number(annualFee) * numDays) / denomDays;
-  return Math.round((amount + Number.EPSILON) * 100) / 100; // round to 2dp
+  // Calculate in cents, maintain precision, round to integer
+  const amountCents = Math.round((Number(annualFeeCents) * numDays) / denomDays);
+  return amountCents; // Integer in cents
 }
 
-/** Pro-rate from join date (inclusive) to that year’s end (inclusive). */
-export function prorataFromJoinToYearEnd(annualFee, joinISO) {
+/**
+ * Pro-rate from join date (inclusive) to that year's end (inclusive)
+ * @param {number} annualFeeCents - Annual fee in cents (integer)
+ * @param {string} joinISO - Join date (YYYY-MM-DD)
+ * @returns {number} Pro-rated amount in cents (integer)
+ */
+export function prorataFromJoinToYearEnd(annualFeeCents, joinISO) {
+  // Validate input is integer
+  if (!Number.isInteger(annualFeeCents)) {
+    throw AppError.badRequest(
+      "annualFeeCents must be an integer (minor units)",
+      { annualFeeCents, joinISO }
+    );
+  }
+  
   const { endISO, year } = yearBoundsFrom(joinISO);
   const numDays = diffDaysInclusive(joinISO, endISO);
   const denomDays = daysInYear(year);
-  const amount = (Number(annualFee) * numDays) / denomDays;
-  return Math.round((amount + Number.EPSILON) * 100) / 100;
+  // Calculate in cents, maintain precision, round to integer
+  const amountCents = Math.round((Number(annualFeeCents) * numDays) / denomDays);
+  return amountCents; // Integer in cents
 }

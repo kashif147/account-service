@@ -1308,13 +1308,15 @@ export async function postJournalForPayment(payment, ctx) {
   const { stripeFeeBreakdown } = await import("../helpers/fees.js");
   const logger = (await import("../config/logger.js")).default;
 
-  // Convert amount from cents to currency units
-  const amount = payment.amount / 100;
+  // Amount is already in cents (minor units) - use directly
+  // No conversion needed - all money is stored as integer cents
+  const amount = payment.amount; // Integer in cents
 
   logger.info(
     {
       paymentId: payment._id,
       amount,
+      amountInEuros: (amount / 100).toFixed(2), // For logging clarity
       mode: payment.mode,
       memberId: payment.memberId,
       applicationId: payment.applicationId,

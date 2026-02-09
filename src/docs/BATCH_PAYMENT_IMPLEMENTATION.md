@@ -9,13 +9,24 @@ This guide provides step-by-step instructions for implementing batch payment pro
 - **Integration with existing payment/journal system**
 - **Resource management via global DB limiter**
 
+## Money Handling Standards
+
+**IMPORTANT**: Money follows strict standards to avoid rounding bugs and audit issues:
+
+- **Backend storage**: MongoDB stores money as **Number (integers in minor units)** - e.g., 32600 for €326.00
+- **API transfer**: Money is transferred as **minor units (integers)** - e.g., 32600 cents for €326.00
+- **Frontend**: Performs integer math only
+- **Formatting**: Happens only at the UI layer (convert cents to euros for display)
+- **No conversions in backend**: Never divide or multiply by 100 in the backend - amounts are always stored and processed as integer cents
+- **Display only**: Conversion to euros (divide by 100) happens only in API responses for display purposes
+
 ## Requirements
 
 ### Functional Requirements
 
 1. Process payments in batches (standing orders, salary deductions)
-2. Create payment documents for each entry
-3. Generate journal entries (receipts) automatically
+2. Create GLTransaction receipts directly (no Payment documents)
+3. Handle amounts as integers (minor units) - no currency conversions
 4. Handle errors gracefully (continue processing on individual failures)
 5. Return detailed results (successful, failed, errors)
 
@@ -39,8 +50,9 @@ Validate & Parse Batch
 Process in Chunks (100 payments/chunk)
   ↓
 For each payment:
-  - Create Payment document
-  - Create Journal entry (Receipt)
+  - Generate deterministic docNo
+  - Check for existing receipt (idempotency)
+  - Create GLTransaction receipt directly
   - Update MaterializedBalance
   ↓
 Return Results (successful, failed, errors)
@@ -48,9 +60,9 @@ Return Results (successful, failed, errors)
 
 ### Components
 
-1. **Controller**: `payment.controller.js` - API endpoint handler
-2. **Service**: `batch.payments.service.js` - Business logic
-3. **Existing**: `payments.service.js` - `postJournalForPayment` function
+1. **Controller**: `journal.controller.js` - API endpoint handler
+2. **Service**: `batch.payments.service.js` - Business logic (creates GLTransaction receipts directly)
+3. **Existing**: `journal.controller.js` - `postBalancedJournal` function
 4. **Limiter**: `globalLimiter.js` - Resource management
 
 ## Implementation Steps
@@ -61,8 +73,8 @@ Create `src/services/batch.payments.service.js`:
 
 ```javascript
 import { globalDBLimiter } from "../config/globalLimiter.js";
-import Payment from "../models/payment.model.js";
-import { postJournalForPayment } from "./payments.service.js";
+import { postBalancedJournal } from "../controllers/journal.controller.js";
+import GLTransaction from "../models/glTransaction.model.js";
 import logger from "../config/logger.js";
 
 // Chunk size for processing (configurable)
@@ -76,7 +88,31 @@ const BATCH_TYPE_TO_CLEARING = {
 };
 
 /**
- * Process a batch of payments
+ * Generate deterministic, unique docNo for receipt
+ * @param {string} batchId - Batch identifier
+ * @param {Object} paymentData - Payment data
+ * @param {number} paymentIndex - Payment index in batch
+ * @returns {string} Unique docNo
+ */
+function generateDocNo(batchId, paymentData, paymentIndex) {
+  // Option 1: Use externalRef if provided (most reliable for idempotency)
+  if (paymentData.externalRef) {
+    return `RCP-${batchId}-${paymentData.externalRef}`;
+  }
+
+  // Option 2: Use memberId/applicationId + amount (integer) + date (deterministic)
+  // Amount is already in minor units (integer), no conversion needed
+  const identifier = paymentData.memberId || paymentData.applicationId;
+  const date = paymentData.date || new Date().toISOString().split("T")[0];
+  const amount = paymentData.amount; // Integer in minor units (e.g., 32600)
+  return `RCP-${batchId}-${identifier}-${amount}-${date}`;
+
+  // Option 3: Fallback to timestamp + index (less ideal, but unique)
+  // return `RCP-${batchId}-${Date.now()}-${paymentIndex}`;
+}
+
+/**
+ * Process a batch of payments (creates GLTransaction receipts directly)
  * @param {string} batchId - Unique batch identifier
  * @param {string} batchType - "standing-order" | "salary-deduction" | "direct-debit"
  * @param {Array} payments - Array of payment data objects
@@ -103,7 +139,7 @@ export async function processBatchPayments(batchId, batchType, payments, ctx) {
       totalPayments: payments.length,
       globalLimit: globalDBLimiter.activeCount,
     },
-    "Starting batch payment processing"
+    "Starting batch payment processing (GLTransaction receipts)"
   );
 
   const results = {
@@ -145,46 +181,80 @@ export async function processBatchPayments(batchId, batchType, payments, ctx) {
             throw new Error("amount must be greater than 0");
           }
 
-          // Amount should be in cents
-          const amountInCents = Math.round(
-            typeof paymentData.amount === "number"
-              ? paymentData.amount * 100
-              : parseFloat(paymentData.amount) * 100
-          );
+          // Amount must be an integer (minor units - e.g., cents)
+          // API receives amounts as integers, no conversion needed
+          if (!Number.isInteger(paymentData.amount)) {
+            throw new Error("amount must be an integer (minor units)");
+          }
 
-          // Create payment document
-          const payment = await Payment.create({
-            tenantId: ctx.tenantId,
-            purpose: paymentData.purpose || "subscriptionFee",
-            amount: amountInCents, // Store in cents
-            currency: paymentData.currency || "eur",
-            status: "succeeded", // Batch payments are pre-approved
-            mode: batchType, // "standing-order" or "salary-deduction"
-            memberId: paymentData.memberId,
-            applicationId: paymentData.applicationId,
-            invoiceId: paymentData.invoiceId,
-            external: {
-              externalRef:
-                paymentData.externalRef || `${batchId}-${paymentIndex}`,
-              batchId: batchId,
-            },
-            metadata: {
-              ...paymentData.metadata,
-              batchId,
-              batchType,
+          const amount = paymentData.amount; // Already in minor units (e.g., 32600 for €326.00)
+
+          // Generate deterministic docNo
+          const docNo = generateDocNo(batchId, paymentData, paymentIndex);
+
+          // RACE CONDITION FIX: Check for existing receipt before creating
+          const existingReceipt = await GLTransaction.findOne({ docNo }).lean();
+          if (existingReceipt) {
+            logger.info(
+              {
+                batchId,
+                docNo,
+                existingId: existingReceipt._id,
+                paymentIndex,
+              },
+              "Receipt already exists - skipping (idempotency)"
+            );
+            results.successful++;
+            return {
+              success: true,
+              docNo,
               paymentIndex,
-              processedAt: new Date().toISOString(),
-            },
-          });
+              skipped: true,
+            };
+          }
 
-          // Create journal entry (receipt)
-          // postJournalForPayment uses global limiter via postBalancedJournal
-          await postJournalForPayment(payment, ctx);
+          // Build receipt lines (amount is already in minor units)
+          const entry2020 = {
+            accountCode: "2020",
+            dc: "C",
+            amount: amount, // Integer in minor units (e.g., 32600)
+            periodBucket: paymentData.bucket || "current",
+          };
+
+          // Prioritize applicationId over memberId
+          if (paymentData.applicationId) {
+            entry2020.applicationId = paymentData.applicationId;
+          } else if (paymentData.memberId) {
+            entry2020.memberId = paymentData.memberId;
+          }
+
+          const lines = [
+            { accountCode: clearingCode, dc: "D", amount: amount }, // Integer in minor units
+            entry2020, // Payment on Account - Member credits (2020)
+          ];
+
+          // Create receipt memo
+          const memo = paymentData.applicationId
+            ? `Receipt (app ${paymentData.applicationId}) - ${batchType}`
+            : paymentData.memberId
+            ? `Receipt (member ${paymentData.memberId}) - ${batchType}`
+            : `Receipt - ${batchType}`;
+
+          // Create receipt via postBalancedJournal
+          // This function handles duplicate key errors (E11000) internally
+          const receipt = await postBalancedJournal({
+            date: paymentData.date || new Date().toISOString().split("T")[0],
+            docType: "Receipt",
+            docNo,
+            memo,
+            lines,
+            settlement: null, // Batch payments don't have settlement
+          });
 
           results.successful++;
           return {
             success: true,
-            paymentId: payment._id.toString(),
+            docNo: receipt.docNo,
             paymentIndex,
           };
         } catch (error) {
@@ -244,50 +314,141 @@ export async function processBatchPayments(batchId, batchType, payments, ctx) {
 }
 ```
 
-### Step 2: Update postJournalForPayment to Handle Batch Types
+### Step 2: Fix postBalancedJournal Race Condition
 
-Update `src/services/payments.service.js` - `postJournalForPayment` function:
+Update `src/controllers/journal.controller.js` - `postBalancedJournal` function to handle duplicate key errors:
 
 ```javascript
-// Around line 1331, update clearing code logic:
-const clearingCode =
-  payment.mode === "stripe"
-    ? "1220" // Card Gateway Clearing
-    : payment.mode === "standing-order"
-    ? "1240" // Standing Order Clearing
-    : payment.mode === "salary-deduction"
-    ? "1230" // Salary Deduction Clearing
-    : payment.mode === "direct-debit"
-    ? "1250" // Direct Debit Clearing
-    : "1210"; // Default: Undeposited Cheques
+// Around line 128, wrap GLTransaction.create in try-catch:
+try {
+  // strip helper and persist
+  const entries = enriched.map(({ _a, ...rest }) => rest);
+  const txn = await GLTransaction.create({
+    date,
+    docType,
+    docNo,
+    memo,
+    entries,
+    ...(settlement && { settlement }),
+  });
+
+  const { year, totals } = rollupMemberBalances({ date, entries });
+  if (totals.size) {
+    const ops = [];
+    for (const [key, amount] of totals.entries()) {
+      const [memberId, accountCode, bucket] = key.split("|");
+      ops.push({
+        updateOne: {
+          filter: { memberId, accountCode, bucket, year },
+          update: {
+            $inc: { amount },
+            $set: { updatedAt: new Date() },
+          },
+          upsert: true,
+        },
+      });
+    }
+    await MaterializedBalance.bulkWrite(ops, { ordered: false });
+  }
+
+  // Publish journal created event
+  await publishDomainEvent(
+    EVENT_TYPES.JOURNAL_CREATED,
+    {
+      journalId: txn._id,
+      docNo: txn.docNo,
+      docType: txn.docType,
+      date: txn.date,
+      memo: txn.memo,
+      entries: txn.entries,
+      totalDebit: deb,
+      totalCredit: cre,
+    },
+    {
+      source: "journal.controller",
+      operation: "postBalancedJournal",
+    }
+  );
+
+  // add a friendly label in the response
+  const obj = txn.toObject();
+  obj.entries = obj.entries.map((e) => ({
+    ...e,
+    accountLabel: `${e.accountCode} (${e.accountName})`,
+  }));
+  return obj;
+} catch (error) {
+  // Handle duplicate key error (E11000) - race condition protection
+  if (error.code === 11000 && error.keyPattern?.docNo) {
+    // Another process created this docNo - fetch and return it
+    const existing = await GLTransaction.findOne({ docNo }).lean();
+    if (existing) {
+      logger.info(
+        { docNo, existingId: existing._id },
+        "Duplicate docNo detected (race condition) - returning existing transaction"
+      );
+
+      // Still update MaterializedBalance to ensure consistency
+      // (in case the other process didn't complete balance update)
+      const { year, totals } = rollupMemberBalances({ date, entries });
+      if (totals.size) {
+        const ops = [];
+        for (const [key, amount] of totals.entries()) {
+          const [memberId, accountCode, bucket] = key.split("|");
+          ops.push({
+            updateOne: {
+              filter: { memberId, accountCode, bucket, year },
+              update: {
+                $inc: { amount },
+                $set: { updatedAt: new Date() },
+              },
+              upsert: true,
+            },
+          });
+        }
+        await MaterializedBalance.bulkWrite(ops, { ordered: false });
+      }
+
+      // Return existing transaction with enriched entries
+      const existingEnriched = await enrichLines(existing.entries);
+      const obj = existing.toObject();
+      obj.entries = existingEnriched.map((e) => ({
+        ...e,
+        accountLabel: `${e.accountCode} (${e.accountName})`,
+      }));
+      return obj;
+    }
+  }
+  throw error;
+}
 ```
 
 ### Step 3: Create Controller Endpoint
 
-Add to `src/controllers/payment.controller.js`:
+Add to `src/controllers/journal.controller.js` (or create separate batch controller):
 
 ```javascript
 import { processBatchPayments } from "../services/batch.payments.service.js";
 
 /**
  * Process batch payments (standing orders, salary deductions)
- * POST /api/payments/batch
+ * Creates GLTransaction receipts directly (no Payment documents)
+ * POST /api/journal/batch-receipts
  * Body: {
  *   batchId: string (required),
  *   batchType: "standing-order" | "salary-deduction" | "direct-debit" (required),
  *   payments: Array<{
  *     memberId?: string,
  *     applicationId?: string,
- *     amount: number (in base currency, e.g., 326.00),
- *     currency?: string (default: "eur"),
- *     purpose?: string (default: "subscriptionFee"),
- *     invoiceId?: string,
- *     externalRef?: string,
+ *     amount: number (integer, minor units - e.g., 32600 for €326.00),
+ *     date?: string (ISO date, default: today),
+ *     bucket?: string (default: "current"),
+ *     externalRef?: string (recommended for idempotency),
  *     metadata?: object
  *   }> (required, 1-5000 items)
  * }
  */
-export async function processBatchPaymentsController(req, res, next) {
+export async function processBatchReceiptsController(req, res, next) {
   try {
     const { batchId, batchType, payments } = req.body || {};
 
@@ -336,28 +497,28 @@ export async function processBatchPaymentsController(req, res, next) {
 }
 ```
 
-### Step 4: Add Route
+### Step 3: Add Route
 
 Add to `src/routes/payment.routes.js` (or create if doesn't exist):
 
 ```javascript
 import {
-  processBatchPaymentsController,
+  processBatchReceiptsController,
   // ... other imports
-} from "../controllers/payment.controller.js";
+} from "../controllers/journal.controller.js";
 
-// Batch payment processing
+// Batch receipt processing
 router.post(
-  "/batch",
+  "/batch-receipts",
   ensureAuthenticated,
-  defaultPolicyMiddleware.requirePermission("accounts.payments", "create"),
-  processBatchPaymentsController
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  processBatchReceiptsController
 );
 ```
 
-### Step 5: Add Validation Rules (Optional but Recommended)
+### Step 4: Add Validation Rules (Optional but Recommended)
 
-Create validation in `src/validators/payment.validator.js`:
+Create validation in `src/validators/journal.validator.js`:
 
 ```javascript
 import { body } from "express-validator";
@@ -383,8 +544,10 @@ export const batchPaymentRules = [
     .withMessage("payments must be an array with 1-5000 items"),
 
   body("payments.*.amount")
-    .isFloat({ min: 0.01 })
-    .withMessage("amount must be a positive number"),
+    .isInt({ min: 1 })
+    .withMessage(
+      "amount must be a positive integer (minor units, e.g., 32600 for €326.00)"
+    ),
 
   body("payments.*.memberId")
     .optional()
@@ -435,7 +598,7 @@ GLOBAL_DB_OPERATIONS_LIMIT=120  # Max concurrent operations
 ### Example 1: Standing Order Batch (100 payments)
 
 ```bash
-POST /api/payments/batch
+POST /api/journal/batch-receipts
 Content-Type: application/json
 Authorization: Bearer <token>
 x-tenant-id: <tenant-id>
@@ -446,16 +609,14 @@ x-tenant-id: <tenant-id>
   "payments": [
     {
       "memberId": "B00001",
-      "amount": 326.00,
-      "currency": "eur",
-      "purpose": "subscriptionFee",
+      "amount": 32600,
+      "date": "2026-01-15",
       "externalRef": "SO-REF-001"
     },
     {
       "memberId": "B00002",
-      "amount": 326.00,
-      "currency": "eur",
-      "purpose": "subscriptionFee",
+      "amount": 32600,
+      "date": "2026-01-15",
       "externalRef": "SO-REF-002"
     }
     // ... up to 5000 payments
@@ -463,19 +624,20 @@ x-tenant-id: <tenant-id>
 }
 ```
 
+**Note**: `amount` is in minor units (integers). 32600 = €326.00. `externalRef` is recommended for idempotency.
+
 ### Example 2: Salary Deduction Batch
 
 ```bash
-POST /api/payments/batch
+POST /api/journal/batch-receipts
 {
   "batchId": "SD-2026-001",
   "batchType": "salary-deduction",
   "payments": [
     {
       "memberId": "B00010",
-      "amount": 81.50,
-      "currency": "eur",
-      "purpose": "subscriptionFee",
+      "amount": 8150,
+      "date": "2026-01-15",
       "externalRef": "SD-REF-001"
     }
     // ... more payments
@@ -483,23 +645,26 @@ POST /api/payments/batch
 }
 ```
 
+**Note**: 8150 = €81.50 (3 months fee)
+
 ### Example 3: Application Payments (Before Approval)
 
 ```bash
-POST /api/payments/batch
+POST /api/journal/batch-receipts
 {
   "batchId": "APP-2026-001",
   "batchType": "standing-order",
   "payments": [
     {
       "applicationId": "42f3b6e8-e502-4bf4-872b-746e6a5b17fc",
-      "amount": 81.50,
-      "currency": "eur",
-      "purpose": "subscriptionFee"
+      "amount": 8150,
+      "date": "2026-01-15"
     }
   ]
 }
 ```
+
+**Note**: If `externalRef` is not provided, system generates docNo from `applicationId + amount + date`.
 
 ## Response Format
 
@@ -516,13 +681,13 @@ POST /api/payments/batch
         "paymentIndex": 45,
         "error": "memberId or applicationId required",
         "paymentData": {
-          "amount": 326.0,
+          "amount": 32600,
           "externalRef": "SO-REF-045"
         }
       },
       {
         "paymentIndex": 67,
-        "error": "amount must be greater than 0",
+        "error": "amount must be a positive integer",
         "paymentData": {
           "memberId": "B00067",
           "amount": 0
@@ -548,6 +713,30 @@ POST /api/payments/batch
 - **Too many payments**: Returns 400 Bad Request (max 5000)
 - **Missing batchId**: Returns 400 Bad Request
 
+## Race Condition Protection
+
+### Idempotency via docNo
+
+The system uses deterministic `docNo` generation to ensure idempotency:
+
+1. **Primary**: Uses `externalRef` if provided: `RCP-{batchId}-{externalRef}`
+2. **Fallback**: Uses `memberId/applicationId + amount (integer) + date`: `RCP-{batchId}-{identifier}-{amount}-{date}`
+3. **Database**: `docNo` has unique constraint in GLTransaction model
+
+### Duplicate Prevention Layers
+
+1. **Pre-check**: Before creating, check if `docNo` already exists
+2. **Database constraint**: MongoDB unique index on `docNo` prevents duplicates
+3. **Error handling**: Catch E11000 (duplicate key) errors in `postBalancedJournal` and return existing transaction
+4. **Balance consistency**: Update MaterializedBalance even when returning existing transaction
+
+### Concurrent Batch Processing
+
+- Multiple batches can run simultaneously
+- Each batch uses global DB limiter (shared 120-operation limit)
+- `docNo` uniqueness ensures no duplicate receipts
+- MaterializedBalance updates are atomic (`$inc` operations)
+
 ## Testing
 
 ### Unit Tests
@@ -560,7 +749,7 @@ describe("processBatchPayments", () => {
   it("should process batch of 10 payments successfully", async () => {
     const payments = Array.from({ length: 10 }, (_, i) => ({
       memberId: `B0000${i}`,
-      amount: 326.0,
+      amount: 32600, // Minor units (€326.00)
     }));
 
     const results = await processBatchPayments(
@@ -583,16 +772,16 @@ describe("processBatchPayments", () => {
 import request from "supertest";
 import app from "../../bin/account-service.js";
 
-describe("POST /api/payments/batch", () => {
-  it("should process batch payments", async () => {
+describe("POST /api/journal/batch-receipts", () => {
+  it("should process batch receipts", async () => {
     const response = await request(app)
-      .post("/api/payments/batch")
+      .post("/api/journal/batch-receipts")
       .set("Authorization", `Bearer ${token}`)
       .set("x-tenant-id", "test-tenant")
       .send({
         batchId: "TEST-001",
         batchType: "standing-order",
-        payments: [{ memberId: "B00001", amount: 326.0 }],
+        payments: [{ memberId: "B00001", amount: 32600 }], // Minor units
       });
 
     expect(response.status).toBe(200);
