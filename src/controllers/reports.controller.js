@@ -7,6 +7,7 @@ import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
+import { formatAmountsInResponse } from "../helpers/currency.js";
 
 export async function memberStatement(req, res, next) {
   try {
@@ -41,7 +42,7 @@ export async function memberStatement(req, res, next) {
       }
     );
 
-    res.success({ memberId, txns });
+    res.success(formatAmountsInResponse({ memberId, txns }));
     logInfo("Member statement generated", {
       memberId,
       transactionCount: txns.length,
@@ -73,7 +74,7 @@ export async function balancesSnapshot(req, res, next) {
         },
       },
     ]);
-    res.success({ agg });
+    res.success(formatAmountsInResponse({ agg }));
   } catch (e) {
     next(e);
   }
@@ -250,7 +251,7 @@ export async function balancesAsOf(req, res, next) {
 
     // On-demand recompute from GL (authoritative at a date)
     const mem = await membersBalancesAsOf(asOf);
-    res.success({ asOf, members: mem });
+    res.success(formatAmountsInResponse({ asOf, members: mem }));
   } catch (e) {
     next(e);
   }
@@ -277,7 +278,7 @@ export async function memberNetBalance(req, res, next) {
       byBucket[key] = (byBucket[key] || 0) + r.amount;
     }
 
-    res.success({
+    const response = {
       memberId,
       year: y,
       net: Number(net.toFixed(2)),
@@ -289,7 +290,8 @@ export async function memberNetBalance(req, res, next) {
         const [accountCode, bucket] = key.split(":");
         return { accountCode, bucket, amount: Number(amount.toFixed(2)) };
       }),
-    });
+    };
+    res.success(formatAmountsInResponse(response));
   } catch (e) {
     next(e);
   }
@@ -477,7 +479,7 @@ export async function memberLedger(req, res, next) {
     // Consolidate category changes and filter for member-facing view
     const consolidatedItems = consolidateCategoryChanges(allItems);
 
-    res.success({ memberId, items: consolidatedItems });
+    res.success(formatAmountsInResponse({ memberId, items: consolidatedItems }));
   } catch (e) {
     next(e);
   }
@@ -520,7 +522,7 @@ export async function monthEnd(req, res, next) {
         )
       : await compute();
 
-    res.success(report);
+    res.success(formatAmountsInResponse(report));
   } catch (e) {
     next(e);
   }
@@ -561,7 +563,7 @@ export async function yearEnd(req, res, next) {
         )
       : await compute();
 
-    res.success(report);
+    res.success(formatAmountsInResponse(report));
   } catch (e) {
     next(e);
   }

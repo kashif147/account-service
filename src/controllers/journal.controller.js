@@ -14,6 +14,7 @@ import {
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
+import { formatAmountsInResponse } from "../helpers/currency.js";
 
 function sumArray(arr, sel) {
   return Number(arr.reduce((s, x) => s + sel(x), 0).toFixed(2));
@@ -172,13 +173,14 @@ export async function postBalancedJournal({
       }
     );
 
-    // add a friendly label in the response
+    // add a friendly label in the response and format amounts as currency
     const obj = txn.toObject();
     obj.entries = obj.entries.map((e) => ({
       ...e,
       accountLabel: `${e.accountCode} (${e.accountName})`,
     }));
-    return obj;
+    // Format all amount fields as currency strings
+    return formatAmountsInResponse(obj);
   });
 }
 
@@ -260,7 +262,7 @@ export async function invoice(req, res, next) {
       }
     }
 
-    res.created(out);
+    res.created(formatAmountsInResponse(out));
     logInfo("Invoice created successfully", {
       docNo,
       memberId,
@@ -392,7 +394,7 @@ export async function changeCategory(req, res, next) {
       );
     }
 
-    res.created(results);
+    res.created(formatAmountsInResponse(results));
   } catch (e) {
     next(e);
   }
@@ -583,7 +585,7 @@ export async function claimApplicationCredit(req, res, next) {
       lines,
     });
 
-    res.created(out);
+    res.created(formatAmountsInResponse(out));
   } catch (e) {
     next(e);
   }
@@ -608,7 +610,7 @@ export async function writeOff(req, res, next) {
         { accountCode: "1400", dc: "C", amount, memberId, periodBucket },
       ],
     });
-    res.created(out);
+    res.created(formatAmountsInResponse(out));
   } catch (e) {
     next(e);
   }
@@ -666,12 +668,14 @@ export async function listJournals(req, res, next) {
 
     logInfo("Journal query results", { total, itemsCount: items.length });
 
-    res.success({
-      total,
-      skip: offset,
-      limit: pageSize,
-      items,
-    });
+    res.success(
+      formatAmountsInResponse({
+        total,
+        skip: offset,
+        limit: pageSize,
+        items,
+      })
+    );
   } catch (err) {
     next(err);
   }
@@ -734,12 +738,14 @@ export async function listStripePayments(req, res, next) {
       itemsCount: items.length,
     });
 
-    res.success({
-      total,
-      skip: offset,
-      limit: pageSize,
-      items,
-    });
+    res.success(
+      formatAmountsInResponse({
+        total,
+        skip: offset,
+        limit: pageSize,
+        items,
+      })
+    );
   } catch (err) {
     next(err);
   }
