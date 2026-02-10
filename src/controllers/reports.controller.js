@@ -134,18 +134,16 @@ async function incomeStatement(startISO, endISO) {
     arr.reduce((s, x) => s + (x.type === "Income" ? -x.net : x.net), 0);
   // For Income accounts: credit positive → net is negative; flip sign when summing P&L
 
-  // Convert amounts from cents to euros for display
-  const { centsToEuros } = await import("../helpers/money.js");
-
+  // Return amounts in cents (no conversion - frontend will handle display formatting)
   return {
     income,
     contraIncome,
     expenses,
     totals: {
-      income: centsToEuros(sum(income)),
-      contraIncome: centsToEuros(sum(contraIncome)),
-      expenses: centsToEuros(sum(expenses)),
-      profit: centsToEuros(sum(income) - sum(contraIncome) - sum(expenses)),
+      income: sum(income),
+      contraIncome: sum(contraIncome),
+      expenses: sum(expenses),
+      profit: sum(income) - sum(contraIncome) - sum(expenses),
     },
   };
 }
@@ -190,20 +188,18 @@ async function membersBalancesAsOf(endISO) {
   ]);
 
   // Combine 1400 and 2020 into a single member net if you like, or return separately:
-  // Convert amounts from cents to euros for display
-  const { centsToEuros } = await import("../helpers/money.js");
-
+  // Return amounts in cents (no conversion - frontend will handle display formatting)
   const byMember = {};
   for (const r of rows) {
     if (!byMember[r.memberId]) byMember[r.memberId] = { ar1400: 0, poa2020: 0 };
-    if (r.accountCode === "1400") byMember[r.memberId].ar1400 = r.amount; // Keep in cents for calculation
-    if (r.accountCode === "2020") byMember[r.memberId].poa2020 = r.amount; // Keep in cents for calculation
+    if (r.accountCode === "1400") byMember[r.memberId].ar1400 = r.amount;
+    if (r.accountCode === "2020") byMember[r.memberId].poa2020 = r.amount;
   }
   return Object.entries(byMember).map(([memberId, v]) => ({
     memberId,
-    ar1400: centsToEuros(v.ar1400), // Convert to euros for display
-    poa2020: centsToEuros(v.poa2020), // Convert to euros for display
-    net: centsToEuros(v.ar1400 - v.poa2020), // Convert to euros for display
+    ar1400: v.ar1400, // Return in cents
+    poa2020: v.poa2020, // Return in cents
+    net: v.ar1400 - v.poa2020, // Return in cents
   }));
 }
 
@@ -279,20 +275,18 @@ export async function memberNetBalance(req, res, next) {
       byBucket[key] = (byBucket[key] || 0) + r.amount;
     }
 
-    // Convert amounts from cents to euros for display
-    const { centsToEuros } = await import("../helpers/money.js");
-
+    // Return amounts in cents (no conversion - frontend will handle display formatting)
     res.success({
       memberId,
       year: y,
-      net: centsToEuros(net), // Convert from cents to euros for display
+      net: net, // Return in cents
       accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
         accountCode,
-        amount: centsToEuros(amount), // Convert from cents to euros
+        amount: amount, // Return in cents
       })),
       buckets: Object.entries(byBucket).map(([key, amount]) => {
         const [accountCode, bucket] = key.split(":");
-        return { accountCode, bucket, amount: centsToEuros(amount) };
+        return { accountCode, bucket, amount: amount }; // Return in cents
       }),
     });
   } catch (e) {
