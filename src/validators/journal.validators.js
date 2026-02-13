@@ -86,6 +86,15 @@ export const listStripePaymentsRules = [
   query("skip").optional().isInt({ min: 0 })
 ];
 
+export const processDeductionBatchRules = [
+  body("paymentDate")
+    .isISO8601()
+    .withMessage("paymentDate must be a valid ISO8601 date"),
+  body("batchPayments")
+    .isArray({ min: 1 })
+    .withMessage("batchPayments must be a non-empty array"),
+];
+
 export const claimApplicationCreditRules = [
   body("date")
     .isISO8601()

@@ -9,6 +9,7 @@ import {
   listJournalsRules,
   listStripePaymentsRules,
   claimApplicationCreditRules,
+  processDeductionBatchRules,
 } from "../validators/journal.validators.js";
 import {
   invoice,
@@ -17,6 +18,7 @@ import {
   listJournals,
   listStripePayments,
   claimApplicationCredit,
+  processDeductionBatch,
   writeOff,
   changeCategory,
 } from "../controllers/journal.controller.js";
@@ -99,6 +101,17 @@ router.post(
   changeCategoryRules,
   validate,
   changeCategory
+);
+
+// Process batch - called by profile-service with body { paymentDate, batchPayments }; creates GL Receipts for each row
+router.post(
+  "/process-batch",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  idempotency(),
+  processDeductionBatchRules,
+  validate,
+  processDeductionBatch
 );
 
 // Claim application credit - requires minimum Membership Officer level
