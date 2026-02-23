@@ -38,7 +38,7 @@ export async function memberStatement(req, res, next) {
       {
         source: "reports.controller",
         operation: "memberStatement",
-      }
+      },
     );
 
     res.success({ memberId, txns });
@@ -119,7 +119,7 @@ async function trialBalance(startISO, endISO) {
   ]);
   const byCode = Object.fromEntries(coa.map((a) => [a.code, a]));
   return mapNames(byCode, rows).sort((a, b) =>
-    a.accountCode.localeCompare(b.accountCode)
+    a.accountCode.localeCompare(b.accountCode),
   );
 }
 
@@ -345,7 +345,7 @@ function consolidateCategoryChanges(transactions) {
         // Calculate net effect on account 1400 (Accounts Receivable)
         let netAmount = 0;
         const invoiceEntry = txn.entries.find(
-          (e) => e.accountCode === "1400" && e.dc === "D"
+          (e) => e.accountCode === "1400" && e.dc === "D",
         );
         if (invoiceEntry) {
           netAmount += invoiceEntry.amount;
@@ -354,7 +354,7 @@ function consolidateCategoryChanges(transactions) {
         // Subtract adjustments (they credit 1400, so reduce the net)
         if (group.oldCategoryAdjustment) {
           const adjEntry = group.oldCategoryAdjustment.entries.find(
-            (e) => e.accountCode === "1400" && e.dc === "C"
+            (e) => e.accountCode === "1400" && e.dc === "C",
           );
           if (adjEntry) {
             netAmount -= adjEntry.amount;
@@ -363,7 +363,7 @@ function consolidateCategoryChanges(transactions) {
 
         if (group.newCategoryAdjustment) {
           const adjEntry = group.newCategoryAdjustment.entries.find(
-            (e) => e.accountCode === "1400" && e.dc === "C"
+            (e) => e.accountCode === "1400" && e.dc === "C",
           );
           if (adjEntry) {
             netAmount -= adjEntry.amount;
@@ -388,7 +388,7 @@ function consolidateCategoryChanges(transactions) {
         // Determine if upgrade or downgrade based on adjSubType
         const isUpgrade =
           group.oldCategoryAdjustment?.entries?.find(
-            (e) => e.adjSubType === "category-upgrade-unused-credit"
+            (e) => e.adjSubType === "category-upgrade-unused-credit",
           ) !== undefined;
 
         // Create consolidated entry
@@ -406,8 +406,8 @@ function consolidateCategoryChanges(transactions) {
             netAmount > 0
               ? "increase"
               : netAmount < 0
-              ? "decrease"
-              : "no-change",
+                ? "decrease"
+                : "no-change",
           originalEntries: {
             invoice: txn.docNo,
             oldCategoryAdjustment: group.oldCategoryAdjustment?.docNo,
@@ -520,7 +520,7 @@ export async function monthEnd(req, res, next) {
           { startISO, endISO },
           compute,
           req.user?.id,
-          notes
+          notes,
         )
       : await compute();
 
@@ -561,7 +561,7 @@ export async function yearEnd(req, res, next) {
           { startISO, endISO },
           compute,
           req.user?.id,
-          notes
+          notes,
         )
       : await compute();
 
@@ -578,7 +578,7 @@ async function snapshotOrCompute(
   range,
   computeFn,
   lockedBy,
-  notes
+  notes,
 ) {
   // Check if already exists
   let snap = await ReportSnapshot.findOne({ type, label }).lean();
