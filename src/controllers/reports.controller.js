@@ -456,13 +456,21 @@ function consolidateCategoryChanges(transactions) {
       }
     }
 
-    // Skip internal entries
-    if (txn.docType === "Claim" || txn.docType === "Settlement") {
+    // Skip internal entries (Settlement only – Claim is member-facing as payment received)
+    if (txn.docType === "Settlement") {
       continue;
     }
 
-    // Add other visible entries
-    consolidated.push(txn);
+    // Claims: include and label as payment received for member statement/ledger
+    const entry =
+      txn.docType === "Claim"
+        ? {
+            ...txn,
+            displayLabel: "Payment received",
+            displayType: "payment_received",
+          }
+        : txn;
+    consolidated.push(entry);
   }
 
   return consolidated;
