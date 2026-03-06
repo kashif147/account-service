@@ -77,6 +77,42 @@ Response (example):
 }
 ```
 
+### Member Summary (balance + last payment)
+GET `{{baseUrl}}/reports/member/:memberId/summary`
+
+Query params:
+- `year`: YYYY (optional, default current year)
+
+Returns net balance and most recent payment in one call. Uses parallel indexed queries.
+
+```bash
+curl -H "Authorization: Bearer {{token}}" \
+  "{{baseUrl}}/reports/member/MEMBER123/summary?year=2026"
+```
+
+Response (example):
+```json
+{
+  "status": "success",
+  "data": {
+    "memberId": "MEMBER123",
+    "year": 2026,
+    "net": 120.5,
+    "accounts": [{ "accountCode": "1400", "amount": 150 }, { "accountCode": "2020", "amount": -29.5 }],
+    "buckets": [{ "accountCode": "1400", "bucket": "current", "amount": 150 }],
+    "lastPayment": {
+      "docNo": "RCPT-001",
+      "docType": "Receipt",
+      "date": "2026-02-15T00:00:00.000Z",
+      "amount": 32600,
+      "displayLabel": "Payment"
+    }
+  }
+}
+```
+
+`lastPayment` is null if no Receipt/Claim exists for the member.
+
 ### Member Ledger
 GET `{{baseUrl}}/reports/member/:memberId/ledger`
 

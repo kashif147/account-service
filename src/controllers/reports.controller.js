@@ -295,6 +295,76 @@ export async function memberNetBalance(req, res, next) {
 }
 
 /**
+ * Member summary: net balance + most recent payment (Receipt or Claim).
+ * Uses two parallel indexed queries for performance.
+ */
+export async function memberSummary(req, res, next) {
+  try {
+    const { memberId } = req.params;
+    const { year } = req.query;
+    const query = { memberId };
+    const y = year ? parseInt(year, 10) : new Date().getFullYear();
+    if (Number.isNaN(y)) throw AppError.badRequest("year must be YYYY");
+    query.year = y;
+
+    const [matBalRows, lastPaymentTxn] = await Promise.all([
+      MatBal.find(query).lean(),
+      GL.findOne({
+        "entries.memberId": memberId,
+        docType: { $in: ["Receipt", "Claim"] },
+      })
+        .sort({ date: -1, createdAt: -1 })
+        .lean(),
+    ]);
+
+    let net = 0;
+    const byAccount = {};
+    const byBucket = {};
+    for (const r of matBalRows) {
+      net += r.amount;
+      byAccount[r.accountCode] = (byAccount[r.accountCode] || 0) + r.amount;
+      const key = `${r.accountCode}:${r.bucket}`;
+      byBucket[key] = (byBucket[key] || 0) + r.amount;
+    }
+
+    let lastPayment = null;
+    if (lastPaymentTxn) {
+      const memberEntry = lastPaymentTxn.entries.find(
+        (e) => e.memberId === memberId && e.accountCode === "2020",
+      );
+      const amount = memberEntry ? memberEntry.amount : 0;
+      lastPayment = {
+        docNo: lastPaymentTxn.docNo,
+        docType: lastPaymentTxn.docType,
+        date: lastPaymentTxn.date,
+        amount,
+        displayLabel:
+          lastPaymentTxn.docType === "Claim"
+            ? "Payment received"
+            : lastPaymentTxn.memo || "Payment",
+      };
+    }
+
+    res.success({
+      memberId,
+      year: y,
+      net,
+      accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
+        accountCode,
+        amount,
+      })),
+      buckets: Object.entries(byBucket).map(([key, amount]) => {
+        const [accountCode, bucket] = key.split(":");
+        return { accountCode, bucket, amount };
+      }),
+      lastPayment,
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
  * Consolidates category change entries into a single net entry
  * Groups entries with docNo pattern: {base}-INVNEW, {base}-COLD, {base}-CNEW
  */

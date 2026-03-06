@@ -6,6 +6,7 @@ import {
   yearEnd,
   balancesAsOf,
   memberNetBalance,
+  memberSummary,
   memberLedger,
 } from "../controllers/reports.controller.js";
 import {
@@ -36,6 +37,15 @@ router.get(
   memberNetBalanceRules,
   validate,
   memberNetBalance
+);
+
+router.get(
+  "/member/:memberId/summary",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  memberNetBalanceRules,
+  validate,
+  memberSummary
 );
 
 router.get(
