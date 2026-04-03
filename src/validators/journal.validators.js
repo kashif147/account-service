@@ -9,7 +9,13 @@ const isSettlementStatus = ["PENDING", "SETTLED", "ALL"];
 export const invoiceRules = [
   body("date").isISO8601().withMessage("date must be ISO (YYYY-MM-DD)"),
   body("docNo").isString().notEmpty(),
-  body("memberId").isString().notEmpty(),
+  oneOf(
+    [
+      body("memberId").isString().notEmpty(),
+      body("applicationId").isString().notEmpty(),
+    ],
+    "either memberId or applicationId is required"
+  ),
   body("annualFee").isFloat({ gt: 0 }).withMessage("annualFee must be > 0"),
   body("incomeCode").isString().notEmpty().withMessage("incomeCode required"),
   body("categoryName").isString().notEmpty().withMessage("categoryName required"),

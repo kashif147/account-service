@@ -365,30 +365,42 @@ export async function handleApplicationApproved(payload) {
 /**
  * Handles member created event
  * Creates invoice and claims application credit after member is created
- * This ensures memberId is available before creating accounting entries
+ * Requires membership number (memberId) on the event: invoices are never posted against applicationId alone.
  */
 export async function handleMemberCreated(payload) {
   try {
     const {
       applicationId,
       memberId,
+      subscriptionId,
       tenantId,
       profileId,
       effective,
       subscriptionAttributes,
     } = payload.data || payload;
 
-    if (!applicationId || !memberId) {
+    if (!subscriptionId) {
       logger.warn(
-        { applicationId, memberId },
-        "Missing required fields (applicationId or memberId) for invoice creation and credit claim"
+        { applicationId, memberId, profileId },
+        "Missing subscriptionId on subscription current updated — cannot key invoice idempotently"
+      );
+      return;
+    }
+
+    if (
+      memberId == null ||
+      (typeof memberId === "string" && memberId.trim() === "")
+    ) {
+      logger.warn(
+        { applicationId, subscriptionId, profileId },
+        "Billing deferred: memberId (membership number) required — invoice and claim run only after membership number is on the event"
       );
       return;
     }
 
     logger.info(
-      { applicationId, memberId, profileId },
-      "Member created - creating invoice and claiming application credit"
+      { applicationId, memberId, profileId, subscriptionId },
+      "Subscription current updated — creating invoice on memberId (claim when applicationId also present)"
     );
 
     // Extract subscription details for invoice creation
@@ -427,9 +439,11 @@ export async function handleMemberCreated(payload) {
       });
     });
 
-    // Generate invoice document number
+    // Invoice doc number: per application when known, else per subscription (GL lines always use memberId)
     const year = new Date().getFullYear();
-    const docNo = `INV-${year}-${applicationId}`;
+    const docNo = applicationId
+      ? `INV-${year}-${applicationId}`
+      : `INV-${year}-SUB-${subscriptionId}`;
     const invoiceDate = new Date().toISOString().split("T")[0];
 
     // Idempotency check: Check if invoice already exists before creating
@@ -560,62 +574,106 @@ export async function handleMemberCreated(payload) {
       }
     }
 
-    // Step 2: Claim application credit (if payment was received before approval)
-    const claimDocNo = `CLAIM-${applicationId}`;
-
-    // Idempotency check: Check if claim already exists before creating
-    // Wrap in global limiter to prevent connection pool exhaustion
-    const existingClaim = await globalDBLimiter(async () => {
-      return await GLTransaction.findOne({
-        docNo: claimDocNo,
-      }).lean();
-    });
-
-    if (existingClaim) {
-      logger.info(
-        {
-          applicationId,
-          memberId,
-          claimDocNo,
-          existingClaimId: existingClaim._id,
-        },
-        "Credit already claimed - skipping (idempotency check)"
-      );
-    } else {
+    // Step 2: Claim application credit — requires both IDs (transfers 2020 app credit → member 2020)
+    if (!applicationId || !memberId) {
       logger.info(
         { applicationId, memberId },
-        "Attempting to claim application credit for new member"
+        "Skipping credit claim until both applicationId and memberId are available"
       );
+    } else {
+      const claimDocNo = `CLAIM-${applicationId}`;
 
-      const claimReq = {
-        body: {
-          date: invoiceDate,
+      const existingClaim = await globalDBLimiter(async () => {
+        return await GLTransaction.findOne({
           docNo: claimDocNo,
-          applicationId,
-          memberId,
-          bucket: "current",
-        },
-      };
+        }).lean();
+      });
 
-      const claimRes = {
-        created: (data) => {
-          logger.info(
-            {
-              applicationId,
-              memberId,
-              docNo: claimReq.body.docNo,
-            },
-            "Application credit claimed successfully for new member"
-          );
-        },
-        status: () => claimRes,
-        json: () => {},
-      };
+      if (existingClaim) {
+        logger.info(
+          {
+            applicationId,
+            memberId,
+            claimDocNo,
+            existingClaimId: existingClaim._id,
+          },
+          "Credit already claimed - skipping (idempotency check)"
+        );
+      } else {
+        logger.info(
+          { applicationId, memberId },
+          "Attempting to claim application credit for new member"
+        );
 
-      const claimNext = (err) => {
-        if (err) {
-          // If no credit found, that's okay - just means no payment was received before approval
-          if (err.message?.includes("No credit entry found")) {
+        const claimReq = {
+          body: {
+            date: invoiceDate,
+            docNo: claimDocNo,
+            applicationId,
+            memberId,
+            bucket: "current",
+          },
+        };
+
+        const claimRes = {
+          created: (data) => {
+            logger.info(
+              {
+                applicationId,
+                memberId,
+                docNo: claimReq.body.docNo,
+              },
+              "Application credit claimed successfully for new member"
+            );
+          },
+          status: () => claimRes,
+          json: () => {},
+        };
+
+        const claimNext = (err) => {
+          if (err) {
+            if (err.message?.includes("No credit entry found")) {
+              logger.info(
+                {
+                  applicationId,
+                  memberId,
+                },
+                "No application credit to claim - no payment received before approval"
+              );
+            } else if (
+              err.message?.includes("duplicate") ||
+              err.message?.includes("E11000") ||
+              err.code === 11000
+            ) {
+              logger.info(
+                {
+                  applicationId,
+                  memberId,
+                  claimDocNo,
+                  error: err.message,
+                },
+                "Credit claim failed due to duplicate - likely already exists (idempotency)"
+              );
+            } else {
+              logger.warn(
+                {
+                  applicationId,
+                  memberId,
+                  error: err.message,
+                },
+                "Failed to claim application credit"
+              );
+            }
+          }
+        };
+
+        try {
+          await claimApplicationCredit(claimReq, claimRes, claimNext);
+        } catch (claimError) {
+          if (
+            claimError.message?.includes("No credit entry found") ||
+            claimError.statusCode === 404
+          ) {
             logger.info(
               {
                 applicationId,
@@ -624,74 +682,29 @@ export async function handleMemberCreated(payload) {
               "No application credit to claim - no payment received before approval"
             );
           } else if (
-            err.message?.includes("duplicate") ||
-            err.message?.includes("E11000") ||
-            err.code === 11000
+            claimError.message?.includes("duplicate") ||
+            claimError.message?.includes("E11000") ||
+            claimError.code === 11000
           ) {
             logger.info(
               {
                 applicationId,
                 memberId,
                 claimDocNo,
-                error: err.message,
+                error: claimError.message,
               },
               "Credit claim failed due to duplicate - likely already exists (idempotency)"
             );
-            // Don't throw - treat as success (idempotent operation)
           } else {
             logger.warn(
               {
                 applicationId,
                 memberId,
-                error: err.message,
+                error: claimError.message,
               },
               "Failed to claim application credit"
             );
           }
-        }
-      };
-
-      try {
-        // Credit claim is already limited via postBalancedJournal wrapper
-        // No need to wrap here - postBalancedJournal handles the limiting
-        await claimApplicationCredit(claimReq, claimRes, claimNext);
-      } catch (claimError) {
-        // If no credit entry found, that's fine - just means no payment was received
-        if (
-          claimError.message?.includes("No credit entry found") ||
-          claimError.statusCode === 404
-        ) {
-          logger.info(
-            {
-              applicationId,
-              memberId,
-            },
-            "No application credit to claim - no payment received before approval"
-          );
-        } else if (
-          claimError.message?.includes("duplicate") ||
-          claimError.message?.includes("E11000") ||
-          claimError.code === 11000
-        ) {
-          logger.info(
-            {
-              applicationId,
-              memberId,
-              claimDocNo,
-              error: claimError.message,
-            },
-            "Credit claim failed due to duplicate - likely already exists (idempotency)"
-          );
-          // Don't throw - treat as success (idempotent operation)
-        } else {
-          logger.warn(
-            {
-              applicationId,
-              memberId,
-              error: claimError.message,
-            },
-            "Failed to claim application credit"
-          );
         }
       }
     }

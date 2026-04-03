@@ -23,6 +23,17 @@ const RefundSchema = new Schema(
     stripe: { type: StripeRefundSubSchema, default: {} },
     note: { type: String },
     metadata: { type: Map, of: String },
+    payoutMethod: {
+      type: String,
+      enum: ["bank_transfer", "cheque"],
+      required: false,
+    },
+    glDocNo: { type: String, sparse: true, index: true },
+    glStatus: {
+      type: String,
+      enum: ["posted", "gl_failed"],
+      required: false,
+    },
   },
   {
     timestamps: { createdAt: "createdAt", updatedAt: false },
@@ -35,14 +46,74 @@ RefundSchema.index(
   { unique: true, sparse: true }
 );
 
-export const zCreateRefund = z.object({
-  paymentIntentId: z.string().optional(),
-  chargeId: z.string().optional(),
-  amount: z.number().int().positive().optional(),
-  reason: z.string().optional(),
-  mode: z.enum(["stripe", "external"]),
-  note: z.string().optional(),
-  metadata: z.record(z.string()).optional(),
+RefundSchema.index({ tenantId: 1, createdAt: -1 });
+
+const isObjectId = (id) => Types.ObjectId.isValid(id);
+
+export const zCreateRefund = z
+  .object({
+    mode: z.enum(["stripe", "external"]),
+    paymentIntentId: z.string().optional(),
+    chargeId: z.string().optional(),
+    paymentId: z
+      .string()
+      .optional()
+      .refine((id) => id === undefined || isObjectId(id), "Invalid paymentId"),
+    amount: z.number().int().positive().optional(),
+    payoutMethod: z.enum(["bank_transfer", "cheque"]).optional(),
+    reason: z.string().optional(),
+    note: z.string().optional(),
+    metadata: z.record(z.string()).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.mode === "stripe") {
+      if (!data.paymentIntentId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "paymentIntentId is required for stripe refunds",
+          path: ["paymentIntentId"],
+        });
+      }
+      return;
+    }
+    if (!data.paymentId && !data.paymentIntentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "paymentId or paymentIntentId is required for external refunds",
+        path: ["paymentId"],
+      });
+    }
+    if (data.paymentId) {
+      if (!data.payoutMethod) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "payoutMethod is required when paymentId is set",
+          path: ["payoutMethod"],
+        });
+      }
+      if (data.amount == null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "amount is required when paymentId is set",
+          path: ["amount"],
+        });
+      }
+    }
+  });
+
+export const zListRefundsQuery = z.object({
+  limit: z.preprocess(
+    (v) => (v === undefined || v === "" ? 20 : v),
+    z.coerce.number().int().min(1).max(100)
+  ),
+  skip: z.preprocess(
+    (v) => (v === undefined || v === "" ? 0 : v),
+    z.coerce.number().int().min(0)
+  ),
+  memberId: z.string().optional(),
+  mode: z.enum(["stripe", "external"]).optional(),
+  from: z.string().optional(),
+  to: z.string().optional(),
 });
 
 export const Refund =

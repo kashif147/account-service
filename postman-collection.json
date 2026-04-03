@@ -1,0 +1,102 @@
+{
+  "info": {
+    "name": "Account Service API",
+    "description": "Latest API collection for account-service",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000", "type": "string" },
+    { "key": "authToken", "value": "", "type": "string" },
+    { "key": "memberId", "value": "", "type": "string" },
+    { "key": "coaId", "value": "", "type": "string" },
+    { "key": "paymentIntentId", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Service",
+      "item": [
+        {
+          "name": "API Root",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api", "host": ["{{baseUrl}}"], "path": ["api"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "List CoA",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/coa", "host": ["{{baseUrl}}"], "path": ["api", "admin", "coa"] }
+          }
+        },
+        {
+          "name": "Create CoA",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/coa", "host": ["{{baseUrl}}"], "path": ["api", "admin", "coa"] },
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Sample CoA\"\n}" }
+          }
+        },
+        {
+          "name": "Update CoA",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/coa/{{coaId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "coa", "{{coaId}}"] },
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Updated CoA\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Journal",
+      "item": [
+        { "name": "List Journals", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/journal", "host": ["{{baseUrl}}"], "path": ["api", "journal"] } } },
+        { "name": "List Stripe Payments", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/journal/stripe-payments", "host": ["{{baseUrl}}"], "path": ["api", "journal", "stripe-payments"] } } },
+        { "name": "Create Invoice", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/journal/invoice", "host": ["{{baseUrl}}"], "path": ["api", "journal", "invoice"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\"\n}" } } },
+        { "name": "Create Receipt", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/journal/receipt", "host": ["{{baseUrl}}"], "path": ["api", "journal", "receipt"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\"\n}" } } }
+      ]
+    },
+    {
+      "name": "Reports",
+      "item": [
+        { "name": "Member Statement", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/statement", "host": ["{{baseUrl}}"], "path": ["api", "reports", "member", "{{memberId}}", "statement"] } } },
+        { "name": "Member Net Balance", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/net-balance", "host": ["{{baseUrl}}"], "path": ["api", "reports", "member", "{{memberId}}", "net-balance"] } } },
+        { "name": "Balances Snapshot", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/balances/snapshot", "host": ["{{baseUrl}}"], "path": ["api", "reports", "balances", "snapshot"] } } },
+        { "name": "Month End", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/month-end", "host": ["{{baseUrl}}"], "path": ["api", "reports", "month-end"] } } },
+        { "name": "Year End", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/year-end", "host": ["{{baseUrl}}"], "path": ["api", "reports", "year-end"] } } }
+      ]
+    },
+    {
+      "name": "Payments",
+      "item": [
+        { "name": "Create Intent", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/intents", "host": ["{{baseUrl}}"], "path": ["api", "payments", "intents"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\"\n}" } } },
+        { "name": "Reconcile Payment", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/reconcile", "host": ["{{baseUrl}}"], "path": ["api", "payments", "reconcile"] }, "body": { "mode": "raw", "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\"\n}" } } },
+        { "name": "Get Payment By Stripe ID", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/payments/by-stripe/{{paymentIntentId}}", "host": ["{{baseUrl}}"], "path": ["api", "payments", "by-stripe", "{{paymentIntentId}}"] } } },
+        { "name": "List Refunds", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] } } },
+        { "name": "Create Refund", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] }, "body": { "mode": "raw", "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\"\n}" } } }
+      ]
+    },
+    {
+      "name": "Webhook",
+      "item": [
+        {
+          "name": "Stripe Webhook",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/webhook/stripe", "host": ["{{baseUrl}}"], "path": ["api", "webhook", "stripe"] },
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,7 @@ export const APPLICATION_EVENTS = {
   PAYMENT_COMPLETED: "payment.completed",
   PAYMENT_FAILED: "payment.failed",
   APPLICATION_STATUS_UPDATED: "application.status.updated",
+  JOURNAL_CREATED: "journal.created.v1",
 };
 
 // Application event handlers

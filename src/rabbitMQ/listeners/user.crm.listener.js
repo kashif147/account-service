@@ -1,5 +1,6 @@
 import User from "../../models/user.model.js";
 import logger from "../../config/logger.js";
+import { setOnInsertSyncedUserId } from "../../helpers/syncedUserDocumentId.js";
 
 /**
  * Handle CRM user created event
@@ -17,13 +18,17 @@ export async function handleCrmUserCreated(payload) {
   }
 
   try {
+    const setOnInsert = setOnInsertSyncedUserId(userId);
     await User.findOneAndUpdate(
       { tenantId, userId },
       {
-        userId,
-        userEmail: userEmail || null,
-        userFullName: userFullName || null,
-        tenantId,
+        $set: {
+          userId,
+          userEmail: userEmail || null,
+          userFullName: userFullName || null,
+          tenantId,
+        },
+        ...(setOnInsert ? { $setOnInsert: setOnInsert } : {}),
       },
       {
         upsert: true,
@@ -61,12 +66,16 @@ export async function handleCrmUserUpdated(payload) {
   }
 
   try {
+    const setOnInsert = setOnInsertSyncedUserId(userId);
     await User.findOneAndUpdate(
       { tenantId, userId },
       {
-        userEmail: userEmail || null,
-        userFullName: userFullName || null,
-        updatedAt: new Date(),
+        $set: {
+          userEmail: userEmail || null,
+          userFullName: userFullName || null,
+          updatedAt: new Date(),
+        },
+        ...(setOnInsert ? { $setOnInsert: setOnInsert } : {}),
       },
       {
         upsert: true,

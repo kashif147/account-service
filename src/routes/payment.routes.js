@@ -9,6 +9,7 @@ import {
   getPaymentByStripeId,
   recordExternalPayment,
   createPaymentRefund,
+  listPaymentRefunds,
   listPaymentsBatch,
 } from "../controllers/payment.controller.js";
 import {
@@ -16,7 +17,7 @@ import {
   zReconcile,
   zRecordExternal,
 } from "../models/payment.model.js";
-import { zCreateRefund } from "../models/refund.model.js";
+import { zCreateRefund, zListRefundsQuery } from "../models/refund.model.js";
 
 const router = express.Router();
 
@@ -50,6 +51,12 @@ router.post(
   idempotency(),
   zodValidate(zRecordExternal),
   recordExternalPayment
+);
+
+router.get(
+  "/refunds",
+  zodValidate(zListRefundsQuery),
+  listPaymentRefunds
 );
 
 router.post(

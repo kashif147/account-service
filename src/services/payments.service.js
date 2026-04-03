@@ -6,6 +6,7 @@ import Payment, {
 import Refund, { zCreateRefund } from "../models/refund.model.js";
 import { AppError } from "../errors/AppError.js";
 import { getStripe } from "../lib/stripe.js";
+import { assertRefundWithinCredit } from "./refundCredit.service.js";
 
 function ensureIntegerCents(value) {
   if (!Number.isInteger(value)) {
@@ -1206,33 +1207,131 @@ export async function recordExternal(input, ctx) {
   return { ok: true, refundId: refund._id.toString() };
 }
 
+async function sumRefundedForPayment(tenantId, paymentId) {
+  const agg = await Refund.aggregate([
+    { $match: { tenantId, paymentId } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  return agg[0]?.total ?? 0;
+}
+
+async function loadRefundPayment(parsed, ctx) {
+  if (parsed.mode === "stripe") {
+    return Payment.findOne({
+      tenantId: ctx.tenantId,
+      "stripe.paymentIntentId": parsed.paymentIntentId,
+    }).lean();
+  }
+  if (parsed.paymentId) {
+    return Payment.findOne({
+      _id: parsed.paymentId,
+      tenantId: ctx.tenantId,
+    }).lean();
+  }
+  return Payment.findOne({
+    tenantId: ctx.tenantId,
+    "stripe.paymentIntentId": parsed.paymentIntentId,
+  }).lean();
+}
+
+function assertPaymentAllowsRefund(payment) {
+  if (!["succeeded", "partially_refunded"].includes(payment.status)) {
+    throw AppError.badRequest("Payment status does not allow refund", {
+      status: payment.status,
+    });
+  }
+}
+
+async function applyRefundGlAndUpdateDoc(refundDoc, payment, ctx) {
+  const logger = (await import("../config/logger.js")).default;
+  const docNo = `RFD-${refundDoc._id}`;
+  try {
+    const journal = await postJournalForRefund(refundDoc, payment, ctx);
+    if (journal?.docNo) {
+      await Refund.updateOne(
+        { _id: refundDoc._id },
+        { $set: { glDocNo: journal.docNo, glStatus: "posted" } }
+      );
+      return { glPosted: true, glDocNo: journal.docNo };
+    }
+    await Refund.updateOne(
+      { _id: refundDoc._id },
+      { $set: { glStatus: "gl_failed" } }
+    );
+    return { glPosted: false, glDocNo: null };
+  } catch (err) {
+    logger.error(
+      { err, docNo, refundId: String(refundDoc._id) },
+      "postJournalForRefund failed"
+    );
+    await Refund.updateOne(
+      { _id: refundDoc._id },
+      { $set: { glStatus: "gl_failed" } }
+    ).catch(() => {});
+    return { glPosted: false, glDocNo: null };
+  }
+}
+
 export async function createRefund(input, ctx) {
   const parsed = zCreateRefund.parse(input);
   const stripe = getStripe();
+  const payment = await loadRefundPayment(parsed, ctx);
+  if (!payment) {
+    throw AppError.badRequest("Payment not found for refund");
+  }
+  if (parsed.mode === "stripe" && payment.mode !== "stripe") {
+    throw AppError.badRequest("Stripe refund requires a Stripe payment record");
+  }
+  if (parsed.mode === "external" && payment.mode !== "external") {
+    throw AppError.badRequest("External refund requires an external payment record");
+  }
+  assertPaymentAllowsRefund(payment);
+
+  const refundAmount =
+    parsed.amount != null ? parsed.amount : payment.amount;
+  ensureIntegerCents(refundAmount);
+
+  const alreadyRefunded = await sumRefundedForPayment(
+    ctx.tenantId,
+    payment._id
+  );
+  const remaining = payment.amount - alreadyRefunded;
+  if (refundAmount > remaining) {
+    throw AppError.badRequest(
+      "Refund exceeds remaining refundable amount on payment",
+      {
+        refundCents: refundAmount,
+        remainingRefundableCents: remaining,
+      }
+    );
+  }
+
+  const journalYear = new Date().getFullYear();
+  await assertRefundWithinCredit(refundAmount, payment, journalYear);
+
+  const meta =
+    parsed.metadata && Object.keys(parsed.metadata).length
+      ? new Map(Object.entries(parsed.metadata))
+      : undefined;
 
   if (parsed.mode === "stripe") {
     const refund = await stripe.refunds.create(
       {
         charge: parsed.chargeId,
         payment_intent: parsed.paymentIntentId,
-        amount: parsed.amount,
+        amount: refundAmount,
         reason: parsed.reason,
         metadata: parsed.metadata || {},
       },
       { idempotencyKey: ctx.idempotencyKey || undefined }
     );
 
-    const payment = await Payment.findOne({
-      tenantId: ctx.tenantId,
-      "stripe.paymentIntentId": parsed.paymentIntentId,
-    });
-
     const refundDoc = await Refund.create({
       tenantId: ctx.tenantId,
-      paymentId: payment ? payment._id : undefined,
+      paymentId: payment._id,
       mode: "stripe",
-      amount: parsed.amount || (payment ? payment.amount : undefined),
-      currency: payment ? payment.currency : "eur",
+      amount: refundAmount,
+      currency: payment.currency,
       reason: parsed.reason,
       stripe: {
         refundId: refund.id,
@@ -1240,52 +1339,11 @@ export async function createRefund(input, ctx) {
         paymentIntentId: parsed.paymentIntentId,
       },
       note: parsed.note,
-      metadata: parsed.metadata || {},
+      ...(meta && { metadata: meta }),
     });
 
-    if (payment) {
-      const newStatus =
-        parsed.amount && parsed.amount < payment.amount
-          ? "partially_refunded"
-          : "refunded";
-      await Payment.updateOne(
-        { _id: payment._id },
-        {
-          $set: {
-            status: newStatus,
-            "audit.updatedBy": ctx.userId || ctx.memberId || "system",
-          },
-        }
-      );
-    }
-
-    return { refundId: refund.id, status: "ok" };
-  }
-
-  // external refund
-  const payment = parsed.paymentIntentId
-    ? await Payment.findOne({
-        tenantId: ctx.tenantId,
-        "stripe.paymentIntentId": parsed.paymentIntentId,
-      })
-    : null;
-
-  const refundDoc = await Refund.create({
-    tenantId: ctx.tenantId,
-    paymentId: payment ? payment._id : undefined,
-    mode: "external",
-    amount: parsed.amount || (payment ? payment.amount : undefined),
-    currency: payment ? payment.currency : "eur",
-    reason: parsed.reason,
-    note: parsed.note,
-    metadata: parsed.metadata || {},
-  });
-
-  if (payment) {
     const newStatus =
-      parsed.amount && parsed.amount < payment.amount
-        ? "partially_refunded"
-        : "refunded";
+      refundAmount < payment.amount ? "partially_refunded" : "refunded";
     await Payment.updateOne(
       { _id: payment._id },
       {
@@ -1295,9 +1353,138 @@ export async function createRefund(input, ctx) {
         },
       }
     );
+
+    const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
+      refundDoc,
+      payment,
+      ctx
+    );
+
+    return {
+      refundId: refund.id,
+      refundDocId: refundDoc._id.toString(),
+      status: "ok",
+      glPosted,
+      glDocNo,
+    };
   }
 
-  return { ok: true };
+  const refundDoc = await Refund.create({
+    tenantId: ctx.tenantId,
+    paymentId: payment._id,
+    mode: "external",
+    amount: refundAmount,
+    currency: payment.currency,
+    reason: parsed.reason,
+    note: parsed.note,
+    payoutMethod: parsed.payoutMethod ?? "bank_transfer",
+    ...(meta && { metadata: meta }),
+  });
+
+  const newStatus =
+    refundAmount < payment.amount ? "partially_refunded" : "refunded";
+  await Payment.updateOne(
+    { _id: payment._id },
+    {
+      $set: {
+        status: newStatus,
+        "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+      },
+    }
+  );
+
+  const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
+    refundDoc,
+    payment,
+    ctx
+  );
+
+  return {
+    ok: true,
+    refundDocId: refundDoc._id.toString(),
+    glPosted,
+    glDocNo,
+  };
+}
+
+/**
+ * GL refund: DR 2020 (reduce member credit), CR clearing (mirror receipt).
+ * Idempotent docNo RFD-{refundId}; postBalancedJournal also dedupes by docNo.
+ */
+export async function postJournalForRefund(refundDoc, payment, _ctx) {
+  const { postBalancedJournal } = await import(
+    "../controllers/journal.controller.js"
+  );
+  const logger = (await import("../config/logger.js")).default;
+  const GLTransaction = (await import("../models/glTransaction.model.js"))
+    .default;
+
+  const amount = refundDoc.amount;
+  const clearingCode = payment.mode === "stripe" ? "1220" : "1210";
+
+  let metadataObj = {};
+  if (payment.metadata) {
+    if (payment.metadata instanceof Map) {
+      metadataObj = Object.fromEntries(payment.metadata);
+    } else if (typeof payment.metadata === "object") {
+      metadataObj = payment.metadata;
+    }
+  }
+
+  const memberId =
+    payment.memberId ||
+    metadataObj.memberId ||
+    metadataObj.member_id ||
+    null;
+  const applicationId =
+    payment.applicationId ||
+    metadataObj.applicationId ||
+    metadataObj.application_id ||
+    null;
+
+  if (!memberId && !applicationId) {
+    logger.warn(
+      {
+        refundId: refundDoc._id,
+        paymentId: payment._id,
+      },
+      "Skipping refund journal — memberId or applicationId required"
+    );
+    return null;
+  }
+
+  const entry2020 = {
+    accountCode: "2020",
+    dc: "D",
+    amount,
+    periodBucket: "current",
+  };
+  if (applicationId) entry2020.applicationId = applicationId;
+  else entry2020.memberId = memberId;
+
+  const lines = [
+    entry2020,
+    { accountCode: clearingCode, dc: "C", amount },
+  ];
+
+  const docNo = `RFD-${refundDoc._id}`;
+  const existing = await GLTransaction.findOne({ docNo }).lean();
+  if (existing) return existing;
+
+  const date = new Date().toISOString().split("T")[0];
+  const memo = applicationId
+    ? `Refund (app ${applicationId})`
+    : memberId
+    ? `Refund (member ${memberId})`
+    : "Refund";
+
+  return postBalancedJournal({
+    date,
+    docType: "Refund",
+    docNo,
+    memo,
+    lines,
+  });
 }
 
 export async function postJournalForPayment(payment, ctx) {
@@ -1431,6 +1618,42 @@ export async function postJournalForPayment(payment, ctx) {
 }
 
 /**
+ * @param {Object} ctx - { tenantId }
+ * @param {Object} options - from zListRefundsQuery
+ */
+export async function listRefunds(ctx, options) {
+  const { limit, skip, memberId, mode, from, to } = options;
+  const query = { tenantId: ctx.tenantId };
+  if (mode) query.mode = mode;
+  if (from || to) {
+    query.createdAt = {};
+    if (from) query.createdAt.$gte = new Date(from);
+    if (to) query.createdAt.$lte = new Date(to);
+  }
+  if (memberId) {
+    const pids = await Payment.find({
+      tenantId: ctx.tenantId,
+      memberId,
+    }).distinct("_id");
+    query.paymentId = { $in: pids };
+  }
+  const [items, total] = await Promise.all([
+    Refund.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate({
+        path: "paymentId",
+        select:
+          "memberId applicationId invoiceId amount currency mode status purpose createdAt",
+      })
+      .lean(),
+    Refund.countDocuments(query),
+  ]);
+  return { items, total, limit, skip };
+}
+
+/**
  * List payments by member IDs (for gateway aggregation / subscription service).
  * @param {Object} ctx - { tenantId }
  * @param {string[]} memberIds - membership numbers
@@ -1456,5 +1679,7 @@ export default {
   recordExternal,
   createRefund,
   postJournalForPayment,
+  postJournalForRefund,
+  listRefunds,
   listByMemberIds,
 };

@@ -191,6 +191,7 @@ export async function invoice(req, res, next) {
       date, // ISO
       docNo,
       memberId,
+      applicationId,
       annualFee,
       incomeCode, // e.g. "4000"
       categoryName, // e.g. "General All Grades"
@@ -205,9 +206,26 @@ export async function invoice(req, res, next) {
       );
     }
 
+    if (!memberId && !applicationId) {
+      throw AppError.badRequest("memberId or applicationId is required", {
+        memberId,
+        applicationId,
+      });
+    }
+
+    const arLine = {
+      accountCode: "1400",
+      dc: "D",
+      amount: annualFee,
+      periodBucket,
+    };
+    if (memberId) arLine.memberId = memberId;
+    else arLine.applicationId = applicationId;
+
     logInfo("Creating invoice", {
       docNo,
       memberId,
+      applicationId,
       annualFee,
       annualFeeInEuros: (annualFee / 100).toFixed(2), // For logging clarity
       categoryName,
@@ -223,13 +241,7 @@ export async function invoice(req, res, next) {
       docNo,
       memo: memoBase,
       lines: [
-        {
-          accountCode: "1400",
-          dc: "D",
-          amount: annualFee,
-          memberId,
-          periodBucket,
-        },
+        arLine,
         {
           accountCode: incomeCode,
           dc: "C",
@@ -266,7 +278,7 @@ export async function invoice(req, res, next) {
               accountCode: "1400",
               dc: "C",
               amount: reduction,
-              memberId,
+              ...(memberId ? { memberId } : { applicationId }),
               periodBucket,
             },
           ],
@@ -279,10 +291,16 @@ export async function invoice(req, res, next) {
     logInfo("Invoice created successfully", {
       docNo,
       memberId,
+      applicationId,
       invoiceCount: out.length,
     });
   } catch (e) {
-    logError("Invoice creation failed", { docNo, memberId, error: e.message });
+    logError("Invoice creation failed", {
+      docNo,
+      memberId,
+      applicationId,
+      error: e.message,
+    });
     next(e);
   }
 }

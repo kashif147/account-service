@@ -29,46 +29,159 @@ await jest.unstable_mockModule("../lib/stripe.js", () => {
   };
 });
 
+await jest.unstable_mockModule("../rabbitMQ/events.js", () => ({
+  APPLICATION_EVENTS: {},
+  EVENT_TYPES: {},
+  publishDomainEvent: jest.fn().mockResolvedValue(true),
+  initEventSystem: jest.fn().mockResolvedValue(undefined),
+  setupConsumers: jest.fn().mockResolvedValue(undefined),
+  shutdownEventSystem: jest.fn().mockResolvedValue(undefined),
+  init: jest.fn(),
+  publisher: {},
+  consumer: {},
+  shutdown: jest.fn(),
+}));
+
 const { default: app } = await import("../app.js");
 const { default: Payment } = await import("../models/payment.model.js");
 const { default: Refund } = await import("../models/refund.model.js");
+const { default: MaterializedBalance } = await import(
+  "../models/materializedBalance.model.js"
+);
+const { default: GLTransaction } = await import(
+  "../models/glTransaction.model.js"
+);
+const { default: CoA } = await import("../models/coa.model.js");
 
 const headers = {
   "x-tenant-id": "demo-tenant",
   "x-api-key": process.env.ACCOUNTS_API_KEY,
 };
 
+const OID = "507f1f77bcf86cd799439011";
+
 describe("Payments API", () => {
   beforeAll(() => {
-    // Stub Mongoose model methods to avoid real DB
+    jest.spyOn(MaterializedBalance, "find").mockReturnValue({
+      lean: jest.fn().mockResolvedValue([{ amount: -100000 }]),
+    });
+    jest.spyOn(MaterializedBalance, "bulkWrite").mockResolvedValue({});
+    jest.spyOn(GLTransaction, "findOne").mockReturnValue({
+      lean: jest.fn().mockResolvedValue(null),
+    });
+    jest.spyOn(GLTransaction, "create").mockImplementation((doc) => {
+      const d = { ...doc, _id: "gl_new" };
+      return Promise.resolve({
+        ...d,
+        toObject() {
+          return {
+            ...d,
+            entries: (d.entries || []).map((e) => ({
+              ...e,
+              accountLabel: `${e.accountCode} (x)`,
+            })),
+          };
+        },
+      });
+    });
+    jest.spyOn(CoA, "find").mockReturnValue({
+      lean: jest.fn().mockResolvedValue([
+        { code: "2020", description: "Member credits" },
+        { code: "1220", description: "Card Gateway Clearing" },
+        { code: "1210", description: "Undeposited Cheques" },
+      ]),
+    });
+
     jest.spyOn(Payment, "create").mockResolvedValue({
       _id: { toString: () => "pay_1" },
       amount: 500,
       currency: "eur",
       purpose: "subscriptionFee",
     });
-    jest
-      .spyOn(Payment, "findOneAndUpdate")
-      .mockResolvedValue({
+    jest.spyOn(Payment, "findOneAndUpdate").mockResolvedValue({
+      _id: { toString: () => "pay_1" },
+      amount: 500,
+      currency: "eur",
+      purpose: "subscriptionFee",
+    });
+    const chainFindOne = (leanDoc) => ({
+      select: jest.fn().mockReturnThis(),
+      sort: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue(leanDoc),
+    });
+    jest.spyOn(Payment, "findOne").mockImplementation((filter) => {
+      const base = {
         _id: { toString: () => "pay_1" },
         amount: 500,
         currency: "eur",
-        purpose: "subscriptionFee",
-      });
-    jest
-      .spyOn(Payment, "findOne")
-      .mockResolvedValue({
-        _id: { toString: () => "pay_1" },
-        amount: 500,
-        currency: "eur",
-        purpose: "subscriptionFee",
-      });
+        memberId: "m1",
+        status: "succeeded",
+        metadata: new Map(),
+        stripe: { paymentIntentId: "pi_fake" },
+      };
+      if (filter["stripe.paymentIntentId"] === "pi_fake") {
+        return chainFindOne({ ...base, mode: "stripe" });
+      }
+      if (filter["stripe.paymentIntentId"] === "pi_test_123") {
+        return chainFindOne({
+          ...base,
+          _id: { toString: () => "pay_pi_test" },
+          mode: "stripe",
+          stripe: { paymentIntentId: "pi_test_123" },
+        });
+      }
+      if (filter._id) {
+        return chainFindOne({
+          ...base,
+          mode: "external",
+          _id: filter._id,
+        });
+      }
+      return chainFindOne(null);
+    });
     jest
       .spyOn(Payment, "updateOne")
       .mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    jest.spyOn(Payment, "find").mockReturnValue({
+      distinct: jest.fn().mockResolvedValue([OID]),
+    });
+    let refundIdSeq = 0;
+    jest.spyOn(Refund, "create").mockImplementation((doc) => {
+      refundIdSeq += 1;
+      const idStr = `ref_${refundIdSeq}`;
+      return Promise.resolve({
+        ...doc,
+        _id: { toString: () => idStr },
+        amount: doc.amount,
+      });
+    });
     jest
-      .spyOn(Refund, "create")
-      .mockResolvedValue({ _id: { toString: () => "ref_1" } });
+      .spyOn(Refund, "updateOne")
+      .mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    jest.spyOn(Refund, "aggregate").mockResolvedValue([{ total: 0 }]);
+    jest.spyOn(Refund, "find").mockReturnValue({
+      sort: () => ({
+        skip: () => ({
+          limit: () => ({
+            populate: () => ({
+              lean: jest
+                .fn()
+                .mockResolvedValue([
+                  {
+                    _id: "r1",
+                    tenantId: "demo-tenant",
+                    amount: 100,
+                    mode: "stripe",
+                    glDocNo: "RFD-ref_1",
+                    paymentId: null,
+                  },
+                ]),
+            }),
+          }),
+        }),
+      }),
+    });
+    jest.spyOn(Refund, "countDocuments").mockResolvedValue(1);
   });
 
   afterAll(() => {
@@ -140,12 +253,20 @@ describe("Payments API", () => {
     expect(res.status).toBe(200);
   });
 
-  test("POST /api/payments/refunds external", async () => {
+  test("POST /api/payments/refunds external with paymentId", async () => {
     const res = await request(app)
       .post("/api/payments/refunds")
       .set(headers)
-      .send({ mode: "external", amount: 100, reason: "manual" });
+      .send({
+        mode: "external",
+        paymentId: OID,
+        amount: 100,
+        payoutMethod: "bank_transfer",
+        reason: "manual",
+      });
     expect(res.status).toBe(200);
+    expect(res.body.data.glPosted).toBe(true);
+    expect(res.body.data.glDocNo).toBe("RFD-ref_2");
   });
 
   test("POST /api/payments/refunds stripe", async () => {
@@ -154,5 +275,50 @@ describe("Payments API", () => {
       .set(headers)
       .send({ mode: "stripe", paymentIntentId: "pi_fake", amount: 100 });
     expect(res.status).toBe(200);
+    expect(res.body.data.refundId).toBe("re_mock_1");
+    expect(res.body.data.glPosted).toBe(true);
+    expect(res.body.data.glDocNo).toBe("RFD-ref_3");
+  });
+
+  test("POST /api/payments/refunds rejects when credit insufficient", async () => {
+    MaterializedBalance.find.mockReturnValueOnce({
+      lean: jest.fn().mockResolvedValue([{ amount: 0 }]),
+    });
+    const res = await request(app)
+      .post("/api/payments/refunds")
+      .set(headers)
+      .send({ mode: "stripe", paymentIntentId: "pi_fake", amount: 100 });
+    expect(res.status).toBe(400);
+  });
+
+  test("GET /api/payments/refunds", async () => {
+    const res = await request(app).get("/api/payments/refunds").set(headers);
+    expect(res.status).toBe(200);
+    expect(res.body.data.items.length).toBe(1);
+    expect(res.body.data.total).toBe(1);
+  });
+
+  test("postJournalForRefund idempotent when GL doc exists", async () => {
+    GLTransaction.create.mockClear();
+    const { postJournalForRefund } = await import(
+      "../services/payments.service.js"
+    );
+    GLTransaction.findOne.mockReturnValueOnce({
+      lean: jest.fn().mockResolvedValue({
+        docNo: "RFD-existing",
+        _id: "existing",
+      }),
+    });
+    const pay = {
+      mode: "stripe",
+      memberId: "m1",
+      metadata: new Map(),
+    };
+    const refundDoc = { _id: "ref_x", amount: 100 };
+    const j = await postJournalForRefund(refundDoc, pay, {
+      tenantId: "demo-tenant",
+    });
+    expect(j.docNo).toBe("RFD-existing");
+    expect(GLTransaction.create).not.toHaveBeenCalled();
   });
 });

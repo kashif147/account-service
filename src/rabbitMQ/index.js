@@ -345,26 +345,38 @@ export async function setupConsumers() {
       consumer.registerHandler(
         "members.subscription.current.updated.v1",
         async (payload) => {
-          // Check if this is a new member creation (has applicationId)
           const data = payload.data || payload;
-          if (data.applicationId && data.memberId) {
-            logger.info(
-              {
-                applicationId: data.applicationId,
-                memberId: data.memberId,
-              },
-              "Subscription updated for new member - creating invoice and claiming credit"
+          const { applicationId, memberId, subscriptionId } = data;
+          if (!subscriptionId) {
+            logger.warn(
+              { applicationId, memberId, profileId: data.profileId },
+              "Subscription current updated without subscriptionId — skip billing"
             );
-            await handleMemberCreated(payload);
-          } else {
-            logger.debug(
-              {
-                memberId: data.memberId,
-                applicationId: data.applicationId,
-              },
-              "Subscription updated but not a new member creation - skipping invoice creation"
-            );
+            return;
           }
+          if (
+            memberId == null ||
+            (typeof memberId === "string" && memberId.trim() === "")
+          ) {
+            logger.warn(
+              {
+                applicationId,
+                subscriptionId,
+                profileId: data.profileId,
+              },
+              "Subscription current updated without memberId (membership number) — defer invoice/claim until event includes memberId"
+            );
+            return;
+          }
+          logger.info(
+            {
+              applicationId,
+              memberId,
+              subscriptionId,
+            },
+            "Subscription current updated — run invoice/claim handler"
+          );
+          await handleMemberCreated(payload);
         }
       );
 

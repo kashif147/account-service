@@ -5,6 +5,7 @@ import {
   reconcileStripeEvent,
   recordExternal,
   createRefund,
+  listRefunds,
   listByMemberIds,
 } from "../services/payments.service.js";
 import { AppError } from "../errors/AppError.js";
@@ -55,6 +56,15 @@ export async function createPaymentRefund(req, res, next) {
   try {
     const resp = await createRefund(req.validated, req.ctx);
     res.success(resp);
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function listPaymentRefunds(req, res, next) {
+  try {
+    const result = await listRefunds(req.ctx, req.validated);
+    res.success(result);
   } catch (e) {
     next(e);
   }
