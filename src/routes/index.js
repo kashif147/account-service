@@ -3,6 +3,7 @@ import adminRoutes from "./admin.routes.js";
 import journalRoutes from "./journal.routes.js";
 import reportsRoutes from "./reports.routes.js";
 import paymentsRoutes from "./payment.routes.js";
+import batchDetailRoutes from "./batch.detail.routes.js";
 
 const router = express.Router();
 
@@ -18,6 +19,7 @@ router.get("/", (req, res) => {
       admin: "/admin",
       journal: "/journal",
       reports: "/reports",
+      batchDetails: "/batch-details",
       docs: "/api/docs",
     },
     timestamp: new Date().toISOString(),
@@ -28,5 +30,6 @@ router.use("/admin", adminRoutes);
 router.use("/journal", journalRoutes);
 router.use("/reports", reportsRoutes);
 router.use("/payments", paymentsRoutes);
+router.use("/batch-details", batchDetailRoutes);
 
 export default router;

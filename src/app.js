@@ -49,6 +49,7 @@ if (
 }
 
 import express from "express";
+import multer from "multer";
 import compression from "compression";
 import pinoHttp from "pino-http";
 import helmet from "helmet";
@@ -63,6 +64,9 @@ import responseMiddleware from "./middlewares/response.mw.js";
 import notFound from "./middlewares/notFound.js";
 import errorHandler from "./middlewares/errorHandler.js";
 import routes from "./routes/index.js";
+import { ensureAuthenticated } from "./middlewares/auth.js";
+import { defaultPolicyMiddleware } from "./middlewares/policy.middleware.js";
+import { createBatchDetail } from "./controllers/batch.detail.controller.js";
 import logger from "./config/logger.js";
 import {
   getIdempotencyCacheSize,
@@ -86,9 +90,15 @@ app.set("etag", false);
 let eventSystemInitialized = false;
 
 async function initializeEventSystem() {
-  if (!process.env.RABBIT_URL) {
-    logger.warn("RABBIT_URL not configured, skipping RabbitMQ initialization");
+  const rabbitUrl = process.env.RABBIT_URL || process.env.RABBITMQ_URL;
+  if (!rabbitUrl) {
+    logger.warn(
+      "RABBIT_URL / RABBITMQ_URL not configured, skipping RabbitMQ initialization"
+    );
     return;
+  }
+  if (!process.env.RABBIT_URL && process.env.RABBITMQ_URL) {
+    process.env.RABBIT_URL = process.env.RABBITMQ_URL;
   }
 
   try {
@@ -301,6 +311,35 @@ app.get("/", (req, res) => {
 
 // swagger
 app.use("/api/docs", swaggerServe, swaggerSetup);
+
+const batchUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+}).single("file");
+
+app.use(
+  "/api/create-batch",
+  ensureAuthenticated,
+  (req, res, next) => {
+    if (req.user?.userType !== "CRM") {
+      return res.status(403).json({
+        success: false,
+        message: "Only CRM users can create batch details",
+      });
+    }
+    next();
+  },
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  (req, res, next) => {
+    batchUpload(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({ success: false, message: err.message });
+      }
+      next();
+    });
+  },
+  createBatchDetail
+);
 
 // api routes
 app.use("/api", routes);

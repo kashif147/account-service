@@ -560,93 +560,106 @@ export async function receipt(req, res, next) {
 }
 
 /**
- * Process batch: called by profile-service with body { paymentDate, batchPayments }.
- * For each member in batchPayments creates a GL Receipt with:
- * - date = paymentDate, docType = Receipt, docNo = test-<uuid>, memo = test,
- *   settlement = { provider: "test", status: "PENDING" }
- * - Entry 1: account 1230, D (debit), amount from user's fileRow
- * - Entry 2: account 2020, C (credit), same amount, periodBucket = current, memberId = membership number
+ * Process batch payments (deduction batch): shared by HTTP handler and RabbitMQ worker.
+ * @param {string|Date} paymentDate
+ * @param {Array} batchPayments
+ * @returns {Promise<{ processed: number, failed: number, results: array, errors?: array }>}
+ */
+export async function runProcessDeductionBatchPayments(paymentDate, batchPayments) {
+  if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
+    throw AppError.badRequest("batchPayments array is required and must not be empty", {
+      batchPayments: batchPayments ?? "missing",
+    });
+  }
+
+  const date =
+    paymentDate instanceof Date ? paymentDate : new Date(paymentDate);
+  if (Number.isNaN(date.getTime())) {
+    throw AppError.badRequest("paymentDate must be a valid date", { paymentDate });
+  }
+
+  const results = [];
+  const errors = [];
+
+  for (let i = 0; i < batchPayments.length; i++) {
+    const row = batchPayments[i];
+    const membershipNumber = row?.membershipNumber ?? row?.fileRow?.membershipNumber;
+    const amount = row?.fileRow?.valueForPeriodSelected ?? row?.valueForPeriodSelected;
+
+    if (!membershipNumber) {
+      errors.push({ index: i, reason: "membershipNumber missing" });
+      continue;
+    }
+    if (amount == null || Number(amount) <= 0) {
+      errors.push({
+        index: i,
+        membershipNumber,
+        reason: "valueForPeriodSelected missing or not positive",
+      });
+      continue;
+    }
+
+    const amountNum = Number(amount);
+
+    const lines = [
+      { accountCode: "1230", dc: "D", amount: amountNum },
+      {
+        accountCode: "2020",
+        dc: "C",
+        amount: amountNum,
+        periodBucket: "current",
+        memberId: String(membershipNumber),
+      },
+    ];
+
+    const settlement = {
+      provider: "test",
+      status: "PENDING",
+    };
+
+    try {
+      const txn = await postBalancedJournal({
+        date,
+        docType: "Receipt",
+        docNo: `test-${randomUUID()}`,
+        memo: "test",
+        lines,
+        settlement,
+      });
+      results.push({
+        index: i,
+        membershipNumber,
+        amount: amountNum,
+        docNo: txn.docNo,
+        id: txn._id,
+      });
+    } catch (err) {
+      errors.push({
+        index: i,
+        membershipNumber,
+        reason: err.message || "postBalancedJournal failed",
+      });
+    }
+  }
+
+  return {
+    processed: results.length,
+    failed: errors.length,
+    results,
+    errors: errors.length ? errors : undefined,
+  };
+}
+
+/**
+ * Process batch: HTTP entry; body { paymentDate, batchPayments }.
  */
 export async function processDeductionBatch(req, res, next) {
   try {
-    const { paymentDate, batchPayments } = req.body;
-    if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
-      throw AppError.badRequest("batchPayments array is required and must not be empty", {
-        batchPayments: batchPayments ?? "missing",
-      });
-    }
-
-    const date = new Date(paymentDate);
-    if (Number.isNaN(date.getTime())) {
-      throw AppError.badRequest("paymentDate must be a valid date", { paymentDate });
-    }
-
-    const results = [];
-    const errors = [];
-
-    for (let i = 0; i < batchPayments.length; i++) {
-      const row = batchPayments[i];
-      const membershipNumber = row?.membershipNumber ?? row?.fileRow?.membershipNumber;
-      const amount = row?.fileRow?.valueForPeriodSelected ?? row?.valueForPeriodSelected;
-
-      if (!membershipNumber) {
-        errors.push({ index: i, reason: "membershipNumber missing" });
-        continue;
-      }
-      if (amount == null || Number(amount) <= 0) {
-        errors.push({ index: i, membershipNumber, reason: "valueForPeriodSelected missing or not positive" });
-        continue;
-      }
-
-      const amountNum = Number(amount);
-
-      const lines = [
-        { accountCode: "1230", dc: "D", amount: amountNum },
-        {
-          accountCode: "2020",
-          dc: "C",
-          amount: amountNum,
-          periodBucket: "current",
-          memberId: String(membershipNumber),
-        },
-      ];
-
-      const settlement = {
-        provider: "test",
-        status: "PENDING",
-      };
-
-      try {
-        const txn = await postBalancedJournal({
-          date,
-          docType: "Receipt",
-          docNo: `test-${randomUUID()}`,
-          memo: "test",
-          lines,
-          settlement,
-        });
-        results.push({
-          index: i,
-          membershipNumber,
-          amount: amountNum,
-          docNo: txn.docNo,
-          id: txn._id,
-        });
-      } catch (err) {
-        errors.push({
-          index: i,
-          membershipNumber,
-          reason: err.message || "postBalancedJournal failed",
-        });
-      }
-    }
-
-    res.status(201).json({
-      processed: results.length,
-      failed: errors.length,
-      results,
-      errors: errors.length ? errors : undefined,
-    });
+    const out = await runProcessDeductionBatchPayments(
+      req.body.paymentDate,
+      req.body.batchPayments
+    );
+    res.status(201).json(out);
   } catch (e) {
     next(e);
   }

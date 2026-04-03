@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import logger from "./logger.js";
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
+import { disconnectProfileDB } from "./profileDb.js";
 
 export async function connectDB(
   uri = process.env.MONGODB_URI ||
@@ -32,7 +33,12 @@ export async function connectDB(
   );
 
   try {
-    await Promise.allSettled([Payment.init(), Refund.init()]);
+    const { default: BatchDetail } = await import("../models/batch.detail.model.js");
+    await Promise.allSettled([
+      Payment.init(),
+      Refund.init(),
+      BatchDetail.init(),
+    ]);
     logger.info("Models initialized (indexes ensured)");
   } catch (e) {
     logger.warn({ err: e.message }, "Model init failed");
@@ -48,6 +54,7 @@ export async function connectDB(
 // ]);
 
 export async function disconnectDB() {
+  await disconnectProfileDB();
   if (mongoose.connection.readyState !== 0) {
     await mongoose.connection.close();
     logger.info("Mongo disconnected");

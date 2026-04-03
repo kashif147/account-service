@@ -1,6 +1,7 @@
 import dotenvFlow from "dotenv-flow";
 dotenvFlow.config();
 import { connectDB, disconnectDB } from "../src/config/db.js";
+import { connectProfileDB } from "../src/config/profileDb.js";
 import { connectRabbit, closeRabbit } from "../src/config/rabbit.js";
 import logger from "../src/config/logger.js";
 import app from "../src/app.js";
@@ -23,6 +24,13 @@ async function start() {
     logger.warn(
       { err: err.message },
       "Mongo connect failed at boot; continuing without DB"
+    )
+  );
+
+  connectProfileDB().catch((err) =>
+    logger.warn(
+      { err: err.message },
+      "Profile Mongo connect failed at boot; batch profile matching unavailable"
     )
   );
 

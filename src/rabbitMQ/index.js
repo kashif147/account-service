@@ -11,7 +11,12 @@ import {
 import logger from "../config/logger.js";
 
 // Import local event definitions
-import { APPLICATION_EVENTS, handleApplicationEvent } from "./events/index.js";
+import {
+  APPLICATION_EVENTS,
+  handleApplicationEvent,
+  BATCH_PROCESS_EVENTS,
+} from "./events/index.js";
+import { runBatchProcessing } from "../services/batch.process.job.service.js";
 import {
   handleCrmUserCreated,
   handleCrmUserUpdated,
@@ -33,7 +38,7 @@ import {
 } from "../handlers/application.approval.listener.js";
 
 // Re-export for convenience
-export { APPLICATION_EVENTS };
+export { APPLICATION_EVENTS, BATCH_PROCESS_EVENTS };
 
 // Initialize event system
 export async function initEventSystem() {
@@ -44,6 +49,9 @@ export async function initEventSystem() {
       prefetch: 10,
       connectionName: "account-service",
       serviceName: "account-service",
+      exchanges: [
+        { name: "batch.events", type: "topic", options: { durable: true } },
+      ],
     });
     logger.info("Event system initialized with middleware");
   } catch (error) {
@@ -394,6 +402,81 @@ export async function setupConsumers() {
       );
     }
 
+    // Batch detail processing (batch.events exchange)
+    const BATCH_PROCESS_QUEUE = "accounts.batch.process";
+    try {
+      const consumerChannel = await connectionManager.getNamedChannel(
+        "consumer",
+        10
+      );
+      await consumerChannel.assertExchange("batch.events", "topic", {
+        durable: true,
+      });
+    } catch (error) {
+      logger.warn(
+        { error: error.message },
+        "Failed to assert batch.events exchange"
+      );
+    }
+
+    await consumer.createQueue(BATCH_PROCESS_QUEUE, {
+      durable: true,
+      messageTtl: 86400000,
+    });
+
+    await consumer.bindQueue(BATCH_PROCESS_QUEUE, "batch.events", [
+      BATCH_PROCESS_EVENTS.BATCH_PROCESS_REQUESTED,
+    ]);
+
+    consumer.registerHandler(
+      BATCH_PROCESS_EVENTS.BATCH_PROCESS_REQUESTED,
+      async (payload) => {
+        const data = payload.data || payload;
+        const { batchDetailId, tenantId, userId } = data;
+        if (!batchDetailId) {
+          logger.error("[BatchProcess] Missing batchDetailId in payload");
+          return;
+        }
+        const result = await runBatchProcessing(
+          batchDetailId,
+          tenantId || null,
+          {}
+        );
+        await publisher.publish(
+          BATCH_PROCESS_EVENTS.BATCH_PROCESS_COMPLETED,
+          {
+            batchDetailId,
+            userId: userId || null,
+            tenantId: tenantId || null,
+            success: result.success,
+            processed: result.processed,
+            failed: result.failed,
+            message: result.message,
+          },
+          {
+            tenantId: tenantId || undefined,
+            exchange: "batch.events",
+            routingKey: BATCH_PROCESS_EVENTS.BATCH_PROCESS_COMPLETED,
+            metadata: { service: "account-service", version: "1.0" },
+          }
+        );
+        if (result.success) {
+          logger.info(
+            { batchDetailId, processed: result.processed, failed: result.failed },
+            "[BatchProcess] Completed batch"
+          );
+        } else {
+          logger.warn(
+            { batchDetailId, message: result.message },
+            "[BatchProcess] Batch failed"
+          );
+        }
+      }
+    );
+
+    await consumer.consume(BATCH_PROCESS_QUEUE, { prefetch: 1 });
+    logger.info({ queue: BATCH_PROCESS_QUEUE }, "Batch process consumer ready");
+
     logger.info("All consumers set up successfully");
   } catch (error) {
     logger.error({ error: error.message }, "Failed to set up consumers");
@@ -423,4 +506,11 @@ export async function shutdownEventSystem() {
 export { init, publisher, consumer, shutdown };
 
 // Export event types
-export const EVENT_TYPES = MIDDLEWARE_EVENT_TYPES;
+export const EVENT_TYPES = {
+  ...MIDDLEWARE_EVENT_TYPES,
+  ...BATCH_PROCESS_EVENTS,
+};
+
+export const QUEUES = {
+  BATCH_PROCESS: "accounts.batch.process",
+};
