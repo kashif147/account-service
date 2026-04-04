@@ -10,6 +10,97 @@ import {
 } from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
 
+function escapeRegexMembership(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const PROFILE_LOOKUP_SELECT =
+  "membershipNumber personalInfo contactInfo professionalDetails preferences";
+
+/**
+ * Resolves a profile for batch flows (same DB and tenant rules as batch payment processing).
+ * Returns clearer failure reasons for staging/debug (wrong PROFILE DB, tenant mismatch, legacy profiles without tenantId).
+ */
+async function findProfileByMembershipNumber(membershipNumberTrimmed, tenantId) {
+  const Profile = getProfileReadModel();
+
+  const withTenant = (q) =>
+    tenantId ? { ...q, tenantId } : q;
+
+  let profile = await Profile.findOne(
+    withTenant({ membershipNumber: membershipNumberTrimmed })
+  )
+    .select(PROFILE_LOOKUP_SELECT)
+    .lean();
+
+  if (!profile && tenantId) {
+    profile = await Profile.findOne(
+      withTenant({
+        membershipNumber: {
+          $regex: new RegExp(
+            `^${escapeRegexMembership(membershipNumberTrimmed)}$`,
+            "i"
+          ),
+        },
+      })
+    )
+      .select(PROFILE_LOOKUP_SELECT)
+      .lean();
+  }
+
+  if (profile) return { profile, lookupError: null };
+
+  if (tenantId) {
+    const byNumber = await Profile.findOne({
+      membershipNumber: membershipNumberTrimmed,
+    })
+      .select("tenantId membershipNumber")
+      .lean();
+    const byNumberCi =
+      byNumber ||
+      (await Profile.findOne({
+        membershipNumber: {
+          $regex: new RegExp(
+            `^${escapeRegexMembership(membershipNumberTrimmed)}$`,
+            "i"
+          ),
+        },
+      })
+        .select("tenantId membershipNumber")
+        .lean());
+
+    if (byNumberCi) {
+      const pt = byNumberCi.tenantId;
+      if (pt != null && pt !== "" && pt !== tenantId) {
+        return {
+          profile: null,
+          lookupError:
+            "A profile exists for this membership number but under a different tenant than your session. Align profile.tenantId with the gateway x-tenant-id (or use the correct CRM tenant).",
+        };
+      }
+      if (pt == null || pt === "") {
+        return {
+          profile: null,
+          lookupError:
+            "A profile exists for this membership number but it has no tenantId set; batch resolution requires tenantId on the profile to match your session.",
+        };
+      }
+      if (pt === tenantId) {
+        const full = await Profile.findById(byNumberCi._id)
+          .select(PROFILE_LOOKUP_SELECT)
+          .lean();
+        if (full) return { profile: full, lookupError: null };
+      }
+    }
+  }
+
+  return {
+    profile: null,
+    lookupError:
+      "No profile found with this membership number. Confirm the member exists in profile-service, account-service PROFILE_MONGODB_URI points at that database, and the number matches exactly.",
+  };
+}
+
 function batchPaymentsProfilePopulate() {
   return {
     path: "batchPayments.profileId",
@@ -332,20 +423,14 @@ export async function resolveBatchException(req, res) {
       });
     }
 
-    const Profile = getProfileReadModel();
-    const profileQuery = { membershipNumber: membershipNumberTrimmed };
-    if (tenantId) profileQuery.tenantId = tenantId;
-    const profile = await Profile.findOne(profileQuery)
-      .select(
-        "membershipNumber personalInfo contactInfo professionalDetails preferences"
-      )
-      .lean();
-
+    const { profile, lookupError } = await findProfileByMembershipNumber(
+      membershipNumberTrimmed,
+      tenantId
+    );
     if (!profile) {
       return res.status(404).json({
         success: false,
-        message:
-          "Please provide the correct membership number. No profile found with this membership number.",
+        message: lookupError,
       });
     }
 
@@ -471,20 +556,14 @@ export async function addPaymentToBatch(req, res) {
       });
     }
 
-    const Profile = getProfileReadModel();
-    const profileQuery = { membershipNumber: membershipNumberTrimmed };
-    if (tenantId) profileQuery.tenantId = tenantId;
-    const profile = await Profile.findOne(profileQuery)
-      .select(
-        "membershipNumber personalInfo contactInfo professionalDetails preferences"
-      )
-      .lean();
-
+    const { profile, lookupError } = await findProfileByMembershipNumber(
+      membershipNumberTrimmed,
+      tenantId
+    );
     if (!profile) {
       return res.status(404).json({
         success: false,
-        message:
-          "No profile found with this membership number. Please provide a valid membership number.",
+        message: lookupError,
       });
     }
 
