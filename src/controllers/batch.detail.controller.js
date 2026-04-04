@@ -204,7 +204,8 @@ export async function createBatchDetail(req, res) {
         fileUrl = await azureBlob.uploadToBlob(
           blobPath,
           req.file.buffer,
-          fileContentType
+          fileContentType,
+          fileName
         );
         fileBlobPath = blobPath;
       }
@@ -271,6 +272,93 @@ export async function createBatchDetail(req, res) {
     return res.status(500).json({
       success: false,
       message: error.message || "Failed to create batch",
+    });
+  }
+}
+
+export async function deleteBatchDetail(req, res) {
+  try {
+    const { batchDetailId } = req.params;
+    const tenantId = req.user?.tenantId || null;
+
+    const filter = {
+      _id: batchDetailId,
+      isDeleted: false,
+      batchStatus: "pending",
+    };
+    if (tenantId) filter.tenantId = tenantId;
+
+    // Mongo + Azure cannot share one transaction; we delete Mongo first and restore
+    // the full document if blob removal throws (compensating "rollback").
+    const deleted = await BatchDetail.findOneAndDelete(filter).lean();
+
+    if (deleted) {
+      if (deleted.fileBlobPath && azureBlob.isConfigured) {
+        try {
+          await azureBlob.deleteBlobIfExists(deleted.fileBlobPath);
+        } catch (err) {
+          logger.error(
+            {
+              err: err.message,
+              fileBlobPath: deleted.fileBlobPath,
+              batchDetailId,
+            },
+            "[BatchDetail] blob delete failed; restoring batch document"
+          );
+          try {
+            await BatchDetail.collection.insertOne(deleted);
+          } catch (restoreErr) {
+            logger.error(
+              {
+                err: restoreErr.message,
+                batchDetailId,
+              },
+              "[BatchDetail] blob delete failed and Mongo restore failed"
+            );
+            return res.status(500).json({
+              success: false,
+              message:
+                "Deletion could not be completed. The batch record may be missing while the file may still exist; contact support.",
+            });
+          }
+          return res.status(503).json({
+            success: false,
+            message:
+              "File could not be removed from storage. The batch has been restored.",
+          });
+        }
+      }
+      return res.status(200).json({
+        success: true,
+        message: "Batch detail deleted",
+      });
+    }
+
+    const any = await BatchDetail.findById(batchDetailId)
+      .select("isDeleted tenantId batchStatus")
+      .lean();
+    if (!any || any.isDeleted) {
+      return res.status(404).json({
+        success: false,
+        message: "Batch detail not found",
+      });
+    }
+    if (tenantId && any.tenantId !== tenantId) {
+      return res.status(404).json({
+        success: false,
+        message: "Batch detail not found",
+      });
+    }
+    return res.status(400).json({
+      success: false,
+      message: `Batch can only be deleted while status is pending (current: ${any.batchStatus}).`,
+      batchStatus: any.batchStatus,
+    });
+  } catch (error) {
+    logger.error({ err: error.message }, "[BatchDetail] deleteBatchDetail");
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to delete batch detail",
     });
   }
 }

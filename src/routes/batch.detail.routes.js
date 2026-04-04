@@ -4,6 +4,7 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { uploadSingleOptional } from "../middlewares/upload.mw.js";
 import {
   createBatchDetail,
+  deleteBatchDetail,
   getBatchDetailById,
   getAllBatchDetails,
   resolveBatchException,
@@ -58,6 +59,13 @@ router.post(
   requireCrm,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   processBatchDetail
+);
+
+router.delete(
+  "/:batchDetailId",
+  requireCrm,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  deleteBatchDetail
 );
 
 router.get("/:batchDetailId", getBatchDetailById);

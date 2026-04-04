@@ -10,17 +10,41 @@ import {
   isConfigured,
 } from "../config/azure.storage.js";
 
-export async function uploadToBlob(blobPath, buffer, contentType) {
+/**
+ * Safe Content-Disposition for downloads: ASCII fallback + RFC 5987 filename*.
+ */
+function buildContentDispositionAttachment(originalName) {
+  const base =
+    ((originalName || "file").trim() || "file").split(/[/\\]/).pop() || "file";
+  const noInject = base.replace(/[\r\n"]/g, "_").slice(0, 200);
+  const asciiFallback =
+    noInject.replace(/[^\x20-\x7E]/g, "_").replace(/[/\\]/g, "_") ||
+    "download";
+  const star = encodeURIComponent(base).replace(/'/g, "%27");
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${star}`;
+}
+
+export async function uploadToBlob(
+  blobPath,
+  buffer,
+  contentType,
+  downloadFileName = null
+) {
   if (!isConfigured) {
     throw new Error(
       "Azure Storage is not configured. Set AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY."
     );
   }
+  const nameForDisposition =
+    downloadFileName ||
+    blobPath.split("/").pop() ||
+    "file";
   const container = blobServiceClient.getContainerClient(containerName);
   const blockBlob = container.getBlockBlobClient(blobPath);
   await blockBlob.uploadData(buffer, {
     blobHTTPHeaders: {
       blobContentType: contentType || "application/octet-stream",
+      blobContentDisposition: buildContentDispositionAttachment(nameForDisposition),
     },
   });
   return blockBlob.url;
@@ -40,6 +64,13 @@ export async function downloadBlobToBuffer(blobPath) {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+export async function deleteBlobIfExists(blobPath) {
+  if (!isConfigured || !blobPath) return;
+  const container = blobServiceClient.getContainerClient(containerName);
+  const blockBlob = container.getBlockBlobClient(blobPath);
+  await blockBlob.deleteIfExists();
 }
 
 export function generateDownloadUrl(blobPath, expiryMinutes = 60) {
