@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
-import BatchDetail from "../models/batch.detail.model.js";
+import BatchDetail, {
+  BATCH_DETAIL_TYPES,
+} from "../models/batch.detail.model.js";
 import User from "../models/user.model.js";
 import { getProfileReadModel } from "../models/profileRead.model.js";
 import * as azureBlob from "../services/azure.blob.service.js";
@@ -155,7 +157,12 @@ export async function createBatchDetail(req, res) {
     ).trim();
     const comments = (req.body?.comments || req.query?.comments || "").trim();
     const workLocation =
-      (req.body?.workLocation || req.query?.workLocation || "").trim() || null;
+      (
+        req.body?.workLocation ||
+        req.body?.bankName ||
+        req.query?.workLocation ||
+        ""
+      ).trim() || null;
     const bank = (req.body?.bank || req.query?.bank || "").trim() || null;
 
     if (!type)
@@ -175,10 +182,11 @@ export async function createBatchDetail(req, res) {
       return res
         .status(400)
         .json({ success: false, message: "referenceNumber is required" });
-    if (type === "deduction" && !workLocation)
+    if ((type === "deduction" || type === "Standing Order") && !workLocation)
       return res.status(400).json({
         success: false,
-        message: "workLocation is required when type is deduction",
+        message:
+          "workLocation (or bank name for standing orders) is required for this batch type",
       });
     if (type === "cheque" && !bank)
       return res.status(400).json({
@@ -407,8 +415,9 @@ export async function getAllBatchDetails(req, res) {
     if (tenantId) query.tenantId = tenantId;
 
     if (req.query.type) {
-      const validTypes = ["cheque", "deduction", "other"];
-      if (validTypes.includes(req.query.type)) query.type = req.query.type;
+      if (BATCH_DETAIL_TYPES.includes(req.query.type)) {
+        query.type = req.query.type;
+      }
     }
 
     const [batches, total] = await Promise.all([

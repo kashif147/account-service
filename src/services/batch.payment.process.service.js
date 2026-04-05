@@ -4,6 +4,17 @@ import { getProfileReadModel } from "../models/profileRead.model.js";
 import * as azureBlob from "./azure.blob.service.js";
 import logger from "../config/logger.js";
 
+function memberFullNameFromPersonalInfo(pi) {
+  if (!pi || typeof pi !== "object") return null;
+  if (typeof pi.fullName === "string" && pi.fullName.trim()) {
+    return pi.fullName.trim();
+  }
+  const parts = [pi.forename, pi.surname]
+    .map((p) => (typeof p === "string" ? p.trim() : ""))
+    .filter(Boolean);
+  return parts.length ? parts.join(" ") : null;
+}
+
 const DEFAULT_COL = {
   MEMBERSHIP_NO: 0,
   LAST_NAME: 1,
@@ -190,6 +201,7 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
         rowIndex: row.rowIndex,
         forename: pi.forename ?? null,
         surname: pi.surname ?? null,
+        fullName: memberFullNameFromPersonalInfo(pi),
         dateOfBirth: pi.dateOfBirth ?? null,
         gender: pi.gender ?? null,
         personalEmail: ci.personalEmail ?? null,
@@ -319,6 +331,7 @@ export async function processBatchDetailWithBuffer(
         rowIndex: row.rowIndex,
         forename: pi.forename ?? null,
         surname: pi.surname ?? null,
+        fullName: memberFullNameFromPersonalInfo(pi),
         dateOfBirth: pi.dateOfBirth ?? null,
         gender: pi.gender ?? null,
         personalEmail: ci.personalEmail ?? null,
@@ -375,6 +388,7 @@ export function buildBatchPaymentEntryFromProfile(profile, fileRow) {
     rowIndex: fileRow.rowIndex ?? null,
     forename: pi.forename ?? null,
     surname: pi.surname ?? null,
+    fullName: memberFullNameFromPersonalInfo(pi),
     dateOfBirth: pi.dateOfBirth ?? null,
     gender: pi.gender ?? null,
     personalEmail: ci.personalEmail ?? null,

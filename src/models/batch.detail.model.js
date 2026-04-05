@@ -1,6 +1,11 @@
 import mongoose from "mongoose";
 
-export const BATCH_DETAIL_TYPES = ["cheque", "deduction", "other"];
+export const BATCH_DETAIL_TYPES = [
+  "cheque",
+  "deduction",
+  "other",
+  "Standing Order",
+];
 
 const BatchDetailSchema = new mongoose.Schema(
   {
@@ -72,6 +77,7 @@ const BatchDetailSchema = new mongoose.Schema(
         membershipNumber: { type: String, required: true, trim: true },
         forename: { type: String, default: null, trim: true },
         surname: { type: String, default: null, trim: true },
+        fullName: { type: String, default: null, trim: true },
         dateOfBirth: { type: Date, default: null },
         gender: { type: String, default: null, trim: true },
         personalEmail: { type: String, default: null, trim: true },
