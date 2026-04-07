@@ -887,6 +887,28 @@ function buildForwardHeaders(req, includeInternal = false) {
   const auth = req.headers.authorization || req.headers.Authorization;
   if (auth) headers.Authorization = auth;
 
+  // Forward gateway-auth headers so downstream services can authenticate
+  // even when the incoming request has no Bearer token.
+  const passthroughHeaders = [
+    "x-jwt-verified",
+    "x-auth-source",
+    "x-user-id",
+    "x-user-email",
+    "x-user-type",
+    "x-user-roles",
+    "x-user-permissions",
+    "x-client-principal-id",
+    "x-client-principal-name",
+    "x-ms-client-principal",
+    "x-ms-token-aad-access-token",
+  ];
+  for (const key of passthroughHeaders) {
+    const value = req.headers[key];
+    if (value != null && value !== "") {
+      headers[key] = String(value);
+    }
+  }
+
   const tenantId = req.tenantId || req.ctx?.tenantId || req.headers["x-tenant-id"];
   if (tenantId) headers["x-tenant-id"] = String(tenantId);
 
@@ -905,25 +927,26 @@ async function fetchJson(url, req, options = {}) {
   }
 
   const requestPromise = (async () => {
-  const controller = new AbortController();
-  const timeoutMs = options.timeoutMs || 8000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method: options.method || "GET",
-      headers: {
-        ...buildForwardHeaders(req, options.includeInternal),
-        ...(options.headers || {}),
-      },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+    const controller = new AbortController();
+    const timeoutMs = options.timeoutMs || 8000;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: options.method || "GET",
+        headers: {
+          ...buildForwardHeaders(req, options.includeInternal),
+          ...(options.headers || {}),
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`HTTP ${response.status}${body ? `: ${body}` : ""}`);
+      }
+      return await response.json();
+    } finally {
+      clearTimeout(timer);
     }
-    return await response.json();
-  } finally {
-    clearTimeout(timer);
-  }
   })();
 
   if (cache) {
@@ -1029,10 +1052,9 @@ async function loadApprovedMemberMap(memberIds, req) {
 
         if (!profile?._id) return;
 
-        const subscriptionsUrl =
-          `${subscriptionBase}/api/v1/subscriptions` +
-          `?profileId=${encodeURIComponent(String(profile._id))}` +
-          `&isCurrent=true&page=1&limit=1`;
+        const subscriptionsUrl = `${subscriptionBase}/api/v1/subscriptions/profile/${encodeURIComponent(
+          String(profile._id)
+        )}`;
 
         let currentSubscription = null;
         try {
@@ -1041,8 +1063,15 @@ async function loadApprovedMemberMap(memberIds, req) {
             cache: fetchCache,
           });
           const subData = resolveApiPayload(subPayload);
-          const list = Array.isArray(subData?.data) ? subData.data : [];
-          currentSubscription = list[0] || null;
+          const list = Array.isArray(subData?.data)
+            ? subData.data
+            : Array.isArray(subData)
+            ? subData
+            : [];
+          currentSubscription =
+            list.find((s) => s?.isCurrent === true) ||
+            list[0] ||
+            null;
         } catch (subError) {
           logWarn("Failed to fetch current subscription for profile", {
             memberId,
