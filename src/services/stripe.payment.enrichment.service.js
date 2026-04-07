@@ -1,5 +1,14 @@
 import { logWarn } from "../middlewares/logger.mw.js";
 
+const isDebugEnabled = () =>
+  String(process.env.STRIPE_ENRICHMENT_DEBUG || "").toLowerCase() === "true";
+
+function debugLog(...args) {
+  if (isDebugEnabled()) {
+    console.log("[stripe-enrichment]", ...args);
+  }
+}
+
 function extractIdentifiers(entries = []) {
   const linked =
     entries.find((e) => e?.accountCode === "2020" && (e?.memberId || e?.applicationId)) ||
@@ -60,6 +69,11 @@ async function fetchJson(url, req, options = {}) {
   if (cache && cache.has(cacheKey)) return cache.get(cacheKey);
 
   const requestPromise = (async () => {
+    debugLog("HTTP request", {
+      method: options.method || "GET",
+      url,
+      includeInternal: !!options.includeInternal,
+    });
     const controller = new AbortController();
     const timeoutMs = options.timeoutMs || 8000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -74,9 +88,16 @@ async function fetchJson(url, req, options = {}) {
       });
       if (!response.ok) {
         const body = await response.text().catch(() => "");
+        debugLog("HTTP error", { url, status: response.status, body });
         throw new Error(`HTTP ${response.status}${body ? `: ${body}` : ""}`);
       }
-      return await response.json();
+      const json = await response.json();
+      debugLog("HTTP success", {
+        url,
+        status: response.status,
+        hasData: json?.data != null,
+      });
+      return json;
     } finally {
       clearTimeout(timer);
     }
@@ -104,6 +125,7 @@ async function mapWithConcurrency(items, limit, worker) {
 async function loadPendingApplicationMap(applicationIds, req) {
   const byApplicationId = new Map();
   if (!applicationIds.length) return byApplicationId;
+  debugLog("pending applications input", { applicationIds });
 
   const base = (process.env.PROFILE_SERVICE_URL || "").replace(/\/$/, "");
   if (!base) {
@@ -123,6 +145,10 @@ async function loadPendingApplicationMap(applicationIds, req) {
       const payload = await fetchJson(url, req, { cache: fetchCache });
       const app = resolveApiPayload(payload);
       if (app && app.applicationId) byApplicationId.set(String(app.applicationId), app);
+      debugLog("pending application map result", {
+        applicationId,
+        found: !!(app && app.applicationId),
+      });
     } catch (error) {
       logWarn("Failed to fetch application for stripe payment enrichment", {
         applicationId,
@@ -137,6 +163,7 @@ async function loadPendingApplicationMap(applicationIds, req) {
 async function loadApprovedMemberMap(memberIds, req) {
   const byMemberId = new Map();
   if (!memberIds.length) return byMemberId;
+  debugLog("approved members input", { memberIds });
 
   const profileBase = (process.env.PROFILE_SERVICE_URL || "").replace(/\/$/, "");
   const subscriptionBase = (process.env.SUBSCRIPTION_SERVICE_URL || "").replace(/\/$/, "");
@@ -167,6 +194,11 @@ async function loadApprovedMemberMap(memberIds, req) {
             String(r?.membershipNumber || "").trim().toLowerCase() ===
             String(memberId).trim().toLowerCase()
         ) || null;
+      debugLog("profile search result", {
+        memberId,
+        resultsCount: results.length,
+        matchedProfileId: profile?._id || null,
+      });
       if (!profile?._id) return;
 
       const subscriptionsByQueryUrl =
@@ -186,6 +218,12 @@ async function loadApprovedMemberMap(memberIds, req) {
           ? subData
           : [];
         currentSubscription = list.find((s) => s?.isCurrent === true) || list[0] || null;
+        debugLog("subscription lookup result", {
+          memberId,
+          profileId: profile._id,
+          subscriptionsCount: list.length,
+          hasCurrentSubscription: !!currentSubscription,
+        });
       } catch (subError) {
         logWarn("Failed to fetch current subscription for profile", {
           memberId,
@@ -195,6 +233,11 @@ async function loadApprovedMemberMap(memberIds, req) {
       }
 
       byMemberId.set(String(memberId), { profile, currentSubscription });
+      debugLog("approved member map set", {
+        memberId,
+        hasProfile: !!profile,
+        hasSubscription: !!currentSubscription,
+      });
     } catch (error) {
       logWarn("Failed to fetch profile for stripe payment enrichment", {
         memberId,
@@ -279,6 +322,16 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
 }
 
 export async function enrichStripePaymentItems(rawItems, req) {
+  debugLog("raw stripe items", {
+    count: Array.isArray(rawItems) ? rawItems.length : 0,
+    docs: Array.isArray(rawItems)
+      ? rawItems.slice(0, 20).map((x) => ({
+          docNo: x?.docNo,
+          date: x?.date,
+          entriesCount: Array.isArray(x?.entries) ? x.entries.length : 0,
+        }))
+      : [],
+  });
   const idPairs = rawItems.map((item) => ({
     item,
     identifiers: extractIdentifiers(item.entries),
@@ -292,8 +345,25 @@ export async function enrichStripePaymentItems(rawItems, req) {
     loadPendingApplicationMap(applicationIds, req),
     loadApprovedMemberMap(memberIds, req),
   ]);
+  debugLog("lookup maps sizes", {
+    pendingApplications: pendingByApp.size,
+    approvedMembers: approvedByMember.size,
+  });
 
-  return idPairs.map(({ item, identifiers }) =>
+  const enriched = idPairs.map(({ item, identifiers }) =>
     enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMember })
   );
+  debugLog("enriched output sample", {
+    count: enriched.length,
+    sample: enriched.slice(0, 20).map((x) => ({
+      docNo: x?.docNo,
+      memberId: x?.memberId,
+      applicationId: x?.applicationId,
+      fullName: x?.fullName,
+      normalizedEmail: x?.normalizedEmail,
+      membershipCategory: x?.membershipCategory,
+      membershipStatus: x?.membershipStatus,
+    })),
+  });
+  return enriched;
 }
