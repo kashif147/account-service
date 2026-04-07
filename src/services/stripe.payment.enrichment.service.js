@@ -40,25 +40,12 @@ function resolveApiPayload(payload) {
 
 function buildForwardHeaders(req, includeInternal = false) {
   const headers = { Accept: "application/json" };
-  const auth = req.headers.authorization || req.headers.Authorization;
-  if (auth) headers.Authorization = auth;
-
-  const passthroughHeaders = [
-    "x-jwt-verified",
-    "x-auth-source",
-    "x-user-id",
-    "x-user-email",
-    "x-user-type",
-    "x-user-roles",
-    "x-user-permissions",
-    "x-client-principal-id",
-    "x-client-principal-name",
-    "x-ms-client-principal",
-    "x-ms-token-aad-access-token",
-  ];
-  for (const key of passthroughHeaders) {
-    const value = req.headers[key];
-    if (value != null && value !== "") headers[key] = String(value);
+  const auth = req.headers.authorization || req.headers.Authorization || null;
+  const aadToken = req.headers["x-ms-token-aad-access-token"] || null;
+  if (auth) {
+    headers.Authorization = auth;
+  } else if (aadToken) {
+    headers.Authorization = `Bearer ${aadToken}`;
   }
 
   const tenantId = req.tenantId || req.ctx?.tenantId || req.headers["x-tenant-id"];
@@ -285,18 +272,9 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
     mobileNumber,
     membershipCategory,
     membershipStatus,
-    memberhsipStatus: membershipStatus,
     joinDate,
-    JoinDate: joinDate,
     renewalDate,
-    RenewalDate: renewalDate,
     billingCycle,
-    email: normalizedEmail,
-    phone: mobileNumber,
-    category: membershipCategory,
-    "Member No": membershipNumber || applicationId || "-",
-    id: item?._id ? String(item._id) : item?.docNo,
-    transactionId: item?.docNo,
   };
 }
 
