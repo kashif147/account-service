@@ -104,6 +104,11 @@ function subscriptionsListFromPayload(subData) {
   return [];
 }
 
+function isApprovedApplicationStatus(value) {
+  const s = String(value || "").trim().toLowerCase();
+  return s === "approved";
+}
+
 async function fetchJson(url, req, options = {}) {
   const cache = options.cache instanceof Map ? options.cache : null;
   const cacheKey = `${options.method || "GET"}:${url}`;
@@ -169,6 +174,7 @@ async function loadPendingApplicationMap(applicationIds, req) {
   debugLog("pending applications input", { applicationIds });
 
   const base = (process.env.PROFILE_SERVICE_URL || "").replace(/\/$/, "");
+  const subscriptionBase = (process.env.SUBSCRIPTION_SERVICE_URL || "").replace(/\/$/, "");
   if (!base) {
     logWarn("PROFILE_SERVICE_URL not configured");
     return byApplicationId;
@@ -185,6 +191,61 @@ async function loadPendingApplicationMap(applicationIds, req) {
       const url = `${base}/api/applications/${encodeURIComponent(applicationId)}`;
       const payload = await fetchJson(url, req, { cache: fetchCache });
       const app = resolveApiPayload(payload);
+      if (!app) return;
+
+      const status = app?.applicationStatus;
+      const hasMembershipNumber =
+        String(app?.membershipNumber || "").trim() !== "";
+      let profileId = app?.profileId || app?.personalDetails?.profileId || null;
+      let resolvedMembershipNumber = null;
+      let resolvedProfile = null;
+
+      // Some approved records still come via applicationId and have null membershipNumber.
+      // Resolve through profileId so downstream UI can use membership number for approved members.
+      if (isApprovedApplicationStatus(status) && !hasMembershipNumber) {
+        if (!profileId && subscriptionBase) {
+          try {
+            const subByAppUrl =
+              `${subscriptionBase}/api/v1/subscriptions` +
+              `?applicationId=${encodeURIComponent(String(applicationId))}` +
+              `&isCurrent=true`;
+            const subPayload = await fetchJson(subByAppUrl, req, {
+              includeInternal: true,
+              cache: fetchCache,
+            });
+            const subData = resolveApiPayload(subPayload);
+            const list = subscriptionsListFromPayload(subData);
+            const sub = list[0] || null;
+            profileId = sub?.profileId || profileId;
+          } catch (subError) {
+            logWarn("Failed to resolve profileId from subscription by applicationId", {
+              applicationId,
+              error: subError.message,
+            });
+          }
+        }
+
+        if (profileId) {
+          try {
+            const profileUrl = `${base}/api/profile/${encodeURIComponent(String(profileId))}`;
+            const profilePayload = await fetchJson(profileUrl, req, { cache: fetchCache });
+            const profileData = resolveApiPayload(profilePayload);
+            const profile = profileData?.profile || profileData || null;
+            resolvedMembershipNumber = profile?.membershipNumber || null;
+            resolvedProfile = profile || null;
+          } catch (profileError) {
+            logWarn("Failed to resolve profile by profileId for approved application", {
+              applicationId,
+              profileId,
+              error: profileError.message,
+            });
+          }
+        }
+
+        app._resolvedProfile = resolvedProfile;
+        app._resolvedMembershipNumber = resolvedMembershipNumber;
+      }
+
       if (app && app.applicationId) byApplicationId.set(String(app.applicationId), app);
       debugLog("pending application map result", {
         applicationId,
@@ -289,6 +350,7 @@ async function loadApprovedMemberMap(memberIds, req) {
 function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMember }) {
   const memberId = identifiers.memberId;
   const applicationId = identifiers.applicationId;
+  let resolvedMemberId = memberId || null;
 
   let membershipNumber = null;
   let fullName = null;
@@ -340,11 +402,37 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
     joinDate = safeDate(subscription?.dateJoined);
     renewalDate = safeDate(subscription?.dateLeft);
     billingCycle = subscription?.paymentFrequency || null;
+
+    const resolvedMembershipNumber =
+      application?.membershipNumber ||
+      application?._resolvedMembershipNumber ||
+      null;
+    if (isApprovedApplicationStatus(application?.applicationStatus) && resolvedMembershipNumber) {
+      membershipNumber = String(resolvedMembershipNumber);
+      resolvedMemberId = membershipNumber;
+      // Prefer canonical profile fields when available from profile lookup fallback.
+      const profile = application?._resolvedProfile || null;
+      if (profile) {
+        fullName =
+          fullName ||
+          profile?.personalInfo?.fullName ||
+          [profile?.personalInfo?.forename, profile?.personalInfo?.surname]
+            .filter(Boolean)
+            .join(" ")
+            .trim() ||
+          null;
+        normalizedEmail =
+          normalizedEmail ||
+          profile?.normalizedEmail ||
+          pickPreferredEmail(profile?.contactInfo);
+        mobileNumber = mobileNumber || profile?.contactInfo?.mobileNumber || null;
+      }
+    }
   }
 
   return {
     ...item,
-    memberId: memberId || null,
+    memberId: resolvedMemberId,
     applicationId: applicationId || null,
     membershipNumber,
     fullName,
