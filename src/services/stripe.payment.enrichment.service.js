@@ -47,6 +47,20 @@ function resolveApiPayload(payload) {
   return payload;
 }
 
+/** Single header value (Node may use string[]). */
+function incomingHeader(req, name) {
+  const v = req.headers[name];
+  if (v === undefined || v === null) return null;
+  const s = Array.isArray(v) ? v[0] : v;
+  const t = String(s).trim();
+  return t === "" ? null : t;
+}
+
+/**
+ * Profile-service trusts gateway headers + JWT_SECRET for Bearer.
+ * Subscription-service CRM routes use gateway headers or ACCESS_TOKEN_SECRET for Bearer — secrets often differ,
+ * so always forward the gateway trust bundle when present so upstream uses the same auth path as account-service.
+ */
 function buildForwardHeaders(req, includeInternal = false) {
   const headers = { Accept: "application/json" };
   const auth = req.headers.authorization || req.headers.Authorization || null;
@@ -57,10 +71,37 @@ function buildForwardHeaders(req, includeInternal = false) {
     headers.Authorization = `Bearer ${aadToken}`;
   }
 
-  const tenantId = req.tenantId || req.ctx?.tenantId || req.headers["x-tenant-id"];
+  const tenantId =
+    req.tenantId || req.ctx?.tenantId || incomingHeader(req, "x-tenant-id");
   if (tenantId) headers["x-tenant-id"] = String(tenantId);
   if (includeInternal) headers["x-internal-request"] = "true";
+
+  const forwardGateway = [
+    "x-jwt-verified",
+    "x-auth-source",
+    "x-user-id",
+    "x-user-email",
+    "x-user-type",
+    "x-user-roles",
+    "x-user-permissions",
+    "x-token-expires-at",
+  ];
+  for (const key of forwardGateway) {
+    const v = incomingHeader(req, key);
+    if (v !== null) headers[key] = v;
+  }
+
   return headers;
+}
+
+/** Normalized list of subscriptions from GET /subscriptions or profile/current response inner payload. */
+function subscriptionsListFromPayload(subData) {
+  if (!subData || typeof subData !== "object") return [];
+  const inner = subData.data;
+  if (Array.isArray(inner)) return inner;
+  if (inner && typeof inner === "object" && inner._id != null) return [inner];
+  if (Array.isArray(subData)) return subData;
+  return [];
 }
 
 async function fetchJson(url, req, options = {}) {
@@ -212,11 +253,7 @@ async function loadApprovedMemberMap(memberIds, req) {
           cache: fetchCache,
         });
         const subData = resolveApiPayload(subPayload);
-        const list = Array.isArray(subData?.data)
-          ? subData.data
-          : Array.isArray(subData)
-          ? subData
-          : [];
+        const list = subscriptionsListFromPayload(subData);
         currentSubscription = list.find((s) => s?.isCurrent === true) || list[0] || null;
         debugLog("subscription lookup result", {
           memberId,
