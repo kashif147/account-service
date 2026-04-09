@@ -58,7 +58,7 @@ async function getIncomeCodeForCategory(categoryName) {
  * Matches products by code OR name against membershipCategory
  * Always looks up pricing from pricing table based on effective dates
  */
-async function getMembershipPricing({
+export async function getMembershipPricing({
   categoryName,
   subscriptionDetails,
   startDate,

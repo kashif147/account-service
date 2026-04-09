@@ -36,6 +36,7 @@ import {
   handleApplicationApproved,
   handleMemberCreated,
 } from "../handlers/application.approval.listener.js";
+import { handleSubscriptionCategoryChanged } from "./listeners/subscription.category.change.listener.js";
 
 // Re-export for convenience
 export { APPLICATION_EVENTS, BATCH_PROCESS_EVENTS };
@@ -319,7 +320,10 @@ export async function setupConsumers() {
     logger.info("Creating membership events queue...", {
       queue: MEMBERSHIP_QUEUE,
       exchange: "membership.events",
-      routingKeys: ["members.subscription.current.updated.v1"],
+      routingKeys: [
+        "members.subscription.current.updated.v1",
+        "members.subscription.category.changed.v1",
+      ],
       prefetch: MEMBERSHIP_PREFETCH,
     });
 
@@ -348,7 +352,15 @@ export async function setupConsumers() {
     try {
       await consumer.bindQueue(MEMBERSHIP_QUEUE, "membership.events", [
         "members.subscription.current.updated.v1",
+        "members.subscription.category.changed.v1",
       ]);
+
+      consumer.registerHandler(
+        "members.subscription.category.changed.v1",
+        async (payload) => {
+          await handleSubscriptionCategoryChanged(payload);
+        }
+      );
 
       consumer.registerHandler(
         "members.subscription.current.updated.v1",

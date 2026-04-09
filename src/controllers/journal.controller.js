@@ -306,6 +306,135 @@ export async function invoice(req, res, next) {
   }
 }
 
+/**
+ * Post prorated category-change journals (fee increase/decrease via unused old + pre-period new credits).
+ * Shared by HTTP changeCategory and subscription-service RabbitMQ consumer.
+ */
+export async function postCategoryChangeJournals({
+  date,
+  docNoBase,
+  memberId,
+  oldIncomeCode,
+  oldCategoryName,
+  oldAnnualFee,
+  newIncomeCode,
+  newCategoryName,
+  newAnnualFee,
+  changeDate, // ISO (within target year)
+  periodBucket = "current",
+}) {
+  if (!Number.isInteger(oldAnnualFee) || oldAnnualFee < 0) {
+    throw AppError.badRequest(
+      "oldAnnualFee must be a non-negative integer (minor units)"
+    );
+  }
+  if (!Number.isInteger(newAnnualFee) || newAnnualFee <= 0) {
+    throw AppError.badRequest(
+      "newAnnualFee must be a positive integer (minor units)"
+    );
+  }
+
+  const { startISO, endISO, year } = yearBoundsFrom(changeDate);
+  const changeMinusISO = new Date(
+    new Date(changeDate).getTime() - 24 * 3600 * 1000
+  )
+    .toISOString()
+    .slice(0, 10);
+
+  const isUpgrade = newAnnualFee > oldAnnualFee;
+
+  const results = [];
+
+  results.push(
+    await postBalancedJournal({
+      date,
+      docType: "Invoice",
+      docNo: `${docNoBase}-INVNEW`,
+      memo: `Subscription ${year} – ${newCategoryName}`,
+      lines: [
+        {
+          accountCode: "1400",
+          dc: "D",
+          amount: newAnnualFee,
+          memberId,
+          periodBucket,
+        },
+        {
+          accountCode: newIncomeCode,
+          dc: "C",
+          amount: newAnnualFee,
+          revenueSubType: "fee",
+          categoryName: newCategoryName,
+        },
+      ],
+    })
+  );
+
+  const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, endISO);
+  if (creditOldUnused > 0) {
+    results.push(
+      await postBalancedJournal({
+        date,
+        docType: "Adjustment",
+        docNo: `${docNoBase}-COLD`,
+        memo: `Adjustment – Unused period credit (${oldCategoryName}) ${changeDate} → ${endISO}`,
+        lines: [
+          {
+            accountCode: "4900",
+            dc: "D",
+            amount: creditOldUnused,
+            adjSubType: isUpgrade
+              ? "category-upgrade-unused-credit"
+              : "category-downgrade-unused-credit",
+            categoryName: oldCategoryName,
+          },
+          {
+            accountCode: "1400",
+            dc: "C",
+            amount: creditOldUnused,
+            memberId,
+            periodBucket,
+          },
+        ],
+      })
+    );
+  }
+
+  const creditNewPre = prorataForPeriod(
+    newAnnualFee,
+    startISO,
+    changeMinusISO
+  );
+  if (creditNewPre > 0) {
+    results.push(
+      await postBalancedJournal({
+        date,
+        docType: "Adjustment",
+        docNo: `${docNoBase}-CNEW`,
+        memo: `Adjustment – Pre-change portion credit (${newCategoryName}) ${startISO} → ${changeMinusISO}`,
+        lines: [
+          {
+            accountCode: "4900",
+            dc: "D",
+            amount: creditNewPre,
+            adjSubType: "category-change-prorata-credit",
+            categoryName: newCategoryName,
+          },
+          {
+            accountCode: "1400",
+            dc: "C",
+            amount: creditNewPre,
+            memberId,
+            periodBucket,
+          },
+        ],
+      })
+    );
+  }
+
+  return results;
+}
+
 export async function changeCategory(req, res, next) {
   try {
     const {
@@ -318,126 +447,23 @@ export async function changeCategory(req, res, next) {
       newIncomeCode,
       newCategoryName,
       newAnnualFee,
-      changeDate, // ISO (within target year)
+      changeDate,
       periodBucket = "current",
     } = req.body;
 
-    // Validate fees are integers (cents)
-    if (!Number.isInteger(oldAnnualFee) || oldAnnualFee < 0) {
-      throw AppError.badRequest(
-        "oldAnnualFee must be a non-negative integer (minor units)"
-      );
-    }
-    if (!Number.isInteger(newAnnualFee) || newAnnualFee <= 0) {
-      throw AppError.badRequest(
-        "newAnnualFee must be a positive integer (minor units)"
-      );
-    }
-
-    const { startISO, endISO, year } = yearBoundsFrom(changeDate);
-    // pre-change ends the day before change
-    const changeMinusISO = new Date(
-      new Date(changeDate).getTime() - 24 * 3600 * 1000
-    )
-      .toISOString()
-      .slice(0, 10);
-
-    // Both fees are in cents - compare directly
-    const isUpgrade = newAnnualFee > oldAnnualFee;
-
-    const results = [];
-
-    // 1) New category full-year invoice
-    results.push(
-      await postBalancedJournal({
-        date,
-        docType: "Invoice",
-        docNo: `${docNoBase}-INVNEW`,
-        memo: `Subscription ${year} – ${newCategoryName}`,
-        lines: [
-          {
-            accountCode: "1400",
-            dc: "D",
-            amount: newAnnualFee,
-            memberId,
-            periodBucket,
-          },
-          {
-            accountCode: newIncomeCode,
-            dc: "C",
-            amount: newAnnualFee,
-            revenueSubType: "fee",
-            categoryName: newCategoryName,
-          },
-        ],
-      })
-    );
-
-    // 2) Credit unused portion of OLD category: changeDate → year end (explicit daysInYear)
-    // For upgrade: credits unused portion of OLD (lower) category
-    // For downgrade: credits unused portion of OLD (higher) category
-    const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, endISO);
-    if (creditOldUnused > 0) {
-      results.push(
-        await postBalancedJournal({
-          date,
-          docType: "Adjustment",
-          docNo: `${docNoBase}-COLD`,
-          memo: `Adjustment – Unused period credit (${oldCategoryName}) ${changeDate} → ${endISO}`,
-          lines: [
-            {
-              accountCode: "4900",
-              dc: "D",
-              amount: creditOldUnused,
-              adjSubType: isUpgrade
-                ? "category-upgrade-unused-credit"
-                : "category-downgrade-unused-credit",
-              categoryName: oldCategoryName,
-            },
-            {
-              accountCode: "1400",
-              dc: "C",
-              amount: creditOldUnused,
-              memberId,
-              periodBucket,
-            },
-          ],
-        })
-      );
-    }
-
-    // 3) Credit pre-change portion of NEW category: year start → (changeDate − 1)
-    const creditNewPre = prorataForPeriod(
+    const results = await postCategoryChangeJournals({
+      date,
+      docNoBase,
+      memberId,
+      oldIncomeCode,
+      oldCategoryName,
+      oldAnnualFee,
+      newIncomeCode,
+      newCategoryName,
       newAnnualFee,
-      startISO,
-      changeMinusISO
-    );
-    if (creditNewPre > 0) {
-      results.push(
-        await postBalancedJournal({
-          date,
-          docType: "Adjustment",
-          docNo: `${docNoBase}-CNEW`,
-          memo: `Adjustment – Pre-change portion credit (${newCategoryName}) ${startISO} → ${changeMinusISO}`,
-          lines: [
-            {
-              accountCode: "4900",
-              dc: "D",
-              amount: creditNewPre,
-              adjSubType: "category-change-prorata-credit",
-              categoryName: newCategoryName,
-            },
-            {
-              accountCode: "1400",
-              dc: "C",
-              amount: creditNewPre,
-              memberId,
-              periodBucket,
-            },
-          ],
-        })
-      );
-    }
+      changeDate,
+      periodBucket,
+    });
 
     res.created(results);
   } catch (e) {
