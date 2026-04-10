@@ -351,6 +351,7 @@ export async function postCategoryChangeJournals({
       docType: "Invoice",
       docNo: `${docNoBase}-INVNEW`,
       memo: `Subscription ${year} – ${newCategoryName}`,
+      settlement: { status: "PENDING" },
       lines: [
         {
           accountCode: "1400",
@@ -428,6 +429,7 @@ export async function postCategoryChangeJournals({
         docType: "Adjustment",
         docNo: `${docNoBase}-CADJ`,
         memo: `Adjustment – Category change proration (${memoParts.join("; ")})`,
+        settlement: { status: "PENDING" },
         lines,
       })
     );
