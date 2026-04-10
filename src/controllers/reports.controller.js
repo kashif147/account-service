@@ -19,7 +19,9 @@ export async function memberStatement(req, res, next) {
     if (from || to) q.date = {};
     if (from) q.date.$gte = new Date(from);
     if (to) q.date.$lte = new Date(to);
-    const allTxns = await GL.find(q).sort({ date: 1, createdAt: 1 }).lean();
+    const allTxns = await GL.find(q)
+      .sort({ date: 1, createdAt: 1 })
+      .lean();
 
     // Consolidate category changes and filter for member-facing view
     const txns = consolidateCategoryChanges(allTxns);
@@ -364,9 +366,17 @@ export async function memberSummary(req, res, next) {
   }
 }
 
+function sum1400Credits(adj) {
+  if (!adj?.entries) return 0;
+  return adj.entries
+    .filter((e) => e.accountCode === "1400" && e.dc === "C")
+    .reduce((s, e) => s + e.amount, 0);
+}
+
 /**
- * Consolidates category change entries into a single net entry
- * Groups entries with docNo pattern: {base}-INVNEW, {base}-COLD, {base}-CNEW
+ * Consolidates category change entries into a single net entry.
+ * New journals: {base}-INVNEW + one {base}-CADJ (combined fee proration).
+ * Legacy: {base}-INVNEW + {base}-COLD + {base}-CNEW.
  */
 function consolidateCategoryChanges(transactions) {
   const consolidated = [];
@@ -375,13 +385,15 @@ function consolidateCategoryChanges(transactions) {
 
   // First pass: identify category change groups
   for (const txn of transactions) {
-    // Check if this is part of a category change (has -INVNEW, -COLD, or -CNEW suffix)
-    const match = txn.docNo.match(/^(.+?)-(INVNEW|COLD|CNEW)$/);
+    const match = txn.docNo.match(
+      /^(.+?)-(INVNEW|CADJ|COLD|CNEW)$/
+    );
     if (match) {
       const [, docNoBase] = match;
       if (!categoryChangeGroups.has(docNoBase)) {
         categoryChangeGroups.set(docNoBase, {
           invoice: null,
+          feeAdjustment: null,
           oldCategoryAdjustment: null,
           newCategoryAdjustment: null,
           docNoBase,
@@ -391,6 +403,8 @@ function consolidateCategoryChanges(transactions) {
 
       if (txn.docNo.endsWith("-INVNEW")) {
         group.invoice = txn;
+      } else if (txn.docNo.endsWith("-CADJ")) {
+        group.feeAdjustment = txn;
       } else if (txn.docNo.endsWith("-COLD")) {
         group.oldCategoryAdjustment = txn;
       } else if (txn.docNo.endsWith("-CNEW")) {
@@ -401,7 +415,9 @@ function consolidateCategoryChanges(transactions) {
 
   // Second pass: process transactions
   for (const txn of transactions) {
-    const match = txn.docNo.match(/^(.+?)-(INVNEW|COLD|CNEW)$/);
+    const match = txn.docNo.match(
+      /^(.+?)-(INVNEW|CADJ|COLD|CNEW)$/
+    );
 
     if (match) {
       const [, docNoBase] = match;
@@ -412,35 +428,21 @@ function consolidateCategoryChanges(transactions) {
       if (txn.docNo.endsWith("-INVNEW") && !processedDocNos.has(docNoBase)) {
         processedDocNos.add(docNoBase);
 
-        // Calculate net effect on account 1400 (Accounts Receivable)
-        let netAmount = 0;
         const invoiceEntry = txn.entries.find(
           (e) => e.accountCode === "1400" && e.dc === "D",
         );
-        if (invoiceEntry) {
-          netAmount += invoiceEntry.amount;
-        }
+        let netAmount = invoiceEntry ? invoiceEntry.amount : 0;
 
-        // Subtract adjustments (they credit 1400, so reduce the net)
-        if (group.oldCategoryAdjustment) {
-          const adjEntry = group.oldCategoryAdjustment.entries.find(
-            (e) => e.accountCode === "1400" && e.dc === "C",
-          );
-          if (adjEntry) {
-            netAmount -= adjEntry.amount;
-          }
+        let adjustmentCredits = 0;
+        if (group.feeAdjustment) {
+          adjustmentCredits = sum1400Credits(group.feeAdjustment);
+        } else {
+          adjustmentCredits =
+            sum1400Credits(group.oldCategoryAdjustment) +
+            sum1400Credits(group.newCategoryAdjustment);
         }
+        netAmount -= adjustmentCredits;
 
-        if (group.newCategoryAdjustment) {
-          const adjEntry = group.newCategoryAdjustment.entries.find(
-            (e) => e.accountCode === "1400" && e.dc === "C",
-          );
-          if (adjEntry) {
-            netAmount -= adjEntry.amount;
-          }
-        }
-
-        // Extract category names from entries or memos
         // Invoice memo format: "Subscription {year} – {categoryName}"
         const newCategoryName =
           invoiceEntry?.categoryName ||
@@ -448,50 +450,68 @@ function consolidateCategoryChanges(transactions) {
           txn.memo?.match(/–\s*(.+)$/)?.[1] ||
           "Unknown";
 
-        // Old category adjustment memo format: "Adjustment – Unused period credit ({categoryName}) {date} → {date}"
+        const unusedEntry =
+          group.feeAdjustment?.entries?.find(
+            (e) =>
+              e.adjSubType === "category-upgrade-unused-credit" ||
+              e.adjSubType === "category-downgrade-unused-credit",
+          ) ||
+          group.oldCategoryAdjustment?.entries?.find(
+            (e) =>
+              e.adjSubType === "category-upgrade-unused-credit" ||
+              e.adjSubType === "category-downgrade-unused-credit",
+          );
         const oldCategoryName =
+          unusedEntry?.categoryName ||
           group.oldCategoryAdjustment?.entries?.find((e) => e.categoryName)
             ?.categoryName ||
           group.oldCategoryAdjustment?.memo?.match(/\(([^)]+)\)/)?.[1] ||
           "Unknown";
 
-        // Determine if upgrade or downgrade based on adjSubType
         const isUpgrade =
-          group.oldCategoryAdjustment?.entries?.find(
+          (group.feeAdjustment?.entries ?? []).some(
             (e) => e.adjSubType === "category-upgrade-unused-credit",
-          ) !== undefined;
+          ) ||
+          (group.oldCategoryAdjustment?.entries ?? []).some(
+            (e) => e.adjSubType === "category-upgrade-unused-credit",
+          );
 
-        // Create consolidated entry
-        const consolidatedEntry = {
-          _id: txn._id, // Use invoice ID for reference
+        const originalEntries = { invoice: txn.docNo };
+        const _original = { invoice: txn };
+        if (group.feeAdjustment) {
+          originalEntries.feeAdjustment = group.feeAdjustment.docNo;
+          _original.feeAdjustment = group.feeAdjustment;
+        } else {
+          if (group.oldCategoryAdjustment) {
+            originalEntries.oldCategoryAdjustment =
+              group.oldCategoryAdjustment.docNo;
+            _original.oldCategoryAdjustment = group.oldCategoryAdjustment;
+          }
+          if (group.newCategoryAdjustment) {
+            originalEntries.newCategoryAdjustment =
+              group.newCategoryAdjustment.docNo;
+            _original.newCategoryAdjustment = group.newCategoryAdjustment;
+          }
+        }
+
+        consolidated.push({
+          _id: txn._id,
           date: txn.date,
           docType: "CategoryChange",
-          docNo: docNoBase, // Use base docNo without suffixes
+          docNo: docNoBase,
           memo: `Category Change: ${oldCategoryName} → ${newCategoryName} (${
             isUpgrade ? "Upgrade" : "Downgrade"
           })`,
-          // netAmount is already in cents (from calculations), keep as integer
-          netAmount: netAmount,
+          netAmount,
           effect:
             netAmount > 0
               ? "increase"
               : netAmount < 0
                 ? "decrease"
                 : "no-change",
-          originalEntries: {
-            invoice: txn.docNo,
-            oldCategoryAdjustment: group.oldCategoryAdjustment?.docNo,
-            newCategoryAdjustment: group.newCategoryAdjustment?.docNo,
-          },
-          // Include original entries for reference if needed
-          _original: {
-            invoice: txn,
-            oldCategoryAdjustment: group.oldCategoryAdjustment,
-            newCategoryAdjustment: group.newCategoryAdjustment,
-          },
-        };
-
-        consolidated.push(consolidatedEntry);
+          originalEntries,
+          _original,
+        });
       }
       // Skip individual adjustment entries - they're now part of consolidated entry
       continue;
@@ -503,7 +523,9 @@ function consolidateCategoryChanges(transactions) {
       const adjSubType = txn.entries.find((e) => e.adjSubType)?.adjSubType;
 
       // Check if this adjustment is part of a category change group (by docNo pattern)
-      const isPartOfCategoryChange = txn.docNo.match(/^(.+?)-(COLD|CNEW)$/);
+      const isPartOfCategoryChange = txn.docNo.match(
+        /^(.+?)-(COLD|CNEW|CADJ)$/
+      );
 
       // Skip category change adjustments (they're consolidated)
       if (isPartOfCategoryChange) {
@@ -554,7 +576,9 @@ export async function memberLedger(req, res, next) {
     const q = { "entries.memberId": memberId };
     if (accountCode) q["entries.accountCode"] = accountCode;
 
-    const allItems = await GL.find(q).sort({ date: -1, createdAt: -1 }).lean();
+    const allItems = await GL.find(q)
+      .sort({ date: -1, createdAt: -1 })
+      .lean();
 
     // Consolidate category changes and filter for member-facing view
     const consolidatedItems = consolidateCategoryChanges(allItems);

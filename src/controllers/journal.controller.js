@@ -371,63 +371,64 @@ export async function postCategoryChangeJournals({
   );
 
   const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, endISO);
-  if (creditOldUnused > 0) {
-    results.push(
-      await postBalancedJournal({
-        date,
-        docType: "Adjustment",
-        docNo: `${docNoBase}-COLD`,
-        memo: `Adjustment – Unused period credit (${oldCategoryName}) ${changeDate} → ${endISO}`,
-        lines: [
-          {
-            accountCode: "4900",
-            dc: "D",
-            amount: creditOldUnused,
-            adjSubType: isUpgrade
-              ? "category-upgrade-unused-credit"
-              : "category-downgrade-unused-credit",
-            categoryName: oldCategoryName,
-          },
-          {
-            accountCode: "1400",
-            dc: "C",
-            amount: creditOldUnused,
-            memberId,
-            periodBucket,
-          },
-        ],
-      })
-    );
-  }
-
   const creditNewPre = prorataForPeriod(
     newAnnualFee,
     startISO,
     changeMinusISO
   );
-  if (creditNewPre > 0) {
+  const totalFeeAdjustmentCredit = creditOldUnused + creditNewPre;
+
+  if (totalFeeAdjustmentCredit > 0) {
+    const memoParts = [];
+    if (creditOldUnused > 0) {
+      memoParts.push(
+        `unused (${oldCategoryName}) ${changeDate} → ${endISO}`
+      );
+    }
+    if (creditNewPre > 0) {
+      memoParts.push(
+        `pre-change (${newCategoryName}) ${startISO} → ${changeMinusISO}`
+      );
+    }
+
+    const lines = [];
+    if (creditOldUnused > 0) {
+      lines.push({
+        accountCode: "4900",
+        dc: "D",
+        amount: creditOldUnused,
+        memberId,
+        adjSubType: isUpgrade
+          ? "category-upgrade-unused-credit"
+          : "category-downgrade-unused-credit",
+        categoryName: oldCategoryName,
+      });
+    }
+    if (creditNewPre > 0) {
+      lines.push({
+        accountCode: "4900",
+        dc: "D",
+        amount: creditNewPre,
+        memberId,
+        adjSubType: "category-change-prorata-credit",
+        categoryName: newCategoryName,
+      });
+    }
+    lines.push({
+      accountCode: "1400",
+      dc: "C",
+      amount: totalFeeAdjustmentCredit,
+      memberId,
+      periodBucket,
+    });
+
     results.push(
       await postBalancedJournal({
         date,
         docType: "Adjustment",
-        docNo: `${docNoBase}-CNEW`,
-        memo: `Adjustment – Pre-change portion credit (${newCategoryName}) ${startISO} → ${changeMinusISO}`,
-        lines: [
-          {
-            accountCode: "4900",
-            dc: "D",
-            amount: creditNewPre,
-            adjSubType: "category-change-prorata-credit",
-            categoryName: newCategoryName,
-          },
-          {
-            accountCode: "1400",
-            dc: "C",
-            amount: creditNewPre,
-            memberId,
-            periodBucket,
-          },
-        ],
+        docNo: `${docNoBase}-CADJ`,
+        memo: `Adjustment – Category change proration (${memoParts.join("; ")})`,
+        lines,
       })
     );
   }
