@@ -368,6 +368,38 @@ export async function memberSummary(req, res, next) {
 
 const CATEGORY_CHANGE_DOCNO_RE = /^(.+?)-(INVNEW|CADJ|COLD|CNEW)$/;
 
+/** Human-readable reference for ledger (membership category, not docNo IDs). */
+function buildMemberLedgerReference(txn) {
+  const docNo = txn.docNo != null ? String(txn.docNo) : "";
+
+  if (docNo.endsWith("-INVNEW")) {
+    const cat =
+      txn.entries?.find((e) => e.categoryName)?.categoryName ||
+      txn.memo?.match(/Subscription\s+\d{4}\s*–\s*(.+)$/)?.[1]?.trim();
+    if (cat) return cat;
+  }
+
+  if (/(?:-CADJ|-COLD|-CNEW)$/.test(docNo)) {
+    const ordered = [];
+    for (const e of txn.entries || []) {
+      if (e.categoryName && !ordered.includes(e.categoryName)) {
+        ordered.push(e.categoryName);
+      }
+    }
+    if (ordered.length === 1) return ordered[0];
+    if (ordered.length > 1) return ordered.join(" → ");
+  }
+
+  if (txn.docType === "Invoice") {
+    const feeLine = txn.entries?.find(
+      (e) => e.revenueSubType === "fee" && e.categoryName
+    );
+    if (feeLine?.categoryName) return feeLine.categoryName;
+  }
+
+  return docNo || "-";
+}
+
 /** Match persisted GL shape for ledger/statement (settlement always present). */
 function normalizeLedgerGlTxn(txn) {
   const base =
@@ -381,6 +413,7 @@ function normalizeLedgerGlTxn(txn) {
   if (base.settlement == null) {
     base.settlement = { status: "PENDING" };
   }
+  base.reference = buildMemberLedgerReference(base);
   return base;
 }
 

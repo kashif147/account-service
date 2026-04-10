@@ -393,12 +393,12 @@ export async function postCategoryChangeJournals({
     }
 
     const lines = [];
+    // 4900 lines omit memberId so member ledger shows only the AR leg (like invoice revenue lines).
     if (creditOldUnused > 0) {
       lines.push({
         accountCode: "4900",
         dc: "D",
         amount: creditOldUnused,
-        memberId,
         adjSubType: isUpgrade
           ? "category-upgrade-unused-credit"
           : "category-downgrade-unused-credit",
@@ -410,7 +410,6 @@ export async function postCategoryChangeJournals({
         accountCode: "4900",
         dc: "D",
         amount: creditNewPre,
-        memberId,
         adjSubType: "category-change-prorata-credit",
         categoryName: newCategoryName,
       });
