@@ -1,4 +1,6 @@
+import mongoose from "mongoose";
 import { logWarn } from "../middlewares/logger.mw.js";
+import Payment from "../models/payment.model.js";
 
 const isDebugEnabled = () =>
   String(process.env.STRIPE_ENRICHMENT_DEBUG || "").toLowerCase() === "true";
@@ -7,6 +9,35 @@ function debugLog(...args) {
   if (isDebugEnabled()) {
     console.log("[stripe-enrichment]", ...args);
   }
+}
+
+/** Receipts from Stripe reconciliation use docNo `RCP-<payment Mongo _id>`. */
+function paymentIdStringFromReceiptDocNo(docNo) {
+  if (!docNo || typeof docNo !== "string") return null;
+  const m = /^RCP-([a-fA-F0-9]{24})$/u.exec(docNo.trim());
+  return m && mongoose.Types.ObjectId.isValid(m[1]) ? m[1] : null;
+}
+
+async function loadPaymentIntentIdByPaymentId(paymentIdStrings, tenantId) {
+  const map = new Map();
+  if (!tenantId || !paymentIdStrings.length) return map;
+  const unique = [...new Set(paymentIdStrings.filter(Boolean))];
+  const objectIds = unique
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+  if (!objectIds.length) return map;
+
+  const rows = await Payment.find({
+    tenantId: String(tenantId),
+    _id: { $in: objectIds },
+  })
+    .select({ stripe: 1 })
+    .lean();
+
+  for (const p of rows) {
+    map.set(String(p._id), p.stripe?.paymentIntentId ?? null);
+  }
+  return map;
 }
 
 function extractIdentifiers(entries = []) {
@@ -466,18 +497,33 @@ export async function enrichStripePaymentItems(rawItems, req) {
     ...new Set(idPairs.map((p) => p.identifiers.applicationId).filter(Boolean)),
   ];
 
-  const [pendingByApp, approvedByMember] = await Promise.all([
+  const paymentIdStrings = rawItems
+    .map((item) => paymentIdStringFromReceiptDocNo(item?.docNo))
+    .filter(Boolean);
+  const tenantId = req.ctx?.tenantId ?? req.tenantId ?? null;
+
+  const [pendingByApp, approvedByMember, paymentIntentByPaymentId] = await Promise.all([
     loadPendingApplicationMap(applicationIds, req),
     loadApprovedMemberMap(memberIds, req),
+    loadPaymentIntentIdByPaymentId(paymentIdStrings, tenantId),
   ]);
   debugLog("lookup maps sizes", {
     pendingApplications: pendingByApp.size,
     approvedMembers: approvedByMember.size,
+    paymentIntentLookups: paymentIntentByPaymentId.size,
   });
 
-  const enriched = idPairs.map(({ item, identifiers }) =>
-    enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMember })
-  );
+  const enriched = idPairs.map(({ item, identifiers }) => {
+    const base = enrichStripePaymentItem({
+      item,
+      identifiers,
+      pendingByApp,
+      approvedByMember,
+    });
+    const payId = paymentIdStringFromReceiptDocNo(item?.docNo);
+    const paymentIntentId = payId ? paymentIntentByPaymentId.get(payId) ?? null : null;
+    return { ...base, paymentIntentId };
+  });
   debugLog("enriched output sample", {
     count: enriched.length,
     sample: enriched.slice(0, 20).map((x) => ({
