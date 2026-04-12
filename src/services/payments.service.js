@@ -1459,8 +1459,8 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
     amount,
     periodBucket: "current",
   };
-  if (applicationId) entry2020.applicationId = applicationId;
-  else entry2020.memberId = memberId;
+  if (memberId) entry2020.memberId = memberId;
+  else entry2020.applicationId = applicationId;
 
   const lines = [
     entry2020,
@@ -1472,10 +1472,10 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
   if (existing) return existing;
 
   const date = new Date().toISOString().split("T")[0];
-  const memo = applicationId
-    ? `Refund (app ${applicationId})`
-    : memberId
+  const memo = memberId
     ? `Refund (member ${memberId})`
+    : applicationId
+    ? `Refund (app ${applicationId})`
     : "Refund";
 
   return postBalancedJournal({

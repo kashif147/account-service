@@ -5,6 +5,8 @@ const BUCKETS = ["arrears", "current", "advance"];
 
 /**
  * Resolve MaterializedBalance memberId field (same convention as journal rollupMemberBalances).
+ * When both memberId and applicationId are present (e.g. after approval / claim moved credit to member),
+ * prefer memberId so refund credit checks match 2020 balances under the member key.
  * @param {import("mongoose").Document|object} payment
  * @returns {{ key: string, memberId: string|null, applicationId: string|null }|null}
  */
@@ -27,11 +29,11 @@ export function matBalMemberKeyFromPayment(payment) {
     metadataObj.applicationId ||
     metadataObj.application_id ||
     null;
-  if (applicationId) {
-    return { key: `app:${applicationId}`, memberId: null, applicationId };
-  }
   if (memberId) {
     return { key: memberId, memberId, applicationId: null };
+  }
+  if (applicationId) {
+    return { key: `app:${applicationId}`, memberId: null, applicationId };
   }
   return null;
 }
