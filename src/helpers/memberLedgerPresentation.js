@@ -1,6 +1,7 @@
 /**
- * Collapse related GL documents into one member-facing row (simple ledger view).
- * Full GL remains unchanged; this is presentation-only.
+ * Simple member ledger view: presentation-only (full GL unchanged).
+ * - Initial subscription: show original Invoice + Prorata rows separately (labeled).
+ * - Category change: one row (net AR), labeled Fee Increase / Fee Decrease.
  */
 
 const PRORATA_SUFFIX = "-PRORATA";
@@ -75,37 +76,24 @@ function normalizeGroupedRow(txn) {
   return base;
 }
 
-function buildSubscriptionProrataGroup(invoice, prorata, memberId) {
-  const norm = memberNormId(memberId);
-  const netDr =
-    netMemberArCents(invoice, norm) + netMemberArCents(prorata, norm);
-  const cat = pickCategoryName(invoice);
-  const memo = cat
-    ? `Subscription fee for the year (pro-rated from your start date) — ${cat}`
-    : "Subscription fee for the year (pro-rated from your start date)";
-  const line = syntheticArLine({ memberId, netDrCents: netDr });
-  const entries = line ? [line] : [];
-
-  return normalizeGroupedRow({
-    _id: `grouped-subscription-${String(invoice._id)}`,
-    date: invoice.date,
-    createdAt: maxCreatedAtIso(invoice, prorata),
-    docType: "LedgerSummary",
-    docNo: String(invoice.docNo || ""),
-    memo,
-    displayLabel: "Subscription (pro-rated)",
-    ledgerPresentation: "grouped",
-    groupKind: "subscription_prorata",
-    sourceDocNos: [
-      String(invoice.docNo || ""),
-      String(prorata.docNo || ""),
-    ].filter(Boolean),
-    entries,
-    reference: cat ? `Subscription — ${cat}` : "Subscription",
-  });
+/** Doc column label for category-change bundle (from INVNEW revenue line). */
+function feeChangeLedgerDisplayDocType(invNew) {
+  const feeLine = invNew.entries?.find(
+    (e) =>
+      e.revenueSubType === "Fee Increase" ||
+      e.revenueSubType === "Fee Decrease" ||
+      e.revenueSubType === "fee",
+  );
+  const st = feeLine?.revenueSubType;
+  if (st === "Fee Increase") return "Fee Increase";
+  if (st === "Fee Decrease") return "Fee Decrease";
+  return "Fee Adjustment";
 }
 
-function buildCategoryChangeGroup(invNew, cadj, memberId) {
+/**
+ * Single simple-view row for mid-year category change (replaces INVNEW + CADJ pair).
+ */
+function buildFeeChangeSimpleRow(invNew, cadj, memberId) {
   const norm = memberNormId(memberId);
   const netDr = netMemberArCents(invNew, norm) + netMemberArCents(cadj, norm);
   const newCat = pickCategoryName(invNew);
@@ -121,7 +109,7 @@ function buildCategoryChangeGroup(invNew, cadj, memberId) {
   const memo =
     memoParts.length > 0
       ? `Membership category change — ${memoParts[0]}`
-      : "Membership category change (fee adjusted for the year)";
+      : cadj.memo || "Membership category change (fee adjusted for the year)";
   const line = syntheticArLine({
     memberId,
     netDrCents: netDr,
@@ -130,15 +118,18 @@ function buildCategoryChangeGroup(invNew, cadj, memberId) {
   });
   const entries = line ? [line] : [];
 
+  const ledgerDisplayDocType = feeChangeLedgerDisplayDocType(invNew);
+
   return normalizeGroupedRow({
-    _id: `grouped-category-${String(invNew._id)}`,
-    date: invNew.date,
+    _id: `simple-fee-change-${String(cadj._id)}`,
+    date: cadj.date || invNew.date,
     createdAt: maxCreatedAtIso(invNew, cadj),
-    docType: "LedgerSummary",
-    docNo: String(invNew.docNo || "").replace(/-INVNEW$/, "") || invNew.docNo,
+    docType: "Adjustment",
+    docNo: String(cadj.docNo || ""),
     memo,
-    displayLabel: "Category change",
-    ledgerPresentation: "grouped",
+    displayLabel: ledgerDisplayDocType,
+    ledgerDisplayDocType,
+    ledgerPresentation: "fee_change_simple",
     groupKind: "category_change",
     sourceDocNos: [
       String(invNew.docNo || ""),
@@ -150,13 +141,21 @@ function buildCategoryChangeGroup(invNew, cadj, memberId) {
   });
 }
 
+/** Initial subscription prorata row: show as Fee Adjustment in simple view. */
+function withProrataSimpleLabels(txn) {
+  return {
+    ...txn,
+    ledgerDisplayDocType: "Fee Adjustment",
+    displayLabel: "Fee Adjustment",
+  };
+}
+
 /**
  * @param {object[]} items - normalized ledger rows (post consolidateCategoryChanges)
  * @param {string} memberId
  * @returns {object[]}
  */
 export function simplifyMemberLedgerPresentations(items, memberId) {
-  const norm = memberNormId(memberId);
   const consumed = new Set();
   const out = [];
 
@@ -165,41 +164,6 @@ export function simplifyMemberLedgerPresentations(items, memberId) {
     if (id && consumed.has(id)) continue;
 
     const docNo = String(txn.docNo || "");
-
-    if (docNo.endsWith(PRORATA_SUFFIX)) {
-      const base = docNo.slice(0, -PRORATA_SUFFIX.length);
-      const inv = items.find(
-        (x) =>
-          x.docType === "Invoice" &&
-          String(x.docNo || "") === base &&
-          !String(x.docNo || "").endsWith(INVNEW_SUFFIX) &&
-          !consumed.has(String(x._id ?? "")),
-      );
-      if (inv) {
-        consumed.add(String(inv._id ?? ""));
-        consumed.add(String(txn._id ?? ""));
-        out.push(buildSubscriptionProrataGroup(inv, txn, memberId));
-        continue;
-      }
-      out.push(txn);
-      continue;
-    }
-
-    if (txn.docType === "Invoice" && !docNo.endsWith(INVNEW_SUFFIX)) {
-      const pr = items.find(
-        (x) =>
-          String(x.docNo || "") === docNo + PRORATA_SUFFIX &&
-          !consumed.has(String(x._id ?? "")),
-      );
-      if (pr) {
-        consumed.add(String(txn._id ?? ""));
-        consumed.add(String(pr._id ?? ""));
-        out.push(buildSubscriptionProrataGroup(txn, pr, memberId));
-        continue;
-      }
-      out.push(txn);
-      continue;
-    }
 
     if (docNo.endsWith(INVNEW_SUFFIX)) {
       const base = docNo.slice(0, -INVNEW_SUFFIX.length);
@@ -211,7 +175,7 @@ export function simplifyMemberLedgerPresentations(items, memberId) {
       if (cadj) {
         consumed.add(String(txn._id ?? ""));
         consumed.add(String(cadj._id ?? ""));
-        out.push(buildCategoryChangeGroup(txn, cadj, memberId));
+        out.push(buildFeeChangeSimpleRow(txn, cadj, memberId));
         continue;
       }
       out.push(txn);
@@ -228,10 +192,15 @@ export function simplifyMemberLedgerPresentations(items, memberId) {
       if (invNew) {
         consumed.add(String(invNew._id ?? ""));
         consumed.add(String(txn._id ?? ""));
-        out.push(buildCategoryChangeGroup(invNew, txn, memberId));
+        out.push(buildFeeChangeSimpleRow(invNew, txn, memberId));
         continue;
       }
       out.push(txn);
+      continue;
+    }
+
+    if (docNo.endsWith(PRORATA_SUFFIX)) {
+      out.push(withProrataSimpleLabels(txn));
       continue;
     }
 
