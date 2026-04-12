@@ -261,12 +261,16 @@ export async function invoice(req, res, next) {
       const reduction = annualFee - due; // Both in cents, result is cents
 
       if (reduction > 0) {
-        const { endISO } = yearBoundsFrom(joinDate);
+        const { startISO, endISO } = yearBoundsFrom(joinDate);
+        const lastUnusedISO = dayjs(joinDate)
+          .subtract(1, "day")
+          .format("YYYY-MM-DD");
+        const memo = `Adjustment – Pro-rata fee (${categoryName}) credit for unused period ${startISO} → ${lastUnusedISO} (subscription period ${joinDate} → ${endISO})`;
         const cn = await postBalancedJournal({
           date,
           docType: "Adjustment",
           docNo: `${docNo}-PRORATA`,
-          memo: `Adjustment – Pro-rata fee (${categoryName}) ${joinDate} → ${endISO}`,
+          memo,
           lines: [
             {
               accountCode: "4900",

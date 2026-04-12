@@ -20,5 +20,9 @@ export const memberNetBalanceRules = [
 ];
 
 export const memberLedgerRules = [
-  query("accountCode").optional().isString().notEmpty()
+  query("accountCode").optional().isString().notEmpty(),
+  query("view")
+    .optional()
+    .isIn(["simple", "full"])
+    .withMessage("view must be simple or full"),
 ];
