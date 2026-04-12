@@ -29,7 +29,7 @@ export async function postJournal({ date, memberId, entries, ref, tags }) {
           balance: multiplier * e.amount,
         },
       },
-      { upsert: true }
+      { upsert: true },
     );
   }
 

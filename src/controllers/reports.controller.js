@@ -8,6 +8,14 @@ import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
+/** App-credit transfer receipt (not cash-in); identified by memo / docNo, not docType. */
+function isApplicationCreditClaimReceipt(txn) {
+  if (!txn || txn.docType !== "Receipt") return false;
+  const memo = String(txn.memo || "");
+  const docNo = String(txn.docNo || "");
+  return memo.startsWith("Claim app credit") || /^CLAIM-/i.test(docNo);
+}
+
 export async function memberStatement(req, res, next) {
   try {
     const { memberId } = req.params;
@@ -297,7 +305,7 @@ export async function memberNetBalance(req, res, next) {
 }
 
 /**
- * Member summary: net balance + most recent payment (Receipt or Claim).
+ * Member summary: net balance + most recent payment (Receipt, including app-credit claim receipts).
  * Uses two parallel indexed queries for performance.
  */
 export async function memberSummary(req, res, next) {
@@ -313,7 +321,7 @@ export async function memberSummary(req, res, next) {
       MatBal.find(query).lean(),
       GL.findOne({
         "entries.memberId": memberId,
-        docType: { $in: ["Receipt", "Claim"] },
+        docType: "Receipt",
       })
         .sort({ date: -1, createdAt: -1 })
         .lean(),
@@ -340,10 +348,9 @@ export async function memberSummary(req, res, next) {
         docType: lastPaymentTxn.docType,
         date: lastPaymentTxn.date,
         amount,
-        displayLabel:
-          lastPaymentTxn.docType === "Claim"
-            ? "Payment received"
-            : lastPaymentTxn.memo || "Payment",
+        displayLabel: isApplicationCreditClaimReceipt(lastPaymentTxn)
+          ? "Payment received"
+          : lastPaymentTxn.memo || "Payment",
       };
     }
 
@@ -392,7 +399,11 @@ function buildMemberLedgerReference(txn) {
 
   if (txn.docType === "Invoice") {
     const feeLine = txn.entries?.find(
-      (e) => e.revenueSubType === "fee" && e.categoryName
+      (e) =>
+        (e.revenueSubType === "fee" ||
+          e.revenueSubType === "Fee Increase" ||
+          e.revenueSubType === "Fee Decrease") &&
+        e.categoryName
     );
     if (feeLine?.categoryName) return feeLine.categoryName;
   }
@@ -402,14 +413,13 @@ function buildMemberLedgerReference(txn) {
 
 /** Match persisted GL shape for ledger/statement (settlement always present). */
 function normalizeLedgerGlTxn(txn) {
-  const base =
-    txn.docType === "Claim"
-      ? {
-          ...txn,
-          displayLabel: "Payment received",
-          displayType: "payment_received",
-        }
-      : { ...txn };
+  const base = isApplicationCreditClaimReceipt(txn)
+    ? {
+        ...txn,
+        displayLabel: "Payment received",
+        displayType: "payment_received",
+      }
+    : { ...txn };
   if (base.settlement == null) {
     base.settlement = { status: "PENDING" };
   }

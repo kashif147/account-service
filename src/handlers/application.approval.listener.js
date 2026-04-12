@@ -24,6 +24,25 @@ function parseDate(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+/** Normalize to YYYY-MM-DD or null. */
+function toIsoDateOnly(value) {
+  if (value == null || value === "") return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime())
+      ? null
+      : value.toISOString().split("T")[0];
+  }
+  const s = String(value).split("T")[0];
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+/** Lexicographic max works for ISO calendar dates (YYYY-MM-DD). */
+function laterIsoDate(isoA, isoB) {
+  const a = toIsoDateOnly(isoA) || "";
+  const b = toIsoDateOnly(isoB) || "";
+  return a > b ? a : b;
+}
+
 async function getIncomeCodeForCategory(categoryName) {
   // Default mapping - customize based on your CoA
   const categoryToIncomeCode = {
@@ -426,6 +445,16 @@ export async function handleMemberCreated(payload) {
 
     const dateJoined = subscriptionStartDate;
 
+    // Bulk: subscriptionAttributes.processingDate = batch processing day; invoice = max(join, processing).
+    // Single: no processingDate → invoice = dateJoined (membership start).
+    const processingDateOnly = toIsoDateOnly(
+      subscriptionAttributes?.processingDate
+    );
+    const invoiceDate = processingDateOnly
+      ? laterIsoDate(dateJoined, processingDateOnly)
+      : dateJoined;
+    const prorationStartDate = invoiceDate;
+
     // Get income code and annual fee (from pricing if available)
     // Wrap in global limiter to prevent connection pool exhaustion
     const { incomeCode, annualFee } = await globalDBLimiter(async () => {
@@ -439,12 +468,12 @@ export async function handleMemberCreated(payload) {
       });
     });
 
-    // Invoice doc number: per application when known, else per subscription (GL lines always use memberId)
-    const year = new Date().getFullYear();
+    // Invoice doc number: year from GL invoice (billing) date
+    const invYear = parseInt(invoiceDate.slice(0, 4), 10);
+    const year = Number.isFinite(invYear) ? invYear : new Date().getFullYear();
     const docNo = applicationId
       ? `INV-${year}-${applicationId}`
       : `INV-${year}-SUB-${subscriptionId}`;
-    const invoiceDate = new Date().toISOString().split("T")[0];
 
     // Idempotency check: Check if invoice already exists before creating
     // Wrap in global limiter to prevent connection pool exhaustion
@@ -473,6 +502,10 @@ export async function handleMemberCreated(payload) {
           annualFee,
           incomeCode,
           docNo,
+          dateJoined,
+          processingDate: processingDateOnly ?? null,
+          invoiceDate,
+          prorationStartDate,
         },
         "Creating invoice for newly created member"
       );
@@ -490,7 +523,7 @@ export async function handleMemberCreated(payload) {
           incomeCode,
           categoryName,
           periodBucket: "current",
-          joinDate: dateJoined !== invoiceDate ? dateJoined : undefined,
+          joinDate: prorationStartDate,
         },
       };
 

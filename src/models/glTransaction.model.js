@@ -8,7 +8,7 @@ const EntrySchema = new mongoose.Schema(
     memberId: { type: String }, // required for 1400/2020 lines
     applicationId: { type: String }, // used before memberId exists
     periodBucket: { type: String, enum: ["arrears", "current", "advance"] },
-    revenueSubType: { type: String }, // e.g., "fee"
+    revenueSubType: { type: String }, // e.g. "fee", "Fee Increase", "Fee Decrease"
     adjSubType: { type: String }, // "prorata", "discount", etc.
     categoryName: { type: String }, // for descriptions/reports
   },
@@ -18,7 +18,7 @@ const EntrySchema = new mongoose.Schema(
 const GLSchema = new mongoose.Schema(
   {
     date: { type: Date, required: true },
-    docType: { type: String, required: true }, // Invoice, CreditNote, Receipt, WriteOff, Claim, etc.
+    docType: { type: String, required: true }, // Invoice, CreditNote, Receipt, WriteOff, Adjustment, etc.
     docNo: { type: String, required: true, unique: true },
     memo: { type: String },
     settlement: {

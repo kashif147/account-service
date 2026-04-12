@@ -342,6 +342,12 @@ export async function postCategoryChangeJournals({
     .slice(0, 10);
 
   const isUpgrade = newAnnualFee > oldAnnualFee;
+  const isDowngrade = newAnnualFee < oldAnnualFee;
+  const categoryChangeRevenueSubType = isUpgrade
+    ? "Fee Increase"
+    : isDowngrade
+      ? "Fee Decrease"
+      : "fee";
 
   const results = [];
 
@@ -364,7 +370,7 @@ export async function postCategoryChangeJournals({
           accountCode: newIncomeCode,
           dc: "C",
           amount: newAnnualFee,
-          revenueSubType: "fee",
+          revenueSubType: categoryChangeRevenueSubType,
           categoryName: newCategoryName,
         },
       ],
@@ -773,7 +779,7 @@ export async function claimApplicationCredit(req, res, next) {
 
     const out = await postBalancedJournal({
       date,
-      docType: "Claim",
+      docType: "Receipt",
       docNo,
       memo: `Claim app credit ${applicationId} → ${memberId}`,
       lines,
