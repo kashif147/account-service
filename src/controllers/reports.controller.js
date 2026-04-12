@@ -408,18 +408,34 @@ function buildMemberLedgerReference(txn) {
     if (feeLine?.categoryName) return feeLine.categoryName;
   }
 
+  if (docNo.endsWith("-PRORATA")) {
+    const cat = txn.entries?.find((e) => e.categoryName)?.categoryName;
+    if (cat) return `Pro-rata — ${cat}`;
+    return "Pro-rata fee adjustment";
+  }
+
   return docNo || "-";
 }
 
 /** Match persisted GL shape for ledger/statement (settlement always present). */
 function normalizeLedgerGlTxn(txn) {
+  const isProrataFee =
+    txn.docType === "Adjustment" &&
+    txn.entries?.some((e) => e.adjSubType === "prorata-fee-adjustment");
+
   const base = isApplicationCreditClaimReceipt(txn)
     ? {
         ...txn,
         displayLabel: "Payment received",
         displayType: "payment_received",
       }
-    : { ...txn };
+    : isProrataFee
+      ? {
+          ...txn,
+          displayLabel: "Pro-rata fee adjustment",
+          displayType: "prorata_fee_adjustment",
+        }
+      : { ...txn };
   if (base.settlement == null) {
     base.settlement = { status: "PENDING" };
   }
@@ -430,7 +446,8 @@ function normalizeLedgerGlTxn(txn) {
 /**
  * Member-facing GL list: pass through category-change journals as stored (Invoice -INVNEW,
  * Adjustment -CADJ / legacy -COLD -CNEW) so each item matches other GL documents.
- * Drops internal-only adjustment types and settlements.
+ * Drops internal-only category-change adjustments and settlements. Pro-rata fee
+ * adjustments are member-visible (they explain AR after the full-year invoice).
  */
 function consolidateCategoryChanges(transactions) {
   const consolidated = [];
@@ -450,10 +467,6 @@ function consolidateCategoryChanges(transactions) {
         adjSubType === "category-change-prorata-credit";
 
       if (isCategoryChangeAdjustment) {
-        continue;
-      }
-
-      if (adjSubType === "prorata-fee-adjustment") {
         continue;
       }
     }

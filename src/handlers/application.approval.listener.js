@@ -43,8 +43,41 @@ function laterIsoDate(isoA, isoB) {
   return a > b ? a : b;
 }
 
+/** Collapse spaces and slash spacing so "Short-term / Relief" matches "Short-term/Relief (…)". */
+function normalizeCategoryLabel(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/\s*\/\s*/g, "/")
+    .trim();
+}
+
+/**
+ * Resolve CoA income code from CRM/subscription category string.
+ * Exact match first; then prefix match on normalized labels (longer keys first).
+ */
+function resolveIncomeCodeKey(categoryName, categoryToIncomeCode) {
+  if (categoryName != null && categoryToIncomeCode[categoryName]) {
+    return categoryToIncomeCode[categoryName];
+  }
+  const fullNorm = normalizeCategoryLabel(categoryName);
+  const pairs = Object.entries(categoryToIncomeCode).sort(
+    (a, b) => normalizeCategoryLabel(b[0]).length - normalizeCategoryLabel(a[0]).length,
+  );
+  for (const [label, code] of pairs) {
+    const kn = normalizeCategoryLabel(label);
+    if (!kn) continue;
+    if (fullNorm === kn) return code;
+    if (fullNorm.startsWith(kn)) {
+      const next = fullNorm[kn.length];
+      if (next === undefined || next === " " || next === "(") return code;
+    }
+  }
+  return null;
+}
+
 async function getIncomeCodeForCategory(categoryName) {
-  // Default mapping - customize based on your CoA
+  // Default mapping - customize based on your CoA (keys are canonical; variants match via normalize + prefix)
   const categoryToIncomeCode = {
     "General All Grades": "4000",
     "Short-term / Relief": "4010",
@@ -57,17 +90,15 @@ async function getIncomeCodeForCategory(categoryName) {
     // Add more mappings as needed
   };
 
-  const code = categoryToIncomeCode[categoryName];
+  const code = resolveIncomeCodeKey(categoryName, categoryToIncomeCode);
   if (code) {
-    // Verify account exists in CoA
     const coa = await CoA.findOne({ code }).lean();
     if (coa) return code;
   }
 
-  // Default to 4000 if category not found or account doesn't exist
   logger.warn(
-    { categoryName, code },
-    "Using default income code 4000 for category"
+    { categoryName, resolvedCode: code },
+    "Using default income code 4000 for category (no map match or CoA row missing)"
   );
   return "4000";
 }
