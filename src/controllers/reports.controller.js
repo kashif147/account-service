@@ -490,7 +490,7 @@ export async function memberLedger(req, res, next) {
     if (accountCode) q["entries.accountCode"] = accountCode;
 
     const allItems = await GL.find(q)
-      .sort({ date: -1, createdAt: -1 })
+      .sort({ date: 1, createdAt: 1 })
       .lean();
 
     const consolidatedItems = consolidateCategoryChanges(allItems);
