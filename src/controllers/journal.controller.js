@@ -16,6 +16,7 @@ import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 import { randomUUID } from "crypto";
 import { enrichStripePaymentItems } from "../services/stripe.payment.enrichment.service.js";
+import { attachTxTypesToLedgerItems } from "../helpers/glTransactionTxType.js";
 
 // Amounts are stored as integer cents - sum them as integers
 function sumArray(arr, sel) {
@@ -68,6 +69,7 @@ export async function postBalancedJournal({
   date,
   docType,
   docNo,
+  reference,
   memo,
   lines,
   settlement,
@@ -87,13 +89,14 @@ export async function postBalancedJournal({
       });
 
     // optional: simple guardrails (kept light; extend as you like)
-    // - prevent posting to 1200 (Bank) except via settlements
+    // - prevent posting to 1200 (Bank) except via settlements or external refunds (bank payout)
     if (
       docType !== "Settlement" &&
+      docType !== "Refund" &&
       enriched.some((e) => e.accountCode === "1200")
     ) {
       throw AppError.badRequest(
-        "Only Settlement documents may post to 1200 (Bank)",
+        "Only Settlement or Refund documents may post to 1200 (Bank)",
         { accountCode: "1200", docType }
       );
     }
@@ -132,6 +135,9 @@ export async function postBalancedJournal({
       date,
       docType,
       docNo,
+      ...(reference != null && String(reference).trim() !== ""
+        ? { reference: String(reference).trim() }
+        : {}),
       memo,
       entries,
       ...(settlement && { settlement }),
@@ -164,6 +170,7 @@ export async function postBalancedJournal({
         docNo: txn.docNo,
         docType: txn.docType,
         date: txn.date,
+        reference: txn.reference,
         memo: txn.memo,
         entries: txn.entries,
         totalDebit: deb,
@@ -872,11 +879,13 @@ export async function listJournals(req, res, next) {
 
     logInfo("Journal query results", { total, itemsCount: items.length });
 
+    const itemsWithTxType = await attachTxTypesToLedgerItems(items);
+
     res.success({
       total,
       skip: offset,
       limit: pageSize,
-      items,
+      items: itemsWithTxType,
     });
   } catch (err) {
     next(err);
@@ -935,7 +944,8 @@ export async function listStripePayments(req, res, next) {
       GLTransaction.countDocuments(query),
     ]);
 
-    const items = await enrichStripePaymentItems(rawItems, req);
+    const enriched = await enrichStripePaymentItems(rawItems, req);
+    const items = await attachTxTypesToLedgerItems(enriched);
 
     logInfo("Stripe payments query results", {
       total,

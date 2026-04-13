@@ -59,6 +59,8 @@ const headers = {
 };
 
 const OID = "507f1f77bcf86cd799439011";
+/** ObjectId used for Payment.findOne → mode stripe (not external OID). */
+const STRIPE_PAY_OID = "507f1f77bcf86cd799439099";
 
 describe("Payments API", () => {
   beforeAll(() => {
@@ -87,6 +89,7 @@ describe("Payments API", () => {
     jest.spyOn(CoA, "find").mockReturnValue({
       lean: jest.fn().mockResolvedValue([
         { code: "2020", description: "Member credits" },
+        { code: "1200", description: "Bank" },
         { code: "1220", description: "Card Gateway Clearing" },
         { code: "1210", description: "Undeposited Cheques" },
       ]),
@@ -131,10 +134,15 @@ describe("Payments API", () => {
         });
       }
       if (filter._id) {
+        const idStr = String(filter._id);
+        const isExternalOid = idStr === OID;
         return chainFindOne({
           ...base,
-          mode: "external",
           _id: filter._id,
+          mode: isExternalOid ? "external" : "stripe",
+          stripe: isExternalOid
+            ? {}
+            : { paymentIntentId: "pi_from_payment_doc" },
         });
       }
       return chainFindOne(null);
@@ -266,7 +274,25 @@ describe("Payments API", () => {
       });
     expect(res.status).toBe(200);
     expect(res.body.data.glPosted).toBe(true);
-    expect(res.body.data.glDocNo).toBe("RFD-ref_2");
+    expect(res.body.data.glDocNo).toMatch(/^RFD-ref_/);
+  });
+
+  test("POST /api/payments/refunds external standalone (no paymentId / PI)", async () => {
+    Payment.updateOne.mockClear();
+    const res = await request(app)
+      .post("/api/payments/refunds")
+      .set(headers)
+      .send({
+        mode: "external",
+        memberId: "m1",
+        amount: 100,
+        payoutMethod: "cheque",
+        currency: "eur",
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.data.standaloneExternal).toBe(true);
+    expect(res.body.data.glPosted).toBe(true);
+    expect(Payment.updateOne).not.toHaveBeenCalled();
   });
 
   test("POST /api/payments/refunds stripe", async () => {
@@ -277,7 +303,40 @@ describe("Payments API", () => {
     expect(res.status).toBe(200);
     expect(res.body.data.refundId).toBe("re_mock_1");
     expect(res.body.data.glPosted).toBe(true);
-    expect(res.body.data.glDocNo).toBe("RFD-ref_3");
+    expect(res.body.data.glDocNo).toMatch(/^RFD-ref_/);
+    expect(res.body.data.stripeApiSkipped).toBeUndefined();
+  });
+
+  test("POST /api/payments/refunds stripe GL-only without paymentIntentId", async () => {
+    const { getStripe } = await import("../lib/stripe.js");
+    const createSpy = jest.spyOn(getStripe().refunds, "create");
+    const res = await request(app)
+      .post("/api/payments/refunds")
+      .set(headers)
+      .send({
+        mode: "stripe",
+        paymentId: STRIPE_PAY_OID,
+        amount: 100,
+        payoutMethod: "bank_transfer",
+      });
+    expect(res.status).toBe(200);
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(res.body.data.refundId).toBeUndefined();
+    expect(res.body.data.stripeApiSkipped).toBe(true);
+    expect(res.body.data.glPosted).toBe(true);
+    createSpy.mockRestore();
+  });
+
+  test("POST /api/payments/refunds external standalone rejects without member or application", async () => {
+    const res = await request(app)
+      .post("/api/payments/refunds")
+      .set(headers)
+      .send({
+        mode: "external",
+        amount: 100,
+        payoutMethod: "bank_transfer",
+      });
+    expect(res.status).toBe(400);
   });
 
   test("POST /api/payments/refunds rejects when credit insufficient", async () => {

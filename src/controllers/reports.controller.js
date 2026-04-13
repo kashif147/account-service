@@ -5,6 +5,7 @@ import MatBal from "../models/materializedBalance.model.js";
 import { monthRange, yearRange } from "../helpers/period.js";
 import { simplifyMemberLedgerPresentations } from "../helpers/memberLedgerPresentation.js";
 import { attachPaymentIntentIdsToLedgerItems } from "../helpers/memberLedgerPaymentIntent.js";
+import { attachTxTypesToLedgerItems } from "../helpers/glTransactionTxType.js";
 import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
@@ -35,6 +36,7 @@ export async function memberStatement(req, res, next) {
 
     // Filter member-facing GL; category-change rows stay as stored (Invoice + Adjustment)
     const txns = consolidateCategoryChanges(allTxns);
+    const txnsWithTypes = await attachTxTypesToLedgerItems(txns);
 
     // Publish report generated event
     await publishDomainEvent(
@@ -44,7 +46,7 @@ export async function memberStatement(req, res, next) {
         memberId,
         from,
         to,
-        transactionCount: txns.length,
+        transactionCount: txnsWithTypes.length,
         generatedAt: new Date().toISOString(),
       },
       {
@@ -53,10 +55,10 @@ export async function memberStatement(req, res, next) {
       },
     );
 
-    res.success({ memberId, txns });
+    res.success({ memberId, txns: txnsWithTypes });
     logInfo("Member statement generated", {
       memberId,
-      transactionCount: txns.length,
+      transactionCount: txnsWithTypes.length,
     });
   } catch (e) {
     logError("Failed to generate member statement", {
@@ -379,6 +381,9 @@ const CATEGORY_CHANGE_DOCNO_RE = /^(.+?)-(INVNEW|CADJ|COLD|CNEW)$/;
 
 /** Human-readable reference for ledger (membership category, not docNo IDs). */
 function buildMemberLedgerReference(txn) {
+  const storedRef = txn.reference != null ? String(txn.reference).trim() : "";
+  if (storedRef) return storedRef;
+
   const docNo = txn.docNo != null ? String(txn.docNo) : "";
 
   if (docNo.endsWith("-INVNEW")) {
@@ -502,6 +507,7 @@ export async function memberLedger(req, res, next) {
       consolidatedItems,
       tenantId
     );
+    const withTxType = await attachTxTypesToLedgerItems(withPaymentIntent);
 
     const view =
       String(req.query.view || "simple").toLowerCase() === "full"
@@ -509,8 +515,8 @@ export async function memberLedger(req, res, next) {
         : "simple";
     const items =
       view === "full"
-        ? withPaymentIntent
-        : simplifyMemberLedgerPresentations(withPaymentIntent, memberId);
+        ? withTxType
+        : simplifyMemberLedgerPresentations(withTxType, memberId);
 
     res.success({ memberId, view, items });
   } catch (e) {

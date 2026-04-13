@@ -1220,10 +1220,24 @@ async function sumRefundedForPayment(tenantId, paymentId) {
 
 async function loadRefundPayment(parsed, ctx) {
   if (parsed.mode === "stripe") {
-    return Payment.findOne({
-      tenantId: ctx.tenantId,
-      "stripe.paymentIntentId": parsed.paymentIntentId,
-    }).lean();
+    const pi =
+      parsed.paymentIntentId != null &&
+      String(parsed.paymentIntentId).trim() !== ""
+        ? String(parsed.paymentIntentId).trim()
+        : null;
+    if (pi) {
+      return Payment.findOne({
+        tenantId: ctx.tenantId,
+        "stripe.paymentIntentId": pi,
+      }).lean();
+    }
+    if (parsed.paymentId) {
+      return Payment.findOne({
+        _id: parsed.paymentId,
+        tenantId: ctx.tenantId,
+      }).lean();
+    }
+    return null;
   }
   if (parsed.paymentId) {
     return Payment.findOne({
@@ -1275,42 +1289,83 @@ async function applyRefundGlAndUpdateDoc(refundDoc, payment, ctx) {
   }
 }
 
+function refundDocumentDate(parsed) {
+  if (parsed.refundDate != null && String(parsed.refundDate).trim() !== "") {
+    return new Date(parsed.refundDate);
+  }
+  return new Date();
+}
+
+function paymentLikeForRefund(parsed, payment) {
+  if (payment) return payment;
+  const meta =
+    parsed.metadata && Object.keys(parsed.metadata).length
+      ? new Map(Object.entries(parsed.metadata))
+      : new Map();
+  if (parsed.memberId && !meta.has("memberId")) meta.set("memberId", parsed.memberId);
+  if (parsed.applicationId && !meta.has("applicationId"))
+    meta.set("applicationId", parsed.applicationId);
+  return {
+    mode: "external",
+    memberId: parsed.memberId ?? null,
+    applicationId: parsed.applicationId ?? null,
+    metadata: meta,
+  };
+}
+
 export async function createRefund(input, ctx) {
   const parsed = zCreateRefund.parse(input);
   const stripe = getStripe();
-  const payment = await loadRefundPayment(parsed, ctx);
-  if (!payment) {
+
+  const isStandaloneExternal =
+    parsed.mode === "external" &&
+    !parsed.paymentId &&
+    !(
+      parsed.paymentIntentId != null &&
+      String(parsed.paymentIntentId).trim() !== ""
+    );
+
+  const payment = isStandaloneExternal
+    ? null
+    : await loadRefundPayment(parsed, ctx);
+  if (!isStandaloneExternal && !payment) {
     throw AppError.badRequest("Payment not found for refund");
   }
-  if (parsed.mode === "stripe" && payment.mode !== "stripe") {
-    throw AppError.badRequest("Stripe refund requires a Stripe payment record");
+  if (payment) {
+    if (parsed.mode === "stripe" && payment.mode !== "stripe") {
+      throw AppError.badRequest("Stripe refund requires a Stripe payment record");
+    }
+    if (parsed.mode === "external" && payment.mode !== "external") {
+      throw AppError.badRequest("External refund requires an external payment record");
+    }
+    assertPaymentAllowsRefund(payment);
   }
-  if (parsed.mode === "external" && payment.mode !== "external") {
-    throw AppError.badRequest("External refund requires an external payment record");
-  }
-  assertPaymentAllowsRefund(payment);
 
   const refundAmount =
-    parsed.amount != null ? parsed.amount : payment.amount;
+    payment && parsed.amount == null ? payment.amount : parsed.amount;
   ensureIntegerCents(refundAmount);
 
-  const alreadyRefunded = await sumRefundedForPayment(
-    ctx.tenantId,
-    payment._id
-  );
-  const remaining = payment.amount - alreadyRefunded;
-  if (refundAmount > remaining) {
-    throw AppError.badRequest(
-      "Refund exceeds remaining refundable amount on payment",
-      {
-        refundCents: refundAmount,
-        remainingRefundableCents: remaining,
-      }
+  if (payment) {
+    const alreadyRefunded = await sumRefundedForPayment(
+      ctx.tenantId,
+      payment._id
     );
+    const remaining = payment.amount - alreadyRefunded;
+    if (refundAmount > remaining) {
+      throw AppError.badRequest(
+        "Refund exceeds remaining refundable amount on payment",
+        {
+          refundCents: refundAmount,
+          remainingRefundableCents: remaining,
+        }
+      );
+    }
   }
 
-  const journalYear = new Date().getFullYear();
-  await assertRefundWithinCredit(refundAmount, payment, journalYear);
+  const refundBusinessDate = refundDocumentDate(parsed);
+  const journalYear = refundBusinessDate.getFullYear();
+  const paymentLike = paymentLikeForRefund(parsed, payment);
+  await assertRefundWithinCredit(refundAmount, paymentLike, journalYear);
 
   const meta =
     parsed.metadata && Object.keys(parsed.metadata).length
@@ -1318,16 +1373,31 @@ export async function createRefund(input, ctx) {
       : undefined;
 
   if (parsed.mode === "stripe") {
-    const refund = await stripe.refunds.create(
-      {
-        charge: parsed.chargeId,
-        payment_intent: parsed.paymentIntentId,
-        amount: refundAmount,
-        reason: parsed.reason,
-        metadata: parsed.metadata || {},
-      },
-      { idempotencyKey: ctx.idempotencyKey || undefined }
-    );
+    const piFromRequest =
+      parsed.paymentIntentId != null &&
+      String(parsed.paymentIntentId).trim() !== ""
+        ? String(parsed.paymentIntentId).trim()
+        : null;
+
+    let stripeRefundId = null;
+    let stripeChargeId = parsed.chargeId ?? undefined;
+    const paymentIntentForRecord =
+      piFromRequest ?? payment.stripe?.paymentIntentId ?? undefined;
+
+    if (piFromRequest) {
+      const refund = await stripe.refunds.create(
+        {
+          charge: parsed.chargeId,
+          payment_intent: piFromRequest,
+          amount: refundAmount,
+          reason: parsed.reason,
+          metadata: parsed.metadata || {},
+        },
+        { idempotencyKey: ctx.idempotencyKey || undefined }
+      );
+      stripeRefundId = refund.id;
+      stripeChargeId = refund.charge || stripeChargeId;
+    }
 
     const refundDoc = await Refund.create({
       tenantId: ctx.tenantId,
@@ -1335,13 +1405,15 @@ export async function createRefund(input, ctx) {
       mode: "stripe",
       amount: refundAmount,
       currency: payment.currency,
+      refundDate: refundBusinessDate,
       reason: parsed.reason,
       stripe: {
-        refundId: refund.id,
-        chargeId: refund.charge || undefined,
-        paymentIntentId: parsed.paymentIntentId,
+        ...(stripeRefundId && { refundId: stripeRefundId }),
+        ...(stripeChargeId && { chargeId: stripeChargeId }),
+        ...(paymentIntentForRecord && { paymentIntentId: paymentIntentForRecord }),
       },
       note: parsed.note,
+      ...(piFromRequest == null ? { payoutMethod: parsed.payoutMethod } : {}),
       ...(meta && { metadata: meta }),
     });
 
@@ -1364,41 +1436,47 @@ export async function createRefund(input, ctx) {
     );
 
     return {
-      refundId: refund.id,
+      ...(stripeRefundId != null && { refundId: stripeRefundId }),
       refundDocId: refundDoc._id.toString(),
       status: "ok",
       glPosted,
       glDocNo,
+      ...(piFromRequest == null && { stripeApiSkipped: true }),
     };
   }
 
   const refundDoc = await Refund.create({
     tenantId: ctx.tenantId,
-    paymentId: payment._id,
+    ...(payment && { paymentId: payment._id }),
+    ...(parsed.memberId && { memberId: parsed.memberId }),
+    ...(parsed.applicationId && { applicationId: parsed.applicationId }),
     mode: "external",
     amount: refundAmount,
-    currency: payment.currency,
+    currency: payment?.currency ?? parsed.currency ?? "eur",
+    refundDate: refundBusinessDate,
     reason: parsed.reason,
     note: parsed.note,
     payoutMethod: parsed.payoutMethod ?? "bank_transfer",
     ...(meta && { metadata: meta }),
   });
 
-  const newStatus =
-    refundAmount < payment.amount ? "partially_refunded" : "refunded";
-  await Payment.updateOne(
-    { _id: payment._id },
-    {
-      $set: {
-        status: newStatus,
-        "audit.updatedBy": ctx.userId || ctx.memberId || "system",
-      },
-    }
-  );
+  if (payment) {
+    const newStatus =
+      refundAmount < payment.amount ? "partially_refunded" : "refunded";
+    await Payment.updateOne(
+      { _id: payment._id },
+      {
+        $set: {
+          status: newStatus,
+          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+        },
+      }
+    );
+  }
 
   const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
     refundDoc,
-    payment,
+    paymentLike,
     ctx
   );
 
@@ -1407,7 +1485,32 @@ export async function createRefund(input, ctx) {
     refundDocId: refundDoc._id.toString(),
     glPosted,
     glDocNo,
+    ...(isStandaloneExternal && { standaloneExternal: true }),
   };
+}
+
+/**
+ * CoA for the credit leg of a refund (where payout is recognized).
+ * - Stripe API refund (no payoutMethod on doc): 1220.
+ * - GL-only stripe refund: payoutMethod bank_transfer 1200, cheque 1210, card 1220.
+ * - External: same payoutMethod map; default bank_transfer.
+ */
+export function clearingAccountCodeForRefund(refundDoc, payment) {
+  const refundMode =
+    refundDoc?.mode ?? (payment?.mode === "stripe" ? "stripe" : "external");
+
+  if (refundMode === "stripe") {
+    const pm = refundDoc?.payoutMethod;
+    if (pm === "bank_transfer") return "1200";
+    if (pm === "cheque") return "1210";
+    if (pm === "card") return "1220";
+    return "1220";
+  }
+
+  const pm = refundDoc?.payoutMethod ?? "bank_transfer";
+  if (pm === "cheque") return "1210";
+  if (pm === "card") return "1220";
+  return "1200";
 }
 
 /**
@@ -1423,7 +1526,7 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
     .default;
 
   const amount = refundDoc.amount;
-  const clearingCode = payment.mode === "stripe" ? "1220" : "1210";
+  const clearingCode = clearingAccountCodeForRefund(refundDoc, payment);
 
   let metadataObj = {};
   if (payment.metadata) {
@@ -1435,11 +1538,13 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
   }
 
   let memberId =
+    refundDoc.memberId ||
     payment.memberId ||
     metadataObj.memberId ||
     metadataObj.member_id ||
     null;
   const applicationId =
+    refundDoc.applicationId ||
     payment.applicationId ||
     metadataObj.applicationId ||
     metadataObj.application_id ||
@@ -1453,7 +1558,7 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
     logger.warn(
       {
         refundId: refundDoc._id,
-        paymentId: payment._id,
+        paymentId: payment?._id,
       },
       "Skipping refund journal — memberId or applicationId required"
     );
@@ -1478,17 +1583,27 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
   const existing = await GLTransaction.findOne({ docNo }).lean();
   if (existing) return existing;
 
-  const date = new Date().toISOString().split("T")[0];
-  const memo = memberId
-    ? `Refund (member ${memberId})`
-    : applicationId
-    ? `Refund (app ${applicationId})`
-    : "Refund";
+  const journalDate = refundDoc.refundDate
+    ? new Date(refundDoc.refundDate)
+    : new Date();
+  const reasonStr =
+    refundDoc.reason != null ? String(refundDoc.reason).trim() : "";
+  const noteStr = refundDoc.note != null ? String(refundDoc.note).trim() : "";
+  const reference = reasonStr || undefined;
+  const memo =
+    noteStr !== ""
+      ? noteStr
+      : memberId
+        ? `Refund (member ${memberId})`
+        : applicationId
+          ? `Refund (app ${applicationId})`
+          : "Refund";
 
   return postBalancedJournal({
-    date,
+    date: journalDate,
     docType: "Refund",
     docNo,
+    reference,
     memo,
     lines,
   });
@@ -1642,7 +1757,10 @@ export async function listRefunds(ctx, options) {
       tenantId: ctx.tenantId,
       memberId,
     }).distinct("_id");
-    query.paymentId = { $in: pids };
+    query.$or = [
+      { memberId },
+      ...(pids.length ? [{ paymentId: { $in: pids } }] : []),
+    ];
   }
   const [items, total] = await Promise.all([
     Refund.find(query)
@@ -1687,6 +1805,7 @@ export default {
   createRefund,
   postJournalForPayment,
   postJournalForRefund,
+  clearingAccountCodeForRefund,
   listRefunds,
   listByMemberIds,
 };
