@@ -73,6 +73,7 @@ export async function postBalancedJournal({
   memo,
   lines,
   settlement,
+  sourceApplicationId,
 }) {
   // Wrap entire function in global DB limiter
   // This ensures all journal operations share the same resource pool
@@ -141,6 +142,10 @@ export async function postBalancedJournal({
       memo,
       entries,
       ...(settlement && { settlement }),
+      ...(sourceApplicationId != null &&
+      String(sourceApplicationId).trim() !== ""
+        ? { sourceApplicationId: String(sourceApplicationId).trim() }
+        : {}),
     });
 
     const { year, totals } = rollupMemberBalances({ date, entries });
@@ -172,6 +177,7 @@ export async function postBalancedJournal({
         date: txn.date,
         reference: txn.reference,
         memo: txn.memo,
+        sourceApplicationId: txn.sourceApplicationId,
         entries: txn.entries,
         totalDebit: deb,
         totalCredit: cre,
@@ -794,6 +800,7 @@ export async function claimApplicationCredit(req, res, next) {
       docNo,
       memo: `Claim app credit ${applicationId} → ${memberId}`,
       lines,
+      sourceApplicationId: applicationId,
     });
 
     res.created(out);
