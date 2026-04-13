@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
+import GLTransaction from "../models/glTransaction.model.js";
 
 const RCP_RE = /^RCP-([a-fA-F0-9]{24})$/u;
 const RFD_RE = /^RFD-([a-fA-F0-9]{24})$/u;
@@ -17,6 +18,57 @@ function applicationIdFromClaimDocNo(docNo) {
   if (!docNo || typeof docNo !== "string") return null;
   const m = CLAIM_RE.exec(docNo.trim());
   return m ? m[1].trim() : null;
+}
+
+function claimApplicationIdForTxn(txn) {
+  const fromDoc = applicationIdFromClaimDocNo(String(txn?.docNo || ""));
+  if (fromDoc) return fromDoc;
+  const s =
+    txn?.sourceApplicationId != null
+      ? String(txn.sourceApplicationId).trim()
+      : "";
+  return s || null;
+}
+
+/** Claim journal (new `Claim` docType or legacy `Receipt` + CLAIM docNo / memo). */
+function isClaimLedgerTxn(txn) {
+  if (!txn) return false;
+  if (txn.docType === "Claim") return true;
+  if (txn.docType !== "Receipt") return false;
+  const memo = String(txn.memo || "");
+  const docNo = String(txn.docNo || "");
+  return memo.startsWith("Claim app credit") || /^CLAIM-/i.test(docNo);
+}
+
+/**
+ * Same funding payment as used for paymentIntentId on claim rows.
+ * @param {object} txn
+ * @param {Map<string, object[]>} paymentsByMemberId
+ * @param {Map<string, object[]>} paymentsByApplicationId
+ */
+function resolveClaimFundingPayment(
+  txn,
+  paymentsByMemberId,
+  paymentsByApplicationId
+) {
+  const claimKey = claimApplicationIdForTxn(txn);
+  if (!claimKey) return null;
+  const debitCents = claimApplicationDebitCents(txn);
+  const recipientMid = claimRecipientMemberId(txn);
+  let picked = null;
+  if (recipientMid) {
+    picked = pickStripePaymentForClaim(
+      paymentsByMemberId.get(recipientMid) || [],
+      debitCents
+    );
+  }
+  if (!picked) {
+    picked = pickStripePaymentForClaim(
+      paymentsByApplicationId.get(claimKey) || [],
+      debitCents
+    );
+  }
+  return picked;
 }
 
 /** Debit amount on 2020 for the application side of a claim receipt (cents). */
@@ -77,6 +129,10 @@ function pickStripePaymentForClaim(payments, claimAmountCents) {
  * succeeded Stripe Payment whose **memberId** matches the claim credit leg, then falls back to
  * payments on the applicationId. Other rows get `paymentIntentId: null`.
  *
+ * For claim rows, when the funding `RCP-{paymentId}` is **not** already in `items`, loads that
+ * receipt once (batch `GL.find`) and sets **`underlyingReceiptGl`** so clients get the full GL
+ * (e.g. **1220** clearing lines) without duplicating rows in the list.
+ *
  * @param {object[]} items - ledger rows (plain objects)
  * @param {string} [tenantId]
  * @returns {Promise<object[]>}
@@ -103,6 +159,15 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
     const claimApp = applicationIdFromClaimDocNo(docNo);
     if (claimApp) {
       claimApplicationIds.add(claimApp);
+      const rec = claimRecipientMemberId(txn);
+      if (rec) claimRecipientMemberIds.add(rec);
+    }
+    if (txn.docType === "Claim") {
+      const sid =
+        txn.sourceApplicationId != null
+          ? String(txn.sourceApplicationId).trim()
+          : "";
+      if (sid) claimApplicationIds.add(sid);
       const rec = claimRecipientMemberId(txn);
       if (rec) claimRecipientMemberIds.add(rec);
     }
@@ -175,6 +240,7 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
       $or: or,
     })
       .select({
+        _id: 1,
         stripe: 1,
         applicationId: 1,
         memberId: 1,
@@ -200,6 +266,48 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
     }
   }
 
+  const ledgerDocNos = new Set(
+    items.map((t) => String(t?.docNo || "").trim()).filter(Boolean)
+  );
+
+  const claimFundingPick = new Map();
+  function fundingPaymentForClaimRow(txn) {
+    if (!isClaimLedgerTxn(txn)) return null;
+    const key = String(txn._id ?? txn.docNo ?? "");
+    if (!key) return resolveClaimFundingPayment(
+      txn,
+      paymentsByMemberId,
+      paymentsByApplicationId
+    );
+    if (!claimFundingPick.has(key)) {
+      claimFundingPick.set(
+        key,
+        resolveClaimFundingPayment(
+          txn,
+          paymentsByMemberId,
+          paymentsByApplicationId
+        )
+      );
+    }
+    return claimFundingPick.get(key);
+  }
+
+  const rcpDocNosToFetch = new Set();
+  for (const txn of items) {
+    const picked = fundingPaymentForClaimRow(txn);
+    if (!picked?._id) continue;
+    const rcpDocNo = `RCP-${String(picked._id)}`;
+    if (!ledgerDocNos.has(rcpDocNo)) rcpDocNosToFetch.add(rcpDocNo);
+  }
+
+  let rcpGlByDocNo = new Map();
+  if (rcpDocNosToFetch.size > 0) {
+    const glRows = await GLTransaction.find({
+      docNo: { $in: [...rcpDocNosToFetch] },
+    }).lean();
+    rcpGlByDocNo = new Map(glRows.map((g) => [String(g.docNo), g]));
+  }
+
   return items.map((txn) => {
     const docNo = String(txn.docNo || "");
     let paymentIntentId = null;
@@ -207,21 +315,24 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
     if (rcp) paymentIntentId = paymentIdToPi.get(rcp) ?? null;
     const rfd = objectIdSuffix(docNo, RFD_RE);
     if (rfd) paymentIntentId = refundIdToPi.get(rfd) ?? paymentIntentId;
-    const claimApp = applicationIdFromClaimDocNo(docNo);
-    if (claimApp && !paymentIntentId) {
-      const debitCents = claimApplicationDebitCents(txn);
-      const recipientMid = claimRecipientMemberId(txn);
-      let picked = null;
-      if (recipientMid) {
-        const memberCandidates = paymentsByMemberId.get(recipientMid) || [];
-        picked = pickStripePaymentForClaim(memberCandidates, debitCents);
-      }
-      if (!picked) {
-        const appCandidates = paymentsByApplicationId.get(claimApp) || [];
-        picked = pickStripePaymentForClaim(appCandidates, debitCents);
-      }
+    const claimKey = claimApplicationIdForTxn(txn);
+    if (claimKey && !paymentIntentId) {
+      const picked = fundingPaymentForClaimRow(txn);
       paymentIntentId = picked?.stripe?.paymentIntentId ?? null;
     }
-    return { ...txn, paymentIntentId };
+
+    let underlyingReceiptGl = null;
+    if (isClaimLedgerTxn(txn)) {
+      const picked = fundingPaymentForClaimRow(txn);
+      if (picked?._id) {
+        const rcpDocNo = `RCP-${String(picked._id)}`;
+        if (!ledgerDocNos.has(rcpDocNo)) {
+          const gl = rcpGlByDocNo.get(rcpDocNo);
+          if (gl) underlyingReceiptGl = gl;
+        }
+      }
+    }
+
+    return { ...txn, paymentIntentId, underlyingReceiptGl };
   });
 }

@@ -38,10 +38,10 @@ describe("resolveTxTypeAccountCode", () => {
     ).toBe("1210");
   });
 
-  test("CLAIM receipt: only 2020 lines → null", () => {
+  test("CLAIM journal: only 2020 lines → null", () => {
     expect(
       resolveTxTypeAccountCode({
-        docType: "Receipt",
+        docType: "Claim",
         entries: [
           { accountCode: "2020", dc: "D", amount: 8150, applicationId: "a1" },
           { accountCode: "2020", dc: "C", amount: 8150, memberId: "B1" },

@@ -11,9 +11,12 @@ import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
-/** App-credit transfer receipt (not cash-in); identified by memo / docNo, not docType. */
+/** Application credit moved to member (internal 2020 transfer); not a cash receipt. */
 function isApplicationCreditClaimReceipt(txn) {
-  if (!txn || txn.docType !== "Receipt") return false;
+  if (!txn) return false;
+  if (txn.docType === "Claim") return true;
+  // Legacy rows were posted as Receipt with CLAIM docNo / memo
+  if (txn.docType !== "Receipt") return false;
   const memo = String(txn.memo || "");
   const docNo = String(txn.docNo || "");
   return memo.startsWith("Claim app credit") || /^CLAIM-/i.test(docNo);
@@ -341,7 +344,7 @@ export async function memberSummary(req, res, next) {
       MatBal.find(query).lean(),
       GL.findOne({
         "entries.memberId": memberId,
-        docType: "Receipt",
+        docType: { $in: ["Receipt", "Claim"] },
       })
         .sort({ date: -1, createdAt: -1 })
         .lean(),
@@ -369,7 +372,7 @@ export async function memberSummary(req, res, next) {
         date: lastPaymentTxn.date,
         amount,
         displayLabel: isApplicationCreditClaimReceipt(lastPaymentTxn)
-          ? "Payment received"
+          ? "Claim"
           : lastPaymentTxn.memo || "Payment",
       };
     }
@@ -449,8 +452,8 @@ function normalizeLedgerGlTxn(txn) {
   const base = isApplicationCreditClaimReceipt(txn)
     ? {
         ...txn,
-        displayLabel: "Payment received",
-        displayType: "payment_received",
+        displayLabel: "Claim",
+        displayType: "application_credit_claim",
       }
     : isProrataFee
       ? {

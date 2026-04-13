@@ -796,7 +796,7 @@ export async function claimApplicationCredit(req, res, next) {
 
     const out = await postBalancedJournal({
       date,
-      docType: "Receipt",
+      docType: "Claim",
       docNo,
       memo: `Claim app credit ${applicationId} → ${memberId}`,
       lines,
@@ -839,7 +839,7 @@ export async function writeOff(req, res, next) {
  * GET /api/journal
  * Query params:
  *  - from, to: ISO dates
- *  - docType: e.g. Invoice, Adjustment, Receipt, Settlement
+ *  - docType: e.g. Invoice, Adjustment, Receipt, Claim, Refund, Settlement
  *  - memberId: exact match on entries.memberId
  *  - skip, limit: pagination (defaults: 0, 50; max limit 200)
  */
