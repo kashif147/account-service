@@ -46,9 +46,17 @@ const RefundSchema = new Schema(
   }
 );
 
+// Uniqueness only when Stripe assigned a refund id. A sparse compound index
+// still indexes every doc because tenantId is always set, so multiple external
+// / GL-only refunds (no stripe.refundId) hit E11000 on (tenantId, null).
 RefundSchema.index(
   { tenantId: 1, "stripe.refundId": 1 },
-  { unique: true, sparse: true }
+  {
+    unique: true,
+    partialFilterExpression: {
+      "stripe.refundId": { $exists: true, $type: "string", $gt: "" },
+    },
+  }
 );
 
 RefundSchema.index({ tenantId: 1, createdAt: -1 });
