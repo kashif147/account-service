@@ -68,6 +68,70 @@ describe("attachPaymentIntentIdsToLedgerItems", () => {
     expect(out[0].paymentIntentId).toBe("pi_from_refund");
   });
 
+  test("resolves CLAIM- from Payment by applicationId and claim amount", async () => {
+    const appId = "9cd7bf3b-6750-4d58-9cf1-f1f929336170";
+    paymentFindMock.mockImplementation((query) => {
+      const chain = {
+        select: jest.fn().mockReturnThis(),
+        lean: jest.fn(),
+      };
+      if (query.applicationId) {
+        chain.lean.mockResolvedValue([
+          {
+            _id: "pay0",
+            applicationId: appId,
+            amount: 10000,
+            status: "succeeded",
+            mode: "stripe",
+            createdAt: new Date("2026-04-07"),
+            stripe: { paymentIntentId: "pi_member_payment" },
+          },
+          {
+            _id: "pay1",
+            applicationId: appId,
+            amount: 8150,
+            status: "succeeded",
+            mode: "stripe",
+            createdAt: new Date("2026-04-01"),
+            stripe: { paymentIntentId: "pi_claimed_app" },
+          },
+        ]);
+      } else {
+        chain.lean.mockResolvedValue([]);
+      }
+      return chain;
+    });
+    refundFindMock.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([]),
+    });
+
+    const items = [
+      {
+        docNo: `CLAIM-${appId}`,
+        docType: "Receipt",
+        entries: [
+          {
+            accountCode: "2020",
+            dc: "D",
+            amount: 8150,
+            applicationId: appId,
+            periodBucket: "current",
+          },
+          {
+            accountCode: "2020",
+            dc: "C",
+            amount: 8150,
+            memberId: "B00004",
+            periodBucket: "current",
+          },
+        ],
+      },
+    ];
+    const out = await attachPaymentIntentIdsToLedgerItems(items, "t1");
+    expect(out[0].paymentIntentId).toBe("pi_claimed_app");
+  });
+
   test("resolves RFD- via Refund.paymentId when stripe subdoc has no pi", async () => {
     const rid = "607f1f77bcf86cd799439022";
     const payOid = "507f1f77bcf86cd799439011";
