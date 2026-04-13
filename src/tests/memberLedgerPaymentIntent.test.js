@@ -75,11 +75,12 @@ describe("attachPaymentIntentIdsToLedgerItems", () => {
         select: jest.fn().mockReturnThis(),
         lean: jest.fn(),
       };
-      if (query.applicationId) {
+      if (query.$or || query.applicationId) {
         chain.lean.mockResolvedValue([
           {
             _id: "pay0",
             applicationId: appId,
+            memberId: null,
             amount: 10000,
             status: "succeeded",
             mode: "stripe",
@@ -89,6 +90,7 @@ describe("attachPaymentIntentIdsToLedgerItems", () => {
           {
             _id: "pay1",
             applicationId: appId,
+            memberId: null,
             amount: 8150,
             status: "succeeded",
             mode: "stripe",
@@ -130,6 +132,72 @@ describe("attachPaymentIntentIdsToLedgerItems", () => {
     ];
     const out = await attachPaymentIntentIdsToLedgerItems(items, "t1");
     expect(out[0].paymentIntentId).toBe("pi_claimed_app");
+  });
+
+  test("CLAIM prefers Payment for claim recipient memberId over application-only payment", async () => {
+    const appId = "9cd7bf3b-6750-4d58-9cf1-f1f929336171";
+    paymentFindMock.mockImplementation((query) => {
+      const chain = {
+        select: jest.fn().mockReturnThis(),
+        lean: jest.fn(),
+      };
+      if (query.$or || query.applicationId) {
+        chain.lean.mockResolvedValue([
+          {
+            _id: "payApp",
+            applicationId: appId,
+            memberId: null,
+            amount: 8150,
+            status: "succeeded",
+            mode: "stripe",
+            createdAt: new Date("2026-04-01"),
+            stripe: { paymentIntentId: "pi_app_level" },
+          },
+          {
+            _id: "payMem",
+            applicationId: null,
+            memberId: "B00005",
+            amount: 8150,
+            status: "succeeded",
+            mode: "stripe",
+            createdAt: new Date("2026-04-02"),
+            stripe: { paymentIntentId: "pi_member_actual" },
+          },
+        ]);
+      } else {
+        chain.lean.mockResolvedValue([]);
+      }
+      return chain;
+    });
+    refundFindMock.mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue([]),
+    });
+
+    const items = [
+      {
+        docNo: `CLAIM-${appId}`,
+        docType: "Receipt",
+        entries: [
+          {
+            accountCode: "2020",
+            dc: "D",
+            amount: 8150,
+            applicationId: appId,
+            periodBucket: "current",
+          },
+          {
+            accountCode: "2020",
+            dc: "C",
+            amount: 8150,
+            memberId: "B00005",
+            periodBucket: "current",
+          },
+        ],
+      },
+    ];
+    const out = await attachPaymentIntentIdsToLedgerItems(items, "t1");
+    expect(out[0].paymentIntentId).toBe("pi_member_actual");
   });
 
   test("resolves RFD- via Refund.paymentId when stripe subdoc has no pi", async () => {

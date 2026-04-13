@@ -30,6 +30,16 @@ function claimApplicationDebitCents(txn) {
   return null;
 }
 
+/** Member receiving app credit on the claim (2020 credit leg, real memberId). */
+function claimRecipientMemberId(txn) {
+  for (const e of txn.entries || []) {
+    if (e.accountCode !== "2020" || e.dc !== "C") continue;
+    const mid = e.memberId != null ? String(e.memberId).trim() : "";
+    if (mid && !mid.toLowerCase().startsWith("app:")) return mid;
+  }
+  return null;
+}
+
 const CLAIM_PAYMENT_STATUSES = new Set(["succeeded", "partially_refunded"]);
 
 /**
@@ -63,7 +73,9 @@ function pickStripePaymentForClaim(payments, claimAmountCents) {
 
 /**
  * Adds `paymentIntentId` (Stripe) to each ledger txn where docNo links to Payment (RCP-),
- * Refund (RFD-), or application credit claim (CLAIM-{applicationId}). Other rows get `paymentIntentId: null`.
+ * Refund (RFD-), or application credit claim (CLAIM-{applicationId}). For CLAIM rows, prefers a
+ * succeeded Stripe Payment whose **memberId** matches the claim credit leg, then falls back to
+ * payments on the applicationId. Other rows get `paymentIntentId: null`.
  *
  * @param {object[]} items - ledger rows (plain objects)
  * @param {string} [tenantId]
@@ -80,6 +92,7 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
   const paymentIdsFromRcp = new Set();
   const refundIds = new Set();
   const claimApplicationIds = new Set();
+  const claimRecipientMemberIds = new Set();
 
   for (const txn of items) {
     const docNo = String(txn.docNo || "");
@@ -88,7 +101,11 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
     const rfd = objectIdSuffix(docNo, RFD_RE);
     if (rfd) refundIds.add(rfd);
     const claimApp = applicationIdFromClaimDocNo(docNo);
-    if (claimApp) claimApplicationIds.add(claimApp);
+    if (claimApp) {
+      claimApplicationIds.add(claimApp);
+      const rec = claimRecipientMemberId(txn);
+      if (rec) claimRecipientMemberIds.add(rec);
+    }
   }
 
   const paymentIdToPi = new Map();
@@ -140,19 +157,46 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
 
   /** @type {Map<string, object[]>} */
   const paymentsByApplicationId = new Map();
+  /** @type {Map<string, object[]>} */
+  const paymentsByMemberId = new Map();
+
   const claimAppIdList = [...claimApplicationIds].filter(Boolean);
-  if (claimAppIdList.length) {
+  const claimMemberIdList = [...claimRecipientMemberIds].filter(Boolean);
+  if (claimAppIdList.length || claimMemberIdList.length) {
+    const or = [];
+    if (claimAppIdList.length) {
+      or.push({ applicationId: { $in: claimAppIdList } });
+    }
+    if (claimMemberIdList.length) {
+      or.push({ memberId: { $in: claimMemberIdList } });
+    }
     const appPays = await Payment.find({
       tenantId: tid,
-      applicationId: { $in: claimAppIdList },
+      $or: or,
     })
-      .select({ stripe: 1, applicationId: 1, amount: 1, status: 1, mode: 1, createdAt: 1 })
+      .select({
+        stripe: 1,
+        applicationId: 1,
+        memberId: 1,
+        amount: 1,
+        status: 1,
+        mode: 1,
+        createdAt: 1,
+      })
       .lean();
     for (const p of appPays) {
-      const aid = p.applicationId != null ? String(p.applicationId).trim() : "";
-      if (!aid) continue;
-      if (!paymentsByApplicationId.has(aid)) paymentsByApplicationId.set(aid, []);
-      paymentsByApplicationId.get(aid).push(p);
+      const aid =
+        p.applicationId != null ? String(p.applicationId).trim() : "";
+      if (aid) {
+        if (!paymentsByApplicationId.has(aid))
+          paymentsByApplicationId.set(aid, []);
+        paymentsByApplicationId.get(aid).push(p);
+      }
+      const mid = p.memberId != null ? String(p.memberId).trim() : "";
+      if (mid) {
+        if (!paymentsByMemberId.has(mid)) paymentsByMemberId.set(mid, []);
+        paymentsByMemberId.get(mid).push(p);
+      }
     }
   }
 
@@ -165,9 +209,17 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
     if (rfd) paymentIntentId = refundIdToPi.get(rfd) ?? paymentIntentId;
     const claimApp = applicationIdFromClaimDocNo(docNo);
     if (claimApp && !paymentIntentId) {
-      const candidates = paymentsByApplicationId.get(claimApp) || [];
       const debitCents = claimApplicationDebitCents(txn);
-      const picked = pickStripePaymentForClaim(candidates, debitCents);
+      const recipientMid = claimRecipientMemberId(txn);
+      let picked = null;
+      if (recipientMid) {
+        const memberCandidates = paymentsByMemberId.get(recipientMid) || [];
+        picked = pickStripePaymentForClaim(memberCandidates, debitCents);
+      }
+      if (!picked) {
+        const appCandidates = paymentsByApplicationId.get(claimApp) || [];
+        picked = pickStripePaymentForClaim(appCandidates, debitCents);
+      }
       paymentIntentId = picked?.stripe?.paymentIntentId ?? null;
     }
     return { ...txn, paymentIntentId };

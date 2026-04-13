@@ -19,6 +19,17 @@ function isApplicationCreditClaimReceipt(txn) {
   return memo.startsWith("Claim app credit") || /^CLAIM-/i.test(docNo);
 }
 
+/** After `paymentIntentId` is resolved, use it as `reference` so the row is not labeled only as CLAIM-{uuid}. */
+function attachClaimLedgerReference(items) {
+  if (!Array.isArray(items)) return items;
+  return items.map((txn) => {
+    if (!isApplicationCreditClaimReceipt(txn)) return txn;
+    const pi = txn.paymentIntentId;
+    if (pi) return { ...txn, reference: String(pi).trim() };
+    return txn;
+  });
+}
+
 export async function memberStatement(req, res, next) {
   try {
     const { memberId } = req.params;
@@ -36,7 +47,12 @@ export async function memberStatement(req, res, next) {
 
     // Filter member-facing GL; category-change rows stay as stored (Invoice + Adjustment)
     const txns = consolidateCategoryChanges(allTxns);
-    const txnsWithTypes = await attachTxTypesToLedgerItems(txns);
+    const tenantId = req.tenantId || req.ctx?.tenantId;
+    const withPi = tenantId
+      ? await attachPaymentIntentIdsToLedgerItems(txns, tenantId)
+      : txns.map((t) => ({ ...t, paymentIntentId: null }));
+    const withClaimRef = attachClaimLedgerReference(withPi);
+    const txnsWithTypes = await attachTxTypesToLedgerItems(withClaimRef);
 
     // Publish report generated event
     await publishDomainEvent(
@@ -507,7 +523,8 @@ export async function memberLedger(req, res, next) {
       consolidatedItems,
       tenantId
     );
-    const withTxType = await attachTxTypesToLedgerItems(withPaymentIntent);
+    const withClaimRef = attachClaimLedgerReference(withPaymentIntent);
+    const withTxType = await attachTxTypesToLedgerItems(withClaimRef);
 
     const view =
       String(req.query.view || "simple").toLowerCase() === "full"
