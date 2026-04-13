@@ -6,7 +6,10 @@ import Payment, {
 import Refund, { zCreateRefund } from "../models/refund.model.js";
 import { AppError } from "../errors/AppError.js";
 import { getStripe } from "../lib/stripe.js";
-import { assertRefundWithinCredit } from "./refundCredit.service.js";
+import {
+  assertRefundWithinCredit,
+  getClaimRecipientMemberIdForApplication,
+} from "./refundCredit.service.js";
 
 function ensureIntegerCents(value) {
   if (!Number.isInteger(value)) {
@@ -1431,7 +1434,7 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
     }
   }
 
-  const memberId =
+  let memberId =
     payment.memberId ||
     metadataObj.memberId ||
     metadataObj.member_id ||
@@ -1441,6 +1444,10 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
     metadataObj.applicationId ||
     metadataObj.application_id ||
     null;
+
+  if (!memberId && applicationId) {
+    memberId = await getClaimRecipientMemberIdForApplication(applicationId);
+  }
 
   if (!memberId && !applicationId) {
     logger.warn(

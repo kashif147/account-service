@@ -1,4 +1,5 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
+import GL from "../models/glTransaction.model.js";
 import { AppError } from "../errors/AppError.js";
 
 const BUCKETS = ["arrears", "current", "advance"];
@@ -38,6 +39,55 @@ export function matBalMemberKeyFromPayment(payment) {
   return null;
 }
 
+/** 2020 credit leg on a CLAIM-{applicationId} journal (member receiving app credit). */
+function memberIdFromClaimJournal(txn) {
+  if (!txn?.entries?.length) return null;
+  for (const e of txn.entries) {
+    if (e.accountCode !== "2020" || e.dc !== "C" || !e.memberId) continue;
+    const mid = String(e.memberId).trim();
+    if (mid && !mid.toLowerCase().startsWith("app:")) return mid;
+  }
+  return null;
+}
+
+/**
+ * After approval, app credit is moved to this member via CLAIM-{applicationId} GL.
+ * Used for refund credit checks and refund 2020 targeting when Payment still only has applicationId.
+ */
+export async function getClaimRecipientMemberIdForApplication(applicationId) {
+  if (!applicationId) return null;
+  const claimTxn = await GL.findOne({ docNo: `CLAIM-${applicationId}` })
+    .select({ entries: 1 })
+    .lean();
+  return memberIdFromClaimJournal(claimTxn);
+}
+
+function metadataObject(payment) {
+  if (!payment.metadata) return {};
+  if (payment.metadata instanceof Map) {
+    return Object.fromEntries(payment.metadata);
+  }
+  if (typeof payment.metadata === "object") {
+    return payment.metadata;
+  }
+  return {};
+}
+
+/**
+ * Application id for correlating with CLAIM-* GL, even when matBal key prefers memberId.
+ */
+function applicationIdForClaimLookup(payment, resolved) {
+  if (resolved?.applicationId) return resolved.applicationId;
+  if (resolved?.key?.startsWith("app:")) return resolved.key.slice(4);
+  const meta = metadataObject(payment);
+  return (
+    payment.applicationId ||
+    meta.applicationId ||
+    meta.application_id ||
+    null
+  );
+}
+
 /**
  * Available credit on 2020 for the journal year (cents). MatBal: amount &lt; 0 means credit.
  * @param {string} memberKey - memberId or `app:${applicationId}`
@@ -72,10 +122,23 @@ export async function assertRefundWithinCredit(
       "memberId or applicationId required on payment to verify credit for refund"
     );
   }
-  const available = await getAvailableCredit2020ForKey(
+  let available = await getAvailableCredit2020ForKey(
     resolved.key,
     journalYear
   );
+
+  const appId = applicationIdForClaimLookup(payment, resolved);
+  if (appId) {
+    const claimMemberId = await getClaimRecipientMemberIdForApplication(appId);
+    if (claimMemberId) {
+      const claimedMemberCredit = await getAvailableCredit2020ForKey(
+        claimMemberId,
+        journalYear
+      );
+      available = Math.max(available, claimedMemberCredit);
+    }
+  }
+
   if (refundCents > available) {
     throw AppError.badRequest("Refund exceeds available credit on account 2020", {
       refundCents,
