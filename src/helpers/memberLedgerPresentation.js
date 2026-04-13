@@ -138,6 +138,7 @@ function buildFeeChangeSimpleRow(invNew, cadj, memberId) {
     entries,
     reference:
       oldCat && newCat ? `Category change — ${oldCat} → ${newCat}` : "Category change",
+    paymentIntentId: null,
   });
 }
 

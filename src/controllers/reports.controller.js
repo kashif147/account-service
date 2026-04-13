@@ -4,6 +4,7 @@ import CoA from "../models/coa.model.js";
 import MatBal from "../models/materializedBalance.model.js";
 import { monthRange, yearRange } from "../helpers/period.js";
 import { simplifyMemberLedgerPresentations } from "../helpers/memberLedgerPresentation.js";
+import { attachPaymentIntentIdsToLedgerItems } from "../helpers/memberLedgerPaymentIntent.js";
 import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
@@ -496,14 +497,20 @@ export async function memberLedger(req, res, next) {
 
     const consolidatedItems = consolidateCategoryChanges(allItems);
 
+    const tenantId = req.tenantId || req.ctx?.tenantId;
+    const withPaymentIntent = await attachPaymentIntentIdsToLedgerItems(
+      consolidatedItems,
+      tenantId
+    );
+
     const view =
       String(req.query.view || "simple").toLowerCase() === "full"
         ? "full"
         : "simple";
     const items =
       view === "full"
-        ? consolidatedItems
-        : simplifyMemberLedgerPresentations(consolidatedItems, memberId);
+        ? withPaymentIntent
+        : simplifyMemberLedgerPresentations(withPaymentIntent, memberId);
 
     res.success({ memberId, view, items });
   } catch (e) {
