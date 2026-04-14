@@ -57,8 +57,12 @@ function memberIdFromClaimJournal(txn) {
 export async function getClaimRecipientMemberIdForApplication(applicationId) {
   if (!applicationId) return null;
   const claimTxn = await GL.findOne({ docNo: `CLAIM-${applicationId}` })
-    .select({ entries: 1 })
+    .select({ claimMemberId: 1, entries: 1 })
     .lean();
+  if (claimTxn?.claimMemberId) {
+    const mid = String(claimTxn.claimMemberId).trim();
+    if (mid && !mid.toLowerCase().startsWith("app:")) return mid;
+  }
   return memberIdFromClaimJournal(claimTxn);
 }
 

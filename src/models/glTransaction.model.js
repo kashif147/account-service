@@ -24,6 +24,8 @@ const GLSchema = new mongoose.Schema(
     memo: { type: String },
     /** App id for claim / traceability; does not replace entry-level memberId for 2020 rollups. */
     sourceApplicationId: { type: String, index: true, sparse: true },
+    /** Cached claim recipient memberId for fast app->member resolution (docType=Claim). */
+    claimMemberId: { type: String, index: true, sparse: true },
     settlement: {
       provider: { type: String }, // Stripe
       payoutId: { type: String }, // Stripe payout id

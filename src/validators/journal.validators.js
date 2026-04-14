@@ -114,9 +114,11 @@ export const claimApplicationCreditRules = [
     .notEmpty()
     .withMessage("applicationId is required"),
   body("memberId")
-    .optional()
     .isString()
-    .withMessage("memberId must be a string if provided"),
+    .withMessage("memberId must be a string")
+    .bail()
+    .notEmpty()
+    .withMessage("memberId is required"),
   // body("amount")
   //   .isFloat({ gt: 0 })
   //   .withMessage("amount must be a positive number"),
