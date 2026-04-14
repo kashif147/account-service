@@ -10,6 +10,7 @@ import {
   assertRefundWithinCredit,
   getClaimRecipientMemberIdForApplication,
 } from "./refundCredit.service.js";
+import { centsToEuros } from "../helpers/money.js";
 
 function ensureIntegerCents(value) {
   if (!Number.isInteger(value)) {
@@ -1352,11 +1353,13 @@ export async function createRefund(input, ctx) {
     );
     const remaining = payment.amount - alreadyRefunded;
     if (refundAmount > remaining) {
+      const remainingRefundableAmount = centsToEuros(remaining);
       throw AppError.badRequest(
-        "Refund exceeds remaining refundable amount on payment",
+        `Refund exceeds remaining refundable amount on payment. Maximum refundable amount is ${remainingRefundableAmount} EUR.`,
         {
           refundCents: refundAmount,
           remainingRefundableCents: remaining,
+          remainingRefundableAmount,
         }
       );
     }
@@ -1492,7 +1495,7 @@ export async function createRefund(input, ctx) {
 /**
  * CoA for the credit leg of a refund (where payout is recognized).
  * - Stripe API refund (no payoutMethod on doc): 1220.
- * - GL-only stripe refund: payoutMethod bank_transfer 1200, cheque 1210, card 1220.
+ * - GL-only stripe refund: payoutMethod bank_transfer 1200, cheque 1210, credit_card 1220.
  * - External: same payoutMethod map; default bank_transfer.
  */
 export function clearingAccountCodeForRefund(refundDoc, payment) {
@@ -1503,13 +1506,13 @@ export function clearingAccountCodeForRefund(refundDoc, payment) {
     const pm = refundDoc?.payoutMethod;
     if (pm === "bank_transfer") return "1200";
     if (pm === "cheque") return "1210";
-    if (pm === "card") return "1220";
+    if (pm === "credit_card") return "1220";
     return "1220";
   }
 
   const pm = refundDoc?.payoutMethod ?? "bank_transfer";
   if (pm === "cheque") return "1210";
-  if (pm === "card") return "1220";
+  if (pm === "credit_card") return "1220";
   return "1200";
 }
 

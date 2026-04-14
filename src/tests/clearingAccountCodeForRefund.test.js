@@ -23,9 +23,12 @@ describe("clearingAccountCodeForRefund", () => {
     ).toBe("1210");
   });
 
-  test("stripe GL-only card → 1220", () => {
+  test("stripe GL-only credit_card → 1220", () => {
     expect(
-      clearingAccountCodeForRefund({ mode: "stripe", payoutMethod: "card" }, extPay)
+      clearingAccountCodeForRefund(
+        { mode: "stripe", payoutMethod: "credit_card" },
+        extPay
+      )
     ).toBe("1220");
   });
 
@@ -44,9 +47,12 @@ describe("clearingAccountCodeForRefund", () => {
     ).toBe("1210");
   });
 
-  test("external refund card → 1220", () => {
+  test("external refund credit_card → 1220", () => {
     expect(
-      clearingAccountCodeForRefund({ mode: "external", payoutMethod: "card" }, extPay)
+      clearingAccountCodeForRefund(
+        { mode: "external", payoutMethod: "credit_card" },
+        extPay
+      )
     ).toBe("1220");
   });
 

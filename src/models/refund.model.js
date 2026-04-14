@@ -30,7 +30,7 @@ const RefundSchema = new Schema(
     metadata: { type: Map, of: String },
     payoutMethod: {
       type: String,
-      enum: ["bank_transfer", "cheque", "card"],
+      enum: ["bank_transfer", "cheque", "credit_card"],
       required: false,
     },
     glDocNo: { type: String, sparse: true, index: true },
@@ -73,7 +73,7 @@ export const zCreateRefund = z
       .optional()
       .refine((id) => id === undefined || isObjectId(id), "Invalid paymentId"),
     amount: z.number().int().positive().optional(),
-    payoutMethod: z.enum(["bank_transfer", "cheque", "card"]).optional(),
+    payoutMethod: z.enum(["bank_transfer", "cheque", "credit_card"]).optional(),
     /** Required with applicationId (or alone) for standalone external refunds when paymentId is omitted. */
     memberId: z.string().optional(),
     applicationId: z.string().optional(),
@@ -105,7 +105,7 @@ export const zCreateRefund = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message:
-            "payoutMethod is required for GL-only stripe refunds: bank_transfer (1200), cheque (1210), or card (1220)",
+            "payoutMethod is required for GL-only stripe refunds: bank_transfer (1200), cheque (1210), or credit_card (1220)",
           path: ["payoutMethod"],
         });
       }
