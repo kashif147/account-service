@@ -157,6 +157,7 @@ export async function refundsList(req, res, next) {
             note: 1,
             metadata: 1,
             memberId: 1,
+            applicationId: 1,
             createdAt: 1,
             glDocNo: 1,
             stripe: 1,
@@ -195,10 +196,17 @@ export async function refundsList(req, res, next) {
     const refunds = rows.map((row) => {
       const payment = row.payment || {};
       const gl = row.gl || {};
+      const glApplicationId =
+        gl.entries?.find((entry) => entry.applicationId)?.applicationId || null;
       const memberNo =
         row.memberId ||
         payment.memberId ||
         gl.entries?.find((entry) => entry.memberId)?.memberId ||
+        null;
+      const applicationNo =
+        row.applicationId ||
+        payment.applicationId ||
+        glApplicationId ||
         null;
       const rawCreatedBy =
         getMapValue(row.metadata, "createdBy") ||
@@ -211,6 +219,7 @@ export async function refundsList(req, res, next) {
         amount: row.amount ?? 0,
         refundType: row.mode || null,
         memberNo,
+        applicationNo,
         memo: row.note || gl.memo || null,
         createdBy: rawCreatedBy ? userMap.get(rawCreatedBy) || rawCreatedBy : null,
         createdAt: row.createdAt || null,
