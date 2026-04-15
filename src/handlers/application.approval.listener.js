@@ -8,6 +8,8 @@ import CoA from "../models/coa.model.js";
 import Product from "../models/product.model.js";
 import Pricing from "../models/pricing.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
+import Payment from "../models/payment.model.js";
+import Refund from "../models/refund.model.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 
 /**
@@ -41,6 +43,62 @@ function laterIsoDate(isoA, isoB) {
   const a = toIsoDateOnly(isoA) || "";
   const b = toIsoDateOnly(isoB) || "";
   return a > b ? a : b;
+}
+
+/**
+ * Backfill refunds created against application credit so they follow the approved member.
+ * This mirrors CLAIM transfer semantics for downstream reporting.
+ */
+async function associateRefundsWithMember({
+  tenantId,
+  applicationId,
+  memberId,
+}) {
+  if (!tenantId || !applicationId || !memberId) return;
+
+  // 1) Refund docs directly keyed by applicationId.
+  const directResult = await globalDBLimiter(async () => {
+    return Refund.updateMany(
+      {
+        tenantId,
+        applicationId,
+        $or: [{ memberId: { $exists: false } }, { memberId: null }, { memberId: "" }],
+      },
+      { $set: { memberId } }
+    );
+  });
+
+  // 2) Refund docs linked to payments that were keyed by applicationId.
+  const paymentIds = await globalDBLimiter(async () => {
+    const payments = await Payment.find({ tenantId, applicationId })
+      .select("_id")
+      .lean();
+    return payments.map((p) => p._id);
+  });
+
+  let linkedResult = { modifiedCount: 0 };
+  if (paymentIds.length) {
+    linkedResult = await globalDBLimiter(async () => {
+      return Refund.updateMany(
+        {
+          tenantId,
+          paymentId: { $in: paymentIds },
+          $or: [{ memberId: { $exists: false } }, { memberId: null }, { memberId: "" }],
+        },
+        { $set: { memberId } }
+      );
+    });
+  }
+
+  const updatedCount =
+    (directResult?.modifiedCount || 0) + (linkedResult?.modifiedCount || 0);
+
+  if (updatedCount > 0) {
+    logger.info(
+      { tenantId, applicationId, memberId, updatedRefunds: updatedCount },
+      "Associated historical refunds to approved member"
+    );
+  }
 }
 
 /** Collapse spaces and slash spacing so "Short-term / Relief" matches "Short-term/Relief (…)". */
@@ -771,6 +829,9 @@ export async function handleMemberCreated(payload) {
           }
         }
       }
+
+      // Keep historical refunds aligned with member after application approval claim.
+      await associateRefundsWithMember({ tenantId, applicationId, memberId });
     }
   } catch (error) {
     logger.error(

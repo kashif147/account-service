@@ -132,6 +132,38 @@ export const zRecordExternal = z.object({
   metadata: z.record(z.string()).optional(),
 });
 
+export const zAssociateMemberLink = z
+  .object({
+    memberId: z.string().trim().min(1),
+    applicationId: z.string().trim().optional(),
+    paymentIds: z.array(z.string().trim().min(1)).optional(),
+    refundIds: z.array(z.string().trim().min(1)).optional(),
+    includePayments: z.boolean().default(true),
+    includeRefunds: z.boolean().default(true),
+    onlyIfMissingMemberId: z.boolean().default(true),
+  })
+  .superRefine((data, ctx) => {
+    const hasSelector =
+      !!data.applicationId ||
+      (Array.isArray(data.paymentIds) && data.paymentIds.length > 0) ||
+      (Array.isArray(data.refundIds) && data.refundIds.length > 0);
+    if (!hasSelector) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["applicationId"],
+        message:
+          "Provide at least one selector: applicationId, paymentIds, or refundIds",
+      });
+    }
+    if (!data.includePayments && !data.includeRefunds) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["includePayments"],
+        message: "At least one target must be enabled: includePayments/includeRefunds",
+      });
+    }
+  });
+
 export const Payment =
   mongoose.models.Payment || mongoose.model("Payment", PaymentSchema);
 

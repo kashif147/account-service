@@ -9,7 +9,8 @@
     { "key": "authToken", "value": "", "type": "string" },
     { "key": "memberId", "value": "", "type": "string" },
     { "key": "coaId", "value": "", "type": "string" },
-    { "key": "paymentIntentId", "value": "", "type": "string" }
+    { "key": "paymentIntentId", "value": "", "type": "string" },
+    { "key": "applicationId", "value": "", "type": "string" }
   ],
   "item": [
     {
@@ -71,7 +72,8 @@
         { "name": "Member Net Balance", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/net-balance", "host": ["{{baseUrl}}"], "path": ["api", "reports", "member", "{{memberId}}", "net-balance"] } } },
         { "name": "Balances Snapshot", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/balances/snapshot", "host": ["{{baseUrl}}"], "path": ["api", "reports", "balances", "snapshot"] } } },
         { "name": "Month End", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/month-end", "host": ["{{baseUrl}}"], "path": ["api", "reports", "month-end"] } } },
-        { "name": "Year End", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/year-end", "host": ["{{baseUrl}}"], "path": ["api", "reports", "year-end"] } } }
+        { "name": "Year End", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/year-end", "host": ["{{baseUrl}}"], "path": ["api", "reports", "year-end"] } } },
+        { "name": "Refunds List", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/refunds?limit=20&skip=0", "host": ["{{baseUrl}}"], "path": ["api", "reports", "refunds"], "query": [{ "key": "limit", "value": "20" }, { "key": "skip", "value": "0" }] } } }
       ]
     },
     {
@@ -81,7 +83,8 @@
         { "name": "Reconcile Payment", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/reconcile", "host": ["{{baseUrl}}"], "path": ["api", "payments", "reconcile"] }, "body": { "mode": "raw", "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\"\n}" } } },
         { "name": "Get Payment By Stripe ID", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/payments/by-stripe/{{paymentIntentId}}", "host": ["{{baseUrl}}"], "path": ["api", "payments", "by-stripe", "{{paymentIntentId}}"] } } },
         { "name": "List Refunds", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] } } },
-        { "name": "Create Refund", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] }, "body": { "mode": "raw", "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\"\n}" } } }
+        { "name": "Create Refund", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] }, "body": { "mode": "raw", "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\",\n  \"mode\": \"external\",\n  \"memberId\": \"{{memberId}}\",\n  \"applicationId\": \"{{applicationId}}\",\n  \"amount\": 1000,\n  \"payoutMethod\": \"bank_transfer\",\n  \"refNo\": \"MAN-REF-001\",\n  \"memo\": \"Manual refund\",\n  \"refundDate\": \"2026-04-15\"\n}" } } },
+        { "name": "Associate Member (Payments/Refunds)", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/associate-member", "host": ["{{baseUrl}}"], "path": ["api", "payments", "associate-member"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\",\n  \"applicationId\": \"{{applicationId}}\",\n  \"includePayments\": true,\n  \"includeRefunds\": true,\n  \"onlyIfMissingMemberId\": true\n}" } } }
       ]
     },
     {

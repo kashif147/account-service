@@ -11,11 +11,13 @@ import {
   createPaymentRefund,
   listPaymentRefunds,
   listPaymentsBatch,
+  associateMemberLinksForTransactions,
 } from "../controllers/payment.controller.js";
 import {
   zCreateIntent,
   zReconcile,
   zRecordExternal,
+  zAssociateMemberLink,
 } from "../models/payment.model.js";
 import { zCreateRefund, zListRefundsQuery } from "../models/refund.model.js";
 
@@ -45,6 +47,12 @@ router.get("/by-stripe/:paymentIntentId", getPaymentByStripeId);
 
 // Gateway aggregation: list payments by member IDs (subscription service)
 router.post("/batch", listPaymentsBatch);
+
+router.post(
+  "/associate-member",
+  zodValidate(zAssociateMemberLink),
+  associateMemberLinksForTransactions
+);
 
 router.post(
   "/record-external",

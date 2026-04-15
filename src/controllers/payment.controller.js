@@ -7,6 +7,7 @@ import {
   createRefund,
   listRefunds,
   listByMemberIds,
+  associateMemberLinks,
 } from "../services/payments.service.js";
 import { AppError } from "../errors/AppError.js";
 
@@ -64,6 +65,15 @@ export async function createPaymentRefund(req, res, next) {
 export async function listPaymentRefunds(req, res, next) {
   try {
     const result = await listRefunds(req.ctx, req.validated);
+    res.success(result);
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function associateMemberLinksForTransactions(req, res, next) {
+  try {
+    const result = await associateMemberLinks(req.validated, req.ctx);
     res.success(result);
   } catch (e) {
     next(e);

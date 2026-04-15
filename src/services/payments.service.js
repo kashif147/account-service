@@ -46,7 +46,7 @@ async function buildIntentResponse(payment, stripe) {
   if (!clientSecret && payment?.stripe?.paymentIntentId) {
     try {
       const pi = await stripe.paymentIntents.retrieve(
-        payment.stripe.paymentIntentId
+        payment.stripe.paymentIntentId,
       );
       clientSecret = pi?.client_secret;
     } catch (_) {}
@@ -54,7 +54,7 @@ async function buildIntentResponse(payment, stripe) {
   if (!checkoutUrl && payment?.stripe?.checkoutSessionId) {
     try {
       const cs = await stripe.checkout.sessions.retrieve(
-        payment.stripe.checkoutSessionId
+        payment.stripe.checkoutSessionId,
       );
       checkoutUrl = cs?.url;
     } catch (_) {}
@@ -110,7 +110,7 @@ export async function createIntent(input, ctx) {
           idempotencyKey: ctx.idempotencyKey,
           existingStatus: existingByIdem.status,
         },
-        "Found existing payment by idempotency key - returning existing payment"
+        "Found existing payment by idempotency key - returning existing payment",
       );
       return await buildIntentResponse(existingByIdem, stripe);
     }
@@ -155,7 +155,7 @@ export async function createIntent(input, ctx) {
           purpose: parsed.purpose,
           idempotencyKey: ctx.idempotencyKey,
         },
-        "Duplicate payment detected - returning existing payment"
+        "Duplicate payment detected - returning existing payment",
       );
 
       // Ensure the existing payment has memberId/applicationId if they're missing
@@ -182,7 +182,7 @@ export async function createIntent(input, ctx) {
               paymentId: existingDuplicate._id,
               updatedFields: updateFields,
             },
-            "Updated existing payment with memberId/applicationId"
+            "Updated existing payment with memberId/applicationId",
           );
         }
       }
@@ -231,7 +231,7 @@ export async function createIntent(input, ctx) {
           timeSinceCreation:
             Date.now() - new Date(recentPayment.createdAt).getTime(),
         },
-        "Race condition detected - payment created within last 2 minutes, returning existing payment"
+        "Race condition detected - payment created within last 2 minutes, returning existing payment",
       );
 
       // Ensure the existing payment has memberId/applicationId if they're missing
@@ -258,7 +258,7 @@ export async function createIntent(input, ctx) {
               paymentId: recentPayment._id,
               updatedFields: updateFields,
             },
-            "Updated existing payment with memberId/applicationId (race condition)"
+            "Updated existing payment with memberId/applicationId (race condition)",
           );
         }
       }
@@ -312,7 +312,7 @@ export async function createIntent(input, ctx) {
       amount: parsed.amount,
       purpose: parsed.purpose,
     },
-    "Creating Stripe payment intent with idempotency key"
+    "Creating Stripe payment intent with idempotency key",
   );
 
   let stripeResult = {};
@@ -343,7 +343,7 @@ export async function createIntent(input, ctx) {
           process.env.PORTAL_BASE_URL || "https://example.com"
         }/payments/cancel`,
       },
-      { idempotencyKey: stripeIdempotencyKey }
+      { idempotencyKey: stripeIdempotencyKey },
     );
     stripeResult = session;
     status = "requires_action";
@@ -368,7 +368,7 @@ export async function createIntent(input, ctx) {
             checkoutSessionId: stripeIds.checkoutSessionId,
             existingStatus: existingBySession.status,
           },
-          "Payment with this Stripe checkout session ID already exists - returning existing payment"
+          "Payment with this Stripe checkout session ID already exists - returning existing payment",
         );
         return await buildIntentResponse(existingBySession, stripe);
       }
@@ -401,7 +401,7 @@ export async function createIntent(input, ctx) {
             applicationId,
             amount: parsed.amount,
           },
-          "Recent payment with paymentIntentId found - returning existing payment to prevent duplicate Stripe intent"
+          "Recent payment with paymentIntentId found - returning existing payment to prevent duplicate Stripe intent",
         );
 
         // Ensure memberId/applicationId are set
@@ -436,7 +436,7 @@ export async function createIntent(input, ctx) {
           payment_method_types: ["card"],
           metadata: parsed.metadata || {},
         },
-        { idempotencyKey: stripeIdempotencyKey }
+        { idempotencyKey: stripeIdempotencyKey },
       );
     } catch (stripeError) {
       // Handle Stripe idempotency errors - retry without idempotency key
@@ -451,7 +451,7 @@ export async function createIntent(input, ctx) {
             error: stripeError.message,
             clientIdempotencyKey: ctx.idempotencyKey,
           },
-          "Stripe idempotency error - retrying without idempotency key"
+          "Stripe idempotency error - retrying without idempotency key",
         );
         // Retry without idempotency key
         intent = await stripe.paymentIntents.create({
@@ -487,7 +487,7 @@ export async function createIntent(input, ctx) {
             paymentIntentId: stripeIds.paymentIntentId,
             existingStatus: existingByIntent.status,
           },
-          "Payment with this Stripe payment intent ID already exists - returning existing payment"
+          "Payment with this Stripe payment intent ID already exists - returning existing payment",
         );
 
         // Ensure memberId/applicationId are set if missing
@@ -513,7 +513,7 @@ export async function createIntent(input, ctx) {
                 paymentId: existingByIntent._id,
                 updatedFields: updateFields,
               },
-              "Updated existing payment with memberId/applicationId (paymentIntentId check)"
+              "Updated existing payment with memberId/applicationId (paymentIntentId check)",
             );
           }
         }
@@ -541,7 +541,7 @@ export async function createIntent(input, ctx) {
             paymentIntentId: stripeIds.paymentIntentId,
             existingStatus: existingByIntentId.status,
           },
-          "Payment with this paymentIntentId already exists - another request created it first"
+          "Payment with this paymentIntentId already exists - another request created it first",
         );
 
         // Ensure memberId/applicationId are set
@@ -642,7 +642,7 @@ export async function createIntent(input, ctx) {
           tenantId: ctx.tenantId,
           idempotencyKey: ctx.idempotencyKey,
           paymentIntentId: stripeIds.paymentIntentId,
-        }
+        },
       );
     }
     throw e;
@@ -685,7 +685,7 @@ export async function reconcileStripeEvent(input, ctx) {
           existingTenantId: existingPayment.tenantId,
           webhookTenantId: ctx.tenantId,
         },
-        "TenantId mismatch in webhook reconciliation - using existing payment's tenantId"
+        "TenantId mismatch in webhook reconciliation - using existing payment's tenantId",
       );
     }
   }
@@ -700,7 +700,7 @@ export async function reconcileStripeEvent(input, ctx) {
         existingTenantId: existingPayment.tenantId,
         webhookTenantId: ctx.tenantId,
       },
-      "Found existing payment for webhook reconciliation"
+      "Found existing payment for webhook reconciliation",
     );
   }
 
@@ -735,7 +735,7 @@ export async function reconcileStripeEvent(input, ctx) {
   if (!existingPayment && !filter.tenantId) {
     throw AppError.badRequest(
       "tenantId is required for payment reconciliation when no existing payment found",
-      { paymentIntentId: parsed.payment.paymentIntentId }
+      { paymentIntentId: parsed.payment.paymentIntentId },
     );
   }
 
@@ -805,7 +805,7 @@ export async function reconcileStripeEvent(input, ctx) {
           update,
           options,
         },
-        "Payment.findOneAndUpdate returned null - payment not found or not updated"
+        "Payment.findOneAndUpdate returned null - payment not found or not updated",
       );
 
       // Try to find the payment again - maybe it was created by another request
@@ -820,7 +820,7 @@ export async function reconcileStripeEvent(input, ctx) {
             paymentIntentId: parsed.payment.paymentIntentId,
             status: retryPayment.status,
           },
-          "Found payment on retry - payment was created by another request"
+          "Found payment on retry - payment was created by another request",
         );
 
         // Ensure journal entry exists if status is succeeded
@@ -828,9 +828,8 @@ export async function reconcileStripeEvent(input, ctx) {
           parsed.payment.status === "succeeded" &&
           retryPayment.status === "succeeded"
         ) {
-          const GLTransactionModule = await import(
-            "../models/glTransaction.model.js"
-          );
+          const GLTransactionModule =
+            await import("../models/glTransaction.model.js");
           const GLTransaction = GLTransactionModule.default;
           const existingJournal = await GLTransaction.findOne({
             docNo: `RCP-${retryPayment._id}`,
@@ -846,7 +845,7 @@ export async function reconcileStripeEvent(input, ctx) {
                     journalId: journal._id,
                     docNo: journal.docNo,
                   },
-                  "Journal entry created for payment found on retry"
+                  "Journal entry created for payment found on retry",
                 );
               }
             } catch (journalError) {
@@ -855,7 +854,7 @@ export async function reconcileStripeEvent(input, ctx) {
                   paymentId: retryPayment._id,
                   error: journalError.message,
                 },
-                "Failed to create journal entry for payment found on retry"
+                "Failed to create journal entry for payment found on retry",
               );
             }
           }
@@ -865,16 +864,15 @@ export async function reconcileStripeEvent(input, ctx) {
       }
 
       throw new Error(
-        `Failed to update or create payment for paymentIntentId: ${parsed.payment.paymentIntentId}`
+        `Failed to update or create payment for paymentIntentId: ${parsed.payment.paymentIntentId}`,
       );
     }
 
     // Only create journal entry if status is succeeded and we haven't already created one
     if (parsed.payment.status === "succeeded") {
       // Check if journal entry already exists for this payment
-      const GLTransactionModule = await import(
-        "../models/glTransaction.model.js"
-      );
+      const GLTransactionModule =
+        await import("../models/glTransaction.model.js");
       const GLTransaction = GLTransactionModule.default;
       const existingJournal = await GLTransaction.findOne({
         docNo: `RCP-${doc._id}`,
@@ -890,7 +888,7 @@ export async function reconcileStripeEvent(input, ctx) {
             applicationId: doc.applicationId,
             status: doc.status,
           },
-          "Creating journal entry for succeeded payment"
+          "Creating journal entry for succeeded payment",
         );
         try {
           const journal = await postJournalForPayment(doc, ctx);
@@ -901,7 +899,7 @@ export async function reconcileStripeEvent(input, ctx) {
                 journalId: journal._id,
                 docNo: journal.docNo,
               },
-              "Journal entry created successfully for payment"
+              "Journal entry created successfully for payment",
             );
           } else {
             logger.warn(
@@ -910,7 +908,7 @@ export async function reconcileStripeEvent(input, ctx) {
                 memberId: doc.memberId,
                 applicationId: doc.applicationId,
               },
-              "Journal entry creation returned null - missing memberId or applicationId"
+              "Journal entry creation returned null - missing memberId or applicationId",
             );
           }
         } catch (journalError) {
@@ -920,7 +918,7 @@ export async function reconcileStripeEvent(input, ctx) {
               error: journalError.message,
               stack: journalError.stack,
             },
-            "Failed to create journal entry for payment"
+            "Failed to create journal entry for payment",
           );
           // Don't throw - payment is reconciled, journal can be created manually
         }
@@ -932,7 +930,7 @@ export async function reconcileStripeEvent(input, ctx) {
             journalId: existingJournal._id,
             docNo: existingJournal.docNo,
           },
-          "Journal entry already exists for payment"
+          "Journal entry already exists for payment",
         );
       }
     }
@@ -949,7 +947,7 @@ export async function reconcileStripeEvent(input, ctx) {
         existingPayment: existingPayment?._id,
         status: parsed.payment.status,
       },
-      "Error in reconcileStripeEvent"
+      "Error in reconcileStripeEvent",
     );
 
     // If payment already exists and is succeeded, that's okay - just ensure journal entry exists
@@ -964,13 +962,12 @@ export async function reconcileStripeEvent(input, ctx) {
           paymentIntentId: parsed.payment.paymentIntentId,
           existingStatus: existingPayment.status,
         },
-        "Payment already succeeded - ensuring journal entry exists"
+        "Payment already succeeded - ensuring journal entry exists",
       );
 
       // Check if journal entry exists
-      const GLTransactionModule = await import(
-        "../models/glTransaction.model.js"
-      );
+      const GLTransactionModule =
+        await import("../models/glTransaction.model.js");
       const GLTransaction = GLTransactionModule.default;
       const existingJournal = await GLTransaction.findOne({
         docNo: `RCP-${existingPayment._id}`,
@@ -991,7 +988,7 @@ export async function reconcileStripeEvent(input, ctx) {
                   journalId: journal._id,
                   docNo: journal.docNo,
                 },
-                "Journal entry created for already-succeeded payment"
+                "Journal entry created for already-succeeded payment",
               );
             }
           } catch (journalError) {
@@ -1000,7 +997,7 @@ export async function reconcileStripeEvent(input, ctx) {
                 paymentId: fullPayment._id,
                 error: journalError.message,
               },
-              "Failed to create journal entry for already-succeeded payment"
+              "Failed to create journal entry for already-succeeded payment",
             );
           }
         }
@@ -1043,9 +1040,8 @@ export async function reconcileStripeEvent(input, ctx) {
         });
 
         if (parsed.payment.status === "succeeded") {
-          const GLTransactionModule = await import(
-            "../models/glTransaction.model.js"
-          );
+          const GLTransactionModule =
+            await import("../models/glTransaction.model.js");
           const GLTransaction = GLTransactionModule.default;
           const existingJournal = await GLTransaction.findOne({
             docNo: `RCP-${doc._id}`,
@@ -1061,7 +1057,7 @@ export async function reconcileStripeEvent(input, ctx) {
                 applicationId: doc.applicationId,
                 status: doc.status,
               },
-              "Creating journal entry for succeeded payment (duplicate key recovery)"
+              "Creating journal entry for succeeded payment (duplicate key recovery)",
             );
             try {
               const journal = await postJournalForPayment(doc, ctx);
@@ -1072,7 +1068,7 @@ export async function reconcileStripeEvent(input, ctx) {
                     journalId: journal._id,
                     docNo: journal.docNo,
                   },
-                  "Journal entry created successfully for payment (duplicate key recovery)"
+                  "Journal entry created successfully for payment (duplicate key recovery)",
                 );
               } else {
                 logger.warn(
@@ -1081,7 +1077,7 @@ export async function reconcileStripeEvent(input, ctx) {
                     memberId: doc.memberId,
                     applicationId: doc.applicationId,
                   },
-                  "Journal entry creation returned null - missing memberId or applicationId (duplicate key recovery)"
+                  "Journal entry creation returned null - missing memberId or applicationId (duplicate key recovery)",
                 );
               }
             } catch (journalError) {
@@ -1091,7 +1087,7 @@ export async function reconcileStripeEvent(input, ctx) {
                   error: journalError.message,
                   stack: journalError.stack,
                 },
-                "Failed to create journal entry for payment (duplicate key recovery)"
+                "Failed to create journal entry for payment (duplicate key recovery)",
               );
               // Don't throw - payment is reconciled, journal can be created manually
             }
@@ -1118,12 +1114,11 @@ export async function reconcileStripeEvent(input, ctx) {
             paymentId: finalRetry._id,
             paymentIntentId: parsed.payment.paymentIntentId,
           },
-          "Found payment on final retry - ensuring journal entry exists"
+          "Found payment on final retry - ensuring journal entry exists",
         );
 
-        const GLTransactionModule = await import(
-          "../models/glTransaction.model.js"
-        );
+        const GLTransactionModule =
+          await import("../models/glTransaction.model.js");
         const GLTransaction = GLTransactionModule.default;
         const existingJournal = await GLTransaction.findOne({
           docNo: `RCP-${finalRetry._id}`,
@@ -1139,7 +1134,7 @@ export async function reconcileStripeEvent(input, ctx) {
                   journalId: journal._id,
                   docNo: journal.docNo,
                 },
-                "Journal entry created on final retry"
+                "Journal entry created on final retry",
               );
             }
           } catch (journalError) {
@@ -1148,7 +1143,7 @@ export async function reconcileStripeEvent(input, ctx) {
                 paymentId: finalRetry._id,
                 error: journalError.message,
               },
-              "Failed to create journal entry on final retry"
+              "Failed to create journal entry on final retry",
             );
           }
         }
@@ -1166,7 +1161,7 @@ export async function reconcileStripeEvent(input, ctx) {
         stack: error.stack,
         paymentIntentId: parsed.payment.paymentIntentId,
       },
-      "reconcileStripeEvent failed - payment may need manual reconciliation"
+      "reconcileStripeEvent failed - payment may need manual reconciliation",
     );
 
     // Return success to prevent webhook retries
@@ -1268,23 +1263,23 @@ async function applyRefundGlAndUpdateDoc(refundDoc, payment, ctx) {
     if (journal?.docNo) {
       await Refund.updateOne(
         { _id: refundDoc._id },
-        { $set: { glDocNo: journal.docNo, glStatus: "posted" } }
+        { $set: { glDocNo: journal.docNo, glStatus: "posted" } },
       );
       return { glPosted: true, glDocNo: journal.docNo };
     }
     await Refund.updateOne(
       { _id: refundDoc._id },
-      { $set: { glStatus: "gl_failed" } }
+      { $set: { glStatus: "gl_failed" } },
     );
     return { glPosted: false, glDocNo: null };
   } catch (err) {
     logger.error(
       { err, docNo, refundId: String(refundDoc._id) },
-      "postJournalForRefund failed"
+      "postJournalForRefund failed",
     );
     await Refund.updateOne(
       { _id: refundDoc._id },
-      { $set: { glStatus: "gl_failed" } }
+      { $set: { glStatus: "gl_failed" } },
     ).catch(() => {});
     return { glPosted: false, glDocNo: null };
   }
@@ -1303,7 +1298,8 @@ function paymentLikeForRefund(parsed, payment) {
     parsed.metadata && Object.keys(parsed.metadata).length
       ? new Map(Object.entries(parsed.metadata))
       : new Map();
-  if (parsed.memberId && !meta.has("memberId")) meta.set("memberId", parsed.memberId);
+  if (parsed.memberId && !meta.has("memberId"))
+    meta.set("memberId", parsed.memberId);
   if (parsed.applicationId && !meta.has("applicationId"))
     meta.set("applicationId", parsed.applicationId);
   return {
@@ -1334,10 +1330,14 @@ export async function createRefund(input, ctx) {
   }
   if (payment) {
     if (parsed.mode === "stripe" && payment.mode !== "stripe") {
-      throw AppError.badRequest("Stripe refund requires a Stripe payment record");
+      throw AppError.badRequest(
+        "Stripe refund requires a Stripe payment record",
+      );
     }
     if (parsed.mode === "external" && payment.mode !== "external") {
-      throw AppError.badRequest("External refund requires an external payment record");
+      throw AppError.badRequest(
+        "External refund requires an external payment record",
+      );
     }
     assertPaymentAllowsRefund(payment);
   }
@@ -1349,7 +1349,7 @@ export async function createRefund(input, ctx) {
   if (payment) {
     const alreadyRefunded = await sumRefundedForPayment(
       ctx.tenantId,
-      payment._id
+      payment._id,
     );
     const remaining = payment.amount - alreadyRefunded;
     if (refundAmount > remaining) {
@@ -1360,7 +1360,7 @@ export async function createRefund(input, ctx) {
           refundCents: refundAmount,
           remainingRefundableCents: remaining,
           remainingRefundableAmount,
-        }
+        },
       );
     }
   }
@@ -1395,7 +1395,7 @@ export async function createRefund(input, ctx) {
           amount: refundAmount,
           metadata: parsed.metadata || {},
         },
-        { idempotencyKey: ctx.idempotencyKey || undefined }
+        { idempotencyKey: ctx.idempotencyKey || undefined },
       );
       stripeRefundId = refund.id;
       stripeChargeId = refund.charge || stripeChargeId;
@@ -1414,7 +1414,9 @@ export async function createRefund(input, ctx) {
       stripe: {
         ...(stripeRefundId && { refundId: stripeRefundId }),
         ...(stripeChargeId && { chargeId: stripeChargeId }),
-        ...(paymentIntentForRecord && { paymentIntentId: paymentIntentForRecord }),
+        ...(paymentIntentForRecord && {
+          paymentIntentId: paymentIntentForRecord,
+        }),
       },
       memo: parsed.memo,
       ...(parsed.payoutMethod ? { payoutMethod: parsed.payoutMethod } : {}),
@@ -1430,13 +1432,13 @@ export async function createRefund(input, ctx) {
           status: newStatus,
           "audit.updatedBy": ctx.userId || ctx.memberId || "system",
         },
-      }
+      },
     );
 
     const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
       refundDoc,
       payment,
-      ctx
+      ctx,
     );
 
     return {
@@ -1474,14 +1476,14 @@ export async function createRefund(input, ctx) {
           status: newStatus,
           "audit.updatedBy": ctx.userId || ctx.memberId || "system",
         },
-      }
+      },
     );
   }
 
   const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
     refundDoc,
     paymentLike,
-    ctx
+    ctx,
   );
 
   return {
@@ -1522,9 +1524,8 @@ export function clearingAccountCodeForRefund(refundDoc, payment) {
  * Idempotent docNo RFD-{refundId}; postBalancedJournal also dedupes by docNo.
  */
 export async function postJournalForRefund(refundDoc, payment, _ctx) {
-  const { postBalancedJournal } = await import(
-    "../controllers/journal.controller.js"
-  );
+  const { postBalancedJournal } =
+    await import("../controllers/journal.controller.js");
   const logger = (await import("../config/logger.js")).default;
   const GLTransaction = (await import("../models/glTransaction.model.js"))
     .default;
@@ -1564,7 +1565,7 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
         refundId: refundDoc._id,
         paymentId: payment?._id,
       },
-      "Skipping refund journal — memberId or applicationId required"
+      "Skipping refund journal — memberId or applicationId required",
     );
     return null;
   }
@@ -1578,10 +1579,7 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
   if (memberId) entry2020.memberId = memberId;
   else entry2020.applicationId = applicationId;
 
-  const lines = [
-    entry2020,
-    { accountCode: clearingCode, dc: "C", amount },
-  ];
+  const lines = [entry2020, { accountCode: clearingCode, dc: "C", amount }];
 
   const docNo = `RFD-${refundDoc._id}`;
   const existing = await GLTransaction.findOne({ docNo }).lean();
@@ -1590,7 +1588,8 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
   const journalDate = refundDoc.refundDate
     ? new Date(refundDoc.refundDate)
     : new Date();
-  const refNoStr = refundDoc.refNo != null ? String(refundDoc.refNo).trim() : "";
+  const refNoStr =
+    refundDoc.refNo != null ? String(refundDoc.refNo).trim() : "";
   const memoStr = refundDoc.memo != null ? String(refundDoc.memo).trim() : "";
   const reference = refNoStr || undefined;
   const memo =
@@ -1614,9 +1613,8 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
 
 export async function postJournalForPayment(payment, ctx) {
   // Import required modules
-  const { postBalancedJournal } = await import(
-    "../controllers/journal.controller.js"
-  );
+  const { postBalancedJournal } =
+    await import("../controllers/journal.controller.js");
   const { stripeFeeBreakdown } = await import("../helpers/fees.js");
   const logger = (await import("../config/logger.js")).default;
 
@@ -1633,7 +1631,7 @@ export async function postJournalForPayment(payment, ctx) {
       memberId: payment.memberId,
       applicationId: payment.applicationId,
     },
-    "postJournalForPayment called"
+    "postJournalForPayment called",
   );
 
   // Determine clearing code based on payment method
@@ -1676,7 +1674,7 @@ export async function postJournalForPayment(payment, ctx) {
         applicationId: payment.applicationId,
         metadata: metadataObj,
       },
-      "Skipping journal entry - memberId or applicationId required"
+      "Skipping journal entry - memberId or applicationId required",
     );
     return null;
   }
@@ -1725,8 +1723,8 @@ export async function postJournalForPayment(payment, ctx) {
   const memo = applicationId
     ? `Receipt (app ${applicationId})`
     : memberId
-    ? `Receipt (member ${memberId})`
-    : "Receipt";
+      ? `Receipt (member ${memberId})`
+      : "Receipt";
 
   // Create journal entry using the exported function
   // Note: postBalancedJournal needs to be exported from journal.controller.js
@@ -1800,6 +1798,145 @@ export async function listByMemberIds(memberIds, ctx, options = {}) {
   return payments;
 }
 
+export async function associateMemberLinks(input, ctx) {
+  const {
+    memberId,
+    applicationId,
+    paymentIds = [],
+    refundIds = [],
+    includePayments = true,
+    includeRefunds = true,
+    onlyIfMissingMemberId = true,
+  } = input;
+
+  const tenantId = ctx.tenantId;
+  const paymentIdSet = new Set(paymentIds.map((id) => String(id)));
+
+  // Add payment ids discovered from applicationId.
+  if (applicationId) {
+    const appPaymentIds = await Payment.find({ tenantId, applicationId })
+      .select("_id")
+      .lean();
+    for (const p of appPaymentIds) paymentIdSet.add(String(p._id));
+  }
+
+  // Add payment ids discovered from explicit refundIds.
+  if (refundIds.length) {
+    const linkedRefunds = await Refund.find({
+      tenantId,
+      _id: { $in: refundIds },
+      paymentId: { $exists: true, $ne: null },
+    })
+      .select("paymentId")
+      .lean();
+    for (const r of linkedRefunds) paymentIdSet.add(String(r.paymentId));
+  }
+
+  const targetPaymentIds = [...paymentIdSet];
+
+  let paymentsMatched = 0;
+  let paymentsUpdated = 0;
+  let refundsMatched = 0;
+  let refundsUpdated = 0;
+
+  if (includePayments && targetPaymentIds.length) {
+    if (applicationId) {
+      await Payment.updateMany(
+        {
+          tenantId,
+          _id: { $in: targetPaymentIds },
+          $or: [
+            { applicationId: { $exists: false } },
+            { applicationId: null },
+            { applicationId: "" },
+          ],
+        },
+        { $set: { applicationId } }
+      );
+    }
+    const paymentFilter = { tenantId, _id: { $in: targetPaymentIds } };
+    if (onlyIfMissingMemberId) {
+      paymentFilter.$or = [
+        { memberId: { $exists: false } },
+        { memberId: null },
+        { memberId: "" },
+      ];
+    }
+    const result = await Payment.updateMany(paymentFilter, { $set: { memberId } });
+    paymentsMatched = result.matchedCount || 0;
+    paymentsUpdated = result.modifiedCount || 0;
+  }
+
+  if (includeRefunds) {
+    const refundOr = [];
+    if (applicationId) refundOr.push({ applicationId });
+    if (refundIds.length) refundOr.push({ _id: { $in: refundIds } });
+    if (targetPaymentIds.length) refundOr.push({ paymentId: { $in: targetPaymentIds } });
+
+    if (refundOr.length) {
+      if (applicationId) {
+        await Refund.updateMany(
+          {
+            tenantId,
+            $or: refundOr,
+            $and: [
+              {
+                $or: [
+                  { applicationId: { $exists: false } },
+                  { applicationId: null },
+                  { applicationId: "" },
+                ],
+              },
+            ],
+          },
+          { $set: { applicationId } }
+        );
+      }
+      const refundFilter = { tenantId, $or: refundOr };
+      if (onlyIfMissingMemberId) {
+        refundFilter.$and = [
+          {
+            $or: [
+              { memberId: { $exists: false } },
+              { memberId: null },
+              { memberId: "" },
+            ],
+          },
+        ];
+      }
+      const result = await Refund.updateMany(refundFilter, { $set: { memberId } });
+      refundsMatched = result.matchedCount || 0;
+      refundsUpdated = result.modifiedCount || 0;
+    }
+  }
+
+  return {
+    ok: true,
+    selectors: {
+      applicationId: applicationId || null,
+      paymentIds: paymentIds.length,
+      refundIds: refundIds.length,
+    },
+    includePayments,
+    includeRefunds,
+    onlyIfMissingMemberId,
+    memberId,
+    payments: {
+      targetedBySelectors: targetPaymentIds.length,
+      matched: paymentsMatched,
+      updated: paymentsUpdated,
+    },
+    refunds: {
+      matched: refundsMatched,
+      updated: refundsUpdated,
+    },
+    glTransactions: {
+      updated: 0,
+      note: "No GL transactions mutated; ledger remains immutable for audit safety",
+    },
+  };
+}
+
 export default {
   createIntent,
   findByStripePaymentIntent,
@@ -1811,4 +1948,5 @@ export default {
   clearingAccountCodeForRefund,
   listRefunds,
   listByMemberIds,
+  associateMemberLinks,
 };
