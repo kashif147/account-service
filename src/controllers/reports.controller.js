@@ -154,7 +154,9 @@ export async function refundsList(req, res, next) {
             amount: 1,
             mode: 1,
             payoutMethod: 1,
+            refNo: 1,
             refundDate: 1,
+            memo: 1,
             note: 1,
             metadata: 1,
             memberId: 1,
@@ -215,14 +217,14 @@ export async function refundsList(req, res, next) {
         null;
       return {
         refundId: row.stripe?.refundId || String(row._id),
-        refNo: row.glDocNo || gl.docNo || null,
+        refNo: row.refNo || row.glDocNo || gl.docNo || null,
         refundDate: row.refundDate || null,
         amount: row.amount ?? 0,
         refundType: row.payoutMethod || null,
         refundSource: row.mode || null,
         memberNo,
         applicationNo,
-        memo: row.note || gl.memo || null,
+        memo: row.memo || row.note || gl.memo || null,
         createdBy: rawCreatedBy ? userMap.get(rawCreatedBy) || rawCreatedBy : null,
         createdAt: row.createdAt || null,
       };

@@ -1205,7 +1205,7 @@ export async function recordExternal(input, ctx) {
     mode: "external",
     amount: parsed.amount,
     currency: parsed.currency,
-    reason: parsed.reason,
+    refNo: parsed.refNo,
     metadata: parsed.metadata || {},
   });
   return { ok: true, refundId: refund._id.toString() };
@@ -1393,7 +1393,6 @@ export async function createRefund(input, ctx) {
           charge: parsed.chargeId,
           payment_intent: piFromRequest,
           amount: refundAmount,
-          reason: parsed.reason,
           metadata: parsed.metadata || {},
         },
         { idempotencyKey: ctx.idempotencyKey || undefined }
@@ -1411,13 +1410,13 @@ export async function createRefund(input, ctx) {
       amount: refundAmount,
       currency: payment.currency,
       refundDate: refundBusinessDate,
-      reason: parsed.reason,
+      refNo: parsed.refNo,
       stripe: {
         ...(stripeRefundId && { refundId: stripeRefundId }),
         ...(stripeChargeId && { chargeId: stripeChargeId }),
         ...(paymentIntentForRecord && { paymentIntentId: paymentIntentForRecord }),
       },
-      note: parsed.note,
+      memo: parsed.memo,
       ...(parsed.payoutMethod ? { payoutMethod: parsed.payoutMethod } : {}),
       ...(meta && { metadata: meta }),
     });
@@ -1459,8 +1458,8 @@ export async function createRefund(input, ctx) {
     amount: refundAmount,
     currency: payment?.currency ?? parsed.currency ?? "eur",
     refundDate: refundBusinessDate,
-    reason: parsed.reason,
-    note: parsed.note,
+    refNo: parsed.refNo,
+    memo: parsed.memo,
     payoutMethod: parsed.payoutMethod ?? "bank_transfer",
     ...(meta && { metadata: meta }),
   });
@@ -1591,13 +1590,12 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
   const journalDate = refundDoc.refundDate
     ? new Date(refundDoc.refundDate)
     : new Date();
-  const reasonStr =
-    refundDoc.reason != null ? String(refundDoc.reason).trim() : "";
-  const noteStr = refundDoc.note != null ? String(refundDoc.note).trim() : "";
-  const reference = reasonStr || undefined;
+  const refNoStr = refundDoc.refNo != null ? String(refundDoc.refNo).trim() : "";
+  const memoStr = refundDoc.memo != null ? String(refundDoc.memo).trim() : "";
+  const reference = refNoStr || undefined;
   const memo =
-    noteStr !== ""
-      ? noteStr
+    memoStr !== ""
+      ? memoStr
       : memberId
         ? `Refund (member ${memberId})`
         : applicationId

@@ -22,11 +22,11 @@ const RefundSchema = new Schema(
     mode: { type: String, enum: ["stripe", "external"], required: true },
     amount: { type: Number, required: true, min: 0 },
     currency: { type: String, required: true },
-    reason: { type: String },
+    refNo: { type: String },
     /** Business date of the refund (GL journal date); defaults to request time if omitted. */
     refundDate: { type: Date },
     stripe: { type: StripeRefundSubSchema, default: {} },
-    note: { type: String },
+    memo: { type: String },
     metadata: { type: Map, of: String },
     payoutMethod: {
       type: String,
@@ -84,8 +84,8 @@ export const zCreateRefund = z
       .trim()
       .optional()
       .refine((s) => !s || !Number.isNaN(Date.parse(s)), "Invalid refundDate"),
-    reason: z.string().optional(),
-    note: z.string().optional(),
+    refNo: z.string().optional(),
+    memo: z.string().optional(),
     metadata: z.record(z.string()).optional(),
   })
   .superRefine((data, ctx) => {
