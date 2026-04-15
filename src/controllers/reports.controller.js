@@ -2,6 +2,8 @@ import GL from "../models/glTransaction.model.js";
 import Balance from "../models/balance.model.js";
 import CoA from "../models/coa.model.js";
 import MatBal from "../models/materializedBalance.model.js";
+import Refund from "../models/refund.model.js";
+import User from "../models/user.model.js";
 import { monthRange, yearRange } from "../helpers/period.js";
 import { simplifyMemberLedgerPresentations } from "../helpers/memberLedgerPresentation.js";
 import { attachPaymentIntentIdsToLedgerItems } from "../helpers/memberLedgerPaymentIntent.js";
@@ -84,6 +86,145 @@ export async function memberStatement(req, res, next) {
       memberId: req.params.memberId,
       error: e.message,
     });
+    next(e);
+  }
+}
+
+function getMapValue(mapLike, key) {
+  if (!mapLike) return null;
+  if (typeof mapLike.get === "function") return mapLike.get(key) ?? null;
+  if (typeof mapLike === "object") return mapLike[key] ?? null;
+  return null;
+}
+
+function normalizeDateRange(from, to) {
+  const date = {};
+  if (from) {
+    const fromDate = new Date(from);
+    if (!Number.isNaN(fromDate.getTime())) date.$gte = fromDate;
+  }
+  if (to) {
+    const toDate = new Date(to);
+    if (!Number.isNaN(toDate.getTime())) date.$lte = toDate;
+  }
+  return Object.keys(date).length ? date : null;
+}
+
+export async function refundsList(req, res, next) {
+  try {
+    const tenantId = req.tenantId || req.ctx?.tenantId;
+    const limit = Math.min(Math.max(parseInt(req.query.limit ?? "20", 10) || 20, 1), 100);
+    const skip = Math.max(parseInt(req.query.skip ?? "0", 10) || 0, 0);
+    const mode = req.query.mode;
+    const memberId = req.query.memberId;
+    const from = req.query.from;
+    const to = req.query.to;
+
+    const match = { tenantId };
+    if (mode) match.mode = mode;
+    if (memberId) match.memberId = memberId;
+    const dateRange = normalizeDateRange(from, to);
+    if (dateRange) match.refundDate = dateRange;
+
+    const [rows, total] = await Promise.all([
+      Refund.aggregate([
+        { $match: match },
+        { $sort: { refundDate: -1, createdAt: -1, _id: -1 } },
+        {
+          $lookup: {
+            from: "payments",
+            localField: "paymentId",
+            foreignField: "_id",
+            as: "payment",
+          },
+        },
+        {
+          $lookup: {
+            from: "gltransactions",
+            localField: "glDocNo",
+            foreignField: "docNo",
+            as: "gl",
+          },
+        },
+        {
+          $project: {
+            _id: 1,
+            tenantId: 1,
+            paymentId: 1,
+            amount: 1,
+            mode: 1,
+            refundDate: 1,
+            note: 1,
+            metadata: 1,
+            memberId: 1,
+            createdAt: 1,
+            glDocNo: 1,
+            stripe: 1,
+            payment: { $arrayElemAt: ["$payment", 0] },
+            gl: { $arrayElemAt: ["$gl", 0] },
+          },
+        },
+        { $skip: skip },
+        { $limit: limit },
+      ]),
+      Refund.countDocuments(match),
+    ]);
+
+    const createdByUserIds = Array.from(
+      new Set(
+        rows
+          .map((row) => {
+            const metadataCreatedBy = getMapValue(row.metadata, "createdBy");
+            return metadataCreatedBy || row.payment?.audit?.createdBy || null;
+          })
+          .filter(Boolean)
+      )
+    );
+
+    let userMap = new Map();
+    if (tenantId && createdByUserIds.length) {
+      const users = await User.find({
+        tenantId,
+        userId: { $in: createdByUserIds },
+      })
+        .select("userId userFullName")
+        .lean();
+      userMap = new Map(users.map((u) => [u.userId, u.userFullName || u.userId]));
+    }
+
+    const refunds = rows.map((row) => {
+      const payment = row.payment || {};
+      const gl = row.gl || {};
+      const memberNo =
+        row.memberId ||
+        payment.memberId ||
+        gl.entries?.find((entry) => entry.memberId)?.memberId ||
+        null;
+      const rawCreatedBy =
+        getMapValue(row.metadata, "createdBy") ||
+        payment.audit?.createdBy ||
+        null;
+      return {
+        refundId: row.stripe?.refundId || String(row._id),
+        refNo: row.glDocNo || gl.docNo || null,
+        refundDate: row.refundDate || null,
+        amount: row.amount ?? 0,
+        refundType: row.mode || null,
+        memberNo,
+        memo: row.note || gl.memo || null,
+        createdBy: rawCreatedBy ? userMap.get(rawCreatedBy) || rawCreatedBy : null,
+        createdAt: row.createdAt || null,
+      };
+    });
+
+    res.success({
+      total,
+      limit,
+      skip,
+      hasMore: skip + refunds.length < total,
+      refunds,
+    });
+  } catch (e) {
     next(e);
   }
 }

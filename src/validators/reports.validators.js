@@ -26,3 +26,27 @@ export const memberLedgerRules = [
     .isIn(["simple", "full"])
     .withMessage("view must be simple or full"),
 ];
+
+export const refundsListRules = [
+  query("limit")
+    .optional()
+    .isInt({ min: 1, max: 100 })
+    .withMessage("limit must be between 1 and 100"),
+  query("skip")
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage("skip must be greater than or equal to 0"),
+  query("mode")
+    .optional()
+    .isIn(["stripe", "external"])
+    .withMessage("mode must be stripe or external"),
+  query("memberId").optional().isString().notEmpty(),
+  query("from")
+    .optional()
+    .isISO8601()
+    .withMessage("from must be a valid ISO date"),
+  query("to")
+    .optional()
+    .isISO8601()
+    .withMessage("to must be a valid ISO date"),
+];

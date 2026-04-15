@@ -8,6 +8,7 @@ import {
   memberNetBalance,
   memberSummary,
   memberLedger,
+  refundsList,
 } from "../controllers/reports.controller.js";
 import {
   monthEndRules,
@@ -15,6 +16,7 @@ import {
   balancesAsOfRules,
   memberNetBalanceRules,
   memberLedgerRules,
+  refundsListRules,
 } from "../validators/reports.validators.js";
 import validate from "../middlewares/validate.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
@@ -23,6 +25,15 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 const router = express.Router();
 
 // Reports require authentication and minimum User role
+router.get(
+  "/refunds",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  refundsListRules,
+  validate,
+  refundsList
+);
+
 router.get(
   "/member/:memberId/statement",
   ensureAuthenticated,
