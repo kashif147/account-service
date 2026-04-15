@@ -1406,6 +1406,8 @@ export async function createRefund(input, ctx) {
       tenantId: ctx.tenantId,
       paymentId: payment._id,
       mode: "stripe",
+      ...(parsed.memberId && { memberId: parsed.memberId }),
+      ...(parsed.applicationId && { applicationId: parsed.applicationId }),
       amount: refundAmount,
       currency: payment.currency,
       refundDate: refundBusinessDate,
@@ -1416,7 +1418,7 @@ export async function createRefund(input, ctx) {
         ...(paymentIntentForRecord && { paymentIntentId: paymentIntentForRecord }),
       },
       note: parsed.note,
-      ...(piFromRequest == null ? { payoutMethod: parsed.payoutMethod } : {}),
+      ...(parsed.payoutMethod ? { payoutMethod: parsed.payoutMethod } : {}),
       ...(meta && { metadata: meta }),
     });
 
