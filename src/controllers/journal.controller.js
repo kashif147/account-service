@@ -1,7 +1,9 @@
 // src/controllers/journal.controller.js
+import mongoose from "mongoose";
 import CoA from "../models/coa.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
 import MaterializedBalance from "../models/materializedBalance.model.js";
+import Refund from "../models/refund.model.js";
 import dayjs from "dayjs";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
@@ -45,7 +47,7 @@ async function enrichLines(lines) {
   });
 }
 
-function rollupMemberBalances({ date, entries }) {
+export function rollupMemberBalances({ date, entries }) {
   const year = new Date(date).getFullYear();
   const totals = new Map();
 
@@ -61,6 +63,187 @@ function rollupMemberBalances({ date, entries }) {
   }
 
   return { year, totals };
+}
+
+/** Normalize for comparing application ids stored as string vs ObjectId. */
+function canonicalApplicationId(value) {
+  if (value == null || value === "") return "";
+  const s = String(value).trim();
+  if (mongoose.Types.ObjectId.isValid(s) && String(new mongoose.Types.ObjectId(s)) === s) {
+    return new mongoose.Types.ObjectId(s).toString();
+  }
+  return s;
+}
+
+function applicationIdsEqual(a, b) {
+  const ca = canonicalApplicationId(a);
+  const cb = canonicalApplicationId(b);
+  return ca !== "" && ca === cb;
+}
+
+async function bulkWriteMaterializedRollup(year, totals, sign = 1) {
+  if (!totals?.size) return;
+  const ops = [];
+  for (const [key, amount] of totals.entries()) {
+    const delta = sign * amount;
+    if (!delta) continue;
+    const [memberId, accountCode, bucket] = key.split("|");
+    ops.push({
+      updateOne: {
+        filter: { memberId, accountCode, bucket, year },
+        update: {
+          $inc: { amount: delta },
+          $set: { updatedAt: new Date() },
+        },
+        upsert: true,
+      },
+    });
+  }
+  if (ops.length) await MaterializedBalance.bulkWrite(ops, { ordered: false });
+}
+
+/**
+ * Move Refund journals still keyed by applicationId on 2020 to the approved memberId,
+ * and shift MaterializedBalance from app:{applicationId} to memberId (same deltas as at post time).
+ */
+export async function relinkRefundGlFromApplicationToMember({
+  applicationId,
+  memberId,
+}) {
+  if (!applicationId || !memberId) return { updated: 0 };
+  const appId = String(applicationId).trim();
+  const mid = String(memberId).trim();
+
+  const appIdOrOid = [{ "entries.applicationId": appId }];
+  if (mongoose.Types.ObjectId.isValid(appId)) {
+    try {
+      appIdOrOid.push({
+        "entries.applicationId": new mongoose.Types.ObjectId(appId),
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const candidates = await GLTransaction.find({
+    docType: "Refund",
+    "entries.accountCode": "2020",
+    $or: appIdOrOid,
+  }).lean();
+
+  const txns = candidates.filter((txn) =>
+    (txn.entries || []).some(
+      (e) =>
+        e.accountCode === "2020" && applicationIdsEqual(e.applicationId, appId),
+    ),
+  );
+
+  let updated = 0;
+  for (const txn of txns) {
+    const newEntries = (txn.entries || []).map((e) => {
+      if (e.accountCode === "2020" && applicationIdsEqual(e.applicationId, appId)) {
+        const { applicationId: _drop, ...rest } = e;
+        return { ...rest, memberId: mid };
+      }
+      return e;
+    });
+
+    const same =
+      JSON.stringify(txn.entries) === JSON.stringify(newEntries);
+    if (same) continue;
+
+    const { year, totals: oldTotals } = rollupMemberBalances({
+      date: txn.date,
+      entries: txn.entries,
+    });
+    const { totals: newTotals } = rollupMemberBalances({
+      date: txn.date,
+      entries: newEntries,
+    });
+
+    await bulkWriteMaterializedRollup(year, oldTotals, -1);
+    await bulkWriteMaterializedRollup(year, newTotals, 1);
+
+    await GLTransaction.updateOne(
+      { _id: txn._id },
+      { $set: { entries: newEntries } },
+    );
+    updated += 1;
+  }
+
+  return { updated };
+}
+
+/**
+ * Sync GL Refund rows to Refund.memberId for posted refunds (handles ObjectId/string drift
+ * and cases where application-keyed relink did not match).
+ */
+export async function relinkPostedRefundGlFromRefundDocuments({
+  tenantId,
+  applicationId,
+  memberId,
+}) {
+  if (!tenantId) return { updated: 0 };
+  const q = {
+    tenantId,
+    glStatus: "posted",
+    memberId: { $nin: [null, ""] },
+  };
+  if (memberId != null && String(memberId).trim() !== "") {
+    q.memberId = String(memberId).trim();
+  }
+
+  let refunds = await Refund.find(q)
+    .select({ _id: 1, glDocNo: 1, memberId: 1, applicationId: 1 })
+    .lean();
+
+  if (applicationId != null && String(applicationId).trim() !== "") {
+    const aid = String(applicationId).trim();
+    refunds = refunds.filter((r) => applicationIdsEqual(r.applicationId, aid));
+  }
+
+  let updated = 0;
+  for (const refund of refunds) {
+    const target = String(refund.memberId || "").trim();
+    if (!target) continue;
+    const docNo = refund.glDocNo || `RFD-${refund._id}`;
+    const txn = await GLTransaction.findOne({ docNo }).lean();
+    if (!txn || txn.docType !== "Refund") continue;
+
+    const newEntries = (txn.entries || []).map((e) => {
+      if (e.accountCode !== "2020") return e;
+      const hasApp =
+        e.applicationId != null && String(e.applicationId).trim() !== "";
+      const curMem =
+        e.memberId != null ? String(e.memberId).trim() : "";
+      if (!hasApp && curMem === target) return e;
+      const { applicationId: _drop, memberId: _m, ...rest } = e;
+      return {
+        ...rest,
+        memberId: target,
+        periodBucket: e.periodBucket || "current",
+      };
+    });
+
+    if (JSON.stringify(txn.entries) === JSON.stringify(newEntries)) continue;
+
+    const { year, totals: oldTotals } = rollupMemberBalances({
+      date: txn.date,
+      entries: txn.entries,
+    });
+    const { totals: newTotals } = rollupMemberBalances({
+      date: txn.date,
+      entries: newEntries,
+    });
+
+    await bulkWriteMaterializedRollup(year, oldTotals, -1);
+    await bulkWriteMaterializedRollup(year, newTotals, 1);
+
+    await GLTransaction.updateOne({ _id: txn._id }, { $set: { entries: newEntries } });
+    updated += 1;
+  }
+
+  return { updated };
 }
 
 // Wrapped in global limiter to prevent connection pool exhaustion
@@ -153,23 +336,7 @@ export async function postBalancedJournal({
     });
 
     const { year, totals } = rollupMemberBalances({ date, entries });
-    if (totals.size) {
-      const ops = [];
-      for (const [key, amount] of totals.entries()) {
-        const [memberId, accountCode, bucket] = key.split("|");
-        ops.push({
-          updateOne: {
-            filter: { memberId, accountCode, bucket, year },
-            update: {
-              $inc: { amount },
-              $set: { updatedAt: new Date() },
-            },
-            upsert: true,
-          },
-        });
-      }
-      await MaterializedBalance.bulkWrite(ops, { ordered: false });
-    }
+    await bulkWriteMaterializedRollup(year, totals, 1);
 
     // Publish journal created event
     await publishDomainEvent(

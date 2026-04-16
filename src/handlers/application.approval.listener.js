@@ -2,8 +2,12 @@
 // This creates invoices automatically when applications are approved
 
 import logger from "../config/logger.js";
-import { invoice } from "../controllers/journal.controller.js";
-import { claimApplicationCredit } from "../controllers/journal.controller.js";
+import {
+  invoice,
+  claimApplicationCredit,
+  relinkRefundGlFromApplicationToMember,
+  relinkPostedRefundGlFromRefundDocuments,
+} from "../controllers/journal.controller.js";
 import CoA from "../models/coa.model.js";
 import Product from "../models/product.model.js";
 import Pricing from "../models/pricing.model.js";
@@ -832,6 +836,40 @@ export async function handleMemberCreated(payload) {
 
       // Keep historical refunds aligned with member after application approval claim.
       await associateRefundsWithMember({ tenantId, applicationId, memberId });
+      try {
+        const byApp = await relinkRefundGlFromApplicationToMember({
+          applicationId,
+          memberId,
+        });
+        const byDoc = await relinkPostedRefundGlFromRefundDocuments({
+          tenantId,
+          applicationId,
+          memberId,
+        });
+        const n = (byApp.updated || 0) + (byDoc.updated || 0);
+        if (n > 0) {
+          logger.info(
+            {
+              tenantId,
+              applicationId,
+              memberId,
+              refundGlRelinkedByApplication: byApp.updated,
+              refundGlRelinkedFromRefundDocs: byDoc.updated,
+            },
+            "Relinked refund GL journals and materialized balances to member",
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          {
+            tenantId,
+            applicationId,
+            memberId,
+            error: err.message,
+          },
+          "Failed to relink refund GL / materialized balances to member",
+        );
+      }
     }
   } catch (error) {
     logger.error(
