@@ -11,18 +11,23 @@ async function publishBatchProgressEvent({
   tenantId,
   batchDetailId,
   queuedBy,
+  createdBy,
   payload,
 }) {
   try {
+    const resolvedTenantId = tenantId || null;
+    const targetUserId = queuedBy || createdBy || null;
     await publisher.publish(
       eventType,
       {
         batchDetailId,
-        userId: queuedBy || null,
+        tenantId: resolvedTenantId,
+        userId: targetUserId,
+        createdBy: createdBy || null,
         ...payload,
       },
       {
-        tenantId: tenantId || undefined,
+        tenantId: resolvedTenantId || undefined,
         exchange: "batch.events",
         routingKey: eventType,
         metadata: { service: "account-service", version: "1.0" },
@@ -122,6 +127,7 @@ export async function runBatchProcessing(
       tenantId: tenantId || batch.tenantId || null,
       batchDetailId,
       queuedBy: batch.queuedBy,
+      createdBy: batch.createdBy,
       payload: {
         status: "failed",
         processedTransactions: 0,
@@ -162,7 +168,15 @@ export async function runBatchProcessing(
       const chunk = batchPayments.slice(offset, offset + chunkSize);
       let result;
       try {
-        result = await runProcessBatchPayments(paymentDate, chunk, batch.type);
+        result = await runProcessBatchPayments(
+          paymentDate,
+          chunk,
+          batch.type,
+          {
+            batchName: batch.description || "",
+            referenceNumber: batch.referenceNumber || "",
+          }
+        );
       } catch (err) {
         const errMsg = err.message || String(err);
         logger.error(
@@ -203,6 +217,7 @@ export async function runBatchProcessing(
         tenantId: tenantId || batch.tenantId || null,
         batchDetailId,
         queuedBy: batch.queuedBy,
+        createdBy: batch.createdBy,
         payload: {
           status: "processing_in_progress",
           processedTransactions: totalProcessed,
@@ -230,6 +245,7 @@ export async function runBatchProcessing(
       tenantId: tenantId || batch.tenantId || null,
       batchDetailId,
       queuedBy: batch.queuedBy,
+      createdBy: batch.createdBy,
       payload: {
         status: "processed",
         processedTransactions: totalProcessed,
@@ -266,6 +282,7 @@ export async function runBatchProcessing(
       tenantId: tenantId || batch.tenantId || null,
       batchDetailId,
       queuedBy: batch.queuedBy,
+      createdBy: batch.createdBy,
       payload: {
         status: "failed",
         processedTransactions: totalProcessed,

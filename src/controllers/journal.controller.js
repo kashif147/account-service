@@ -890,7 +890,19 @@ function resolveBatchClearingCode(batchType) {
  * - deduction => 1230
  * - standing order => 1240
  */
-export async function runProcessBatchPayments(paymentDate, batchPayments, batchType) {
+export async function runProcessBatchPayments(
+  paymentDate,
+  batchPayments,
+  batchType,
+  options = {}
+) {
+  const batchName =
+    typeof options.batchName === "string" ? options.batchName.trim() : "";
+  const referenceNumber =
+    typeof options.referenceNumber === "string"
+      ? options.referenceNumber.trim()
+      : "";
+
   if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
     throw AppError.badRequest("batchPayments array is required and must not be empty", {
       batchPayments: batchPayments ?? "missing",
@@ -939,11 +951,16 @@ export async function runProcessBatchPayments(paymentDate, batchPayments, batchT
     ];
 
     try {
+      const memoParts = [];
+      if (batchName) memoParts.push(`Batch: ${batchName}`);
+      if (referenceNumber) memoParts.push(`Ref: ${referenceNumber}`);
+      memoParts.push(`Member: ${String(membershipNumber)} Row: ${rowIndex}`);
+
       const txn = await postBalancedJournal({
         date,
         docType: "Receipt",
         docNo: `batch-${randomUUID()}`,
-        memo: `Batch receipt ${String(membershipNumber)} row ${rowIndex}`,
+        memo: memoParts.join(" | "),
         lines,
         settlement: {
           provider: "batch",
