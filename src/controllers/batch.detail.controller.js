@@ -7,6 +7,7 @@ import { getProfileReadModel } from "../models/profileRead.model.js";
 import * as azureBlob from "../services/azure.blob.service.js";
 import * as batchPaymentProcess from "../services/batch.payment.process.service.js";
 import logger from "../config/logger.js";
+import { publisher } from "../rabbitMQ/index.js";
 
 function escapeRegexMembership(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -769,6 +770,34 @@ export async function processBatchDetail(req, res) {
         },
       }
     );
+
+    try {
+      await publisher.publish(
+        "batch.process.queued.v1",
+        {
+          batchDetailId,
+          tenantId,
+          userId: userId || batch.createdBy || null,
+          createdBy: batch.createdBy || null,
+          batchName: batch.description || "",
+          referenceNumber: batch.referenceNumber || "",
+          description: batch.description || "",
+          totalTransactions: batchPayments.length,
+          status: "queued",
+        },
+        {
+          tenantId: tenantId || undefined,
+          exchange: "batch.events",
+          routingKey: "batch.process.queued.v1",
+          metadata: { service: "account-service", version: "1.0" },
+        }
+      );
+    } catch (err) {
+      logger.warn(
+        { batchDetailId, err: err.message },
+        "[BatchDetail] failed to publish queued event"
+      );
+    }
 
     return res.status(202).json({
       success: true,
