@@ -411,9 +411,21 @@ export async function getAllBatchDetails(req, res) {
     const query = { isDeleted: false };
     if (tenantId) query.tenantId = tenantId;
 
-    if (req.query.type) {
-      if (BATCH_DETAIL_TYPES.includes(req.query.type)) {
-        query.type = req.query.type;
+    const rawTypeFilter = req.query.batchType ?? req.query.type;
+    if (rawTypeFilter) {
+      const normalized = String(rawTypeFilter).trim();
+      const typeAliases = {
+        Deductions: "deduction",
+        deductions: "deduction",
+        DEDUCTIONS: "deduction",
+        "standing order": "Standing Order",
+        "Standing Orders": "Standing Order",
+        StandingOrders: "Standing Order",
+        STANDING_ORDER: "Standing Order",
+      };
+      const resolved = typeAliases[normalized] ?? normalized;
+      if (BATCH_DETAIL_TYPES.includes(resolved)) {
+        query.type = resolved;
       }
     }
 
