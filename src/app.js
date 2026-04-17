@@ -80,6 +80,10 @@ import {
   setupConsumers,
   shutdownEventSystem,
 } from "./rabbitMQ/index.js";
+import {
+  startBatchProcessingCron,
+  stopBatchProcessingCron,
+} from "./services/batch.processing.cron.service.js";
 
 const app = express();
 
@@ -117,10 +121,12 @@ async function initializeEventSystem() {
 
 // Initialize event system on startup
 initializeEventSystem();
+startBatchProcessingCron();
 
 // Graceful shutdown
 process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, shutting down gracefully...");
+  stopBatchProcessingCron();
   if (eventSystemInitialized) {
     await shutdownEventSystem();
   }
@@ -129,6 +135,7 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   logger.info("SIGINT received, shutting down gracefully...");
+  stopBatchProcessingCron();
   if (eventSystemInitialized) {
     await shutdownEventSystem();
   }
@@ -351,12 +358,14 @@ app.use(errorHandler);
 // Graceful shutdown
 process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, shutting down gracefully");
+  stopBatchProcessingCron();
   await shutdownEventSystem();
   process.exit(0);
 });
 
 process.on("SIGINT", async () => {
   logger.info("SIGINT received, shutting down gracefully");
+  stopBatchProcessingCron();
   await shutdownEventSystem();
   process.exit(0);
 });

@@ -44,6 +44,35 @@ const BatchDetailSchema = new mongoose.Schema(
       trim: true,
       default: "pending",
     },
+    queuedBy: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    queuedAt: {
+      type: Date,
+      default: null,
+    },
+    processingStartedAt: {
+      type: Date,
+      default: null,
+    },
+    processingCompletedAt: {
+      type: Date,
+      default: null,
+    },
+    totalTransactions: {
+      type: Number,
+      default: 0,
+    },
+    processedTransactions: {
+      type: Number,
+      default: 0,
+    },
+    failedTransactions: {
+      type: Number,
+      default: 0,
+    },
     referenceNumber: {
       type: String,
       required: true,

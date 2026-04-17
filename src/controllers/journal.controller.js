@@ -874,6 +874,109 @@ export async function runProcessDeductionBatchPayments(paymentDate, batchPayment
   };
 }
 
+function resolveBatchClearingCode(batchType) {
+  const normalized = String(batchType || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "deduction") return "1230";
+  if (normalized === "standing order" || normalized === "standing-order") {
+    return "1240";
+  }
+  return "1230";
+}
+
+/**
+ * Process batch payments with clearing account mapping by batch type.
+ * - deduction => 1230
+ * - standing order => 1240
+ */
+export async function runProcessBatchPayments(paymentDate, batchPayments, batchType) {
+  if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
+    throw AppError.badRequest("batchPayments array is required and must not be empty", {
+      batchPayments: batchPayments ?? "missing",
+    });
+  }
+
+  const date =
+    paymentDate instanceof Date ? paymentDate : new Date(paymentDate);
+  if (Number.isNaN(date.getTime())) {
+    throw AppError.badRequest("paymentDate must be a valid date", { paymentDate });
+  }
+
+  const clearingCode = resolveBatchClearingCode(batchType);
+  const results = [];
+  const errors = [];
+
+  for (let i = 0; i < batchPayments.length; i++) {
+    const row = batchPayments[i];
+    const membershipNumber = row?.membershipNumber ?? row?.fileRow?.membershipNumber;
+    const amount = row?.fileRow?.valueForPeriodSelected ?? row?.valueForPeriodSelected;
+    const rowIndex = row?.fileRow?.rowIndex ?? row?.rowIndex ?? i + 1;
+
+    if (!membershipNumber) {
+      errors.push({ index: i, reason: "membershipNumber missing" });
+      continue;
+    }
+    if (amount == null || Number(amount) <= 0) {
+      errors.push({
+        index: i,
+        membershipNumber,
+        reason: "valueForPeriodSelected missing or not positive",
+      });
+      continue;
+    }
+
+    const amountNum = Number(amount);
+    const lines = [
+      { accountCode: clearingCode, dc: "D", amount: amountNum },
+      {
+        accountCode: "2020",
+        dc: "C",
+        amount: amountNum,
+        periodBucket: "current",
+        memberId: String(membershipNumber),
+      },
+    ];
+
+    try {
+      const txn = await postBalancedJournal({
+        date,
+        docType: "Receipt",
+        docNo: `batch-${randomUUID()}`,
+        memo: `Batch receipt ${String(membershipNumber)} row ${rowIndex}`,
+        lines,
+        settlement: {
+          provider: "batch",
+          status: "PENDING",
+        },
+      });
+      results.push({
+        index: i,
+        rowIndex,
+        membershipNumber,
+        amount: amountNum,
+        clearingCode,
+        docNo: txn.docNo,
+        id: txn._id,
+      });
+    } catch (err) {
+      errors.push({
+        index: i,
+        rowIndex,
+        membershipNumber,
+        reason: err.message || "postBalancedJournal failed",
+      });
+    }
+  }
+
+  return {
+    processed: results.length,
+    failed: errors.length,
+    results,
+    errors: errors.length ? errors : undefined,
+  };
+}
+
 /**
  * Process batch: HTTP entry; body { paymentDate, batchPayments }.
  */

@@ -10,6 +10,7 @@ import {
   resolveBatchException,
   addPaymentToBatch,
   processBatchDetail,
+  getBatchQueueStats,
 } from "../controllers/batch.detail.controller.js";
 
 const router = express.Router();
@@ -32,6 +33,12 @@ router.post(
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   uploadSingleOptional,
   createBatchDetail
+);
+
+router.get(
+  "/queue-stats",
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
+  getBatchQueueStats
 );
 
 router.get(

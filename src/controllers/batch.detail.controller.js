@@ -6,10 +6,6 @@ import User from "../models/user.model.js";
 import { getProfileReadModel } from "../models/profileRead.model.js";
 import * as azureBlob from "../services/azure.blob.service.js";
 import * as batchPaymentProcess from "../services/batch.payment.process.service.js";
-import {
-  publisher,
-  BATCH_PROCESS_EVENTS,
-} from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
 
 function escapeRegexMembership(value) {
@@ -732,6 +728,17 @@ export async function processBatchDetail(req, res) {
         batchStatus: batch.batchStatus,
       });
     }
+    if (
+      batch.batchStatus === "queued" ||
+      batch.batchStatus === "processing" ||
+      batch.batchStatus === "processing_in_progress"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Batch is already queued/being processed",
+        batchStatus: batch.batchStatus,
+      });
+    }
 
     const batchPayments = Array.isArray(batch.batchPayments)
       ? batch.batchPayments
@@ -749,39 +756,23 @@ export async function processBatchDetail(req, res) {
 
     await BatchDetail.updateOne(
       { _id: batchDetailId, isDeleted: false },
-      { $set: { batchStatus: "processing" } }
-    );
-
-    const result = await publisher.publish(
-      BATCH_PROCESS_EVENTS.BATCH_PROCESS_REQUESTED,
       {
-        batchDetailId,
-        tenantId,
-        userId,
-      },
-      {
-        tenantId: tenantId || undefined,
-        exchange: "batch.events",
-        routingKey: BATCH_PROCESS_EVENTS.BATCH_PROCESS_REQUESTED,
-        metadata: { service: "account-service", version: "1.0" },
+        $set: {
+          batchStatus: "queued",
+          queuedBy: userId,
+          queuedAt: new Date(),
+          processingStartedAt: null,
+          processingCompletedAt: null,
+          totalTransactions: batchPayments.length,
+          processedTransactions: 0,
+          failedTransactions: 0,
+        },
       }
     );
 
-    if (!result.success) {
-      await BatchDetail.updateOne(
-        { _id: batchDetailId, isDeleted: false },
-        { $set: { batchStatus: "pending" } }
-      );
-      return res.status(503).json({
-        success: false,
-        message: "Failed to enqueue batch processing. Please try again.",
-        details: result.error,
-      });
-    }
-
     return res.status(202).json({
       success: true,
-      message: "Batch processing started",
+      message: "Batch queued for processing",
       batchId: batchDetailId,
     });
   } catch (error) {
@@ -789,6 +780,67 @@ export async function processBatchDetail(req, res) {
     return res.status(500).json({
       success: false,
       message: error.message || "Failed to start batch processing",
+    });
+  }
+}
+
+export async function getBatchQueueStats(req, res) {
+  try {
+    if (req.user?.userType !== "CRM") {
+      return res.status(403).json({
+        success: false,
+        message: "Only CRM users can access batch queue stats",
+      });
+    }
+
+    const tenantId = req.user?.tenantId || null;
+    const query = { isDeleted: false };
+    if (tenantId) query.tenantId = tenantId;
+
+    const [statusCounts, queueRows, inProgress] = await Promise.all([
+      BatchDetail.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: "$batchStatus",
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      BatchDetail.find({ ...query, batchStatus: "queued" })
+        .sort({ queuedAt: 1, createdAt: 1 })
+        .select(
+          "_id referenceNumber type batchStatus queuedAt totalTransactions processedTransactions failedTransactions"
+        )
+        .lean(),
+      BatchDetail.findOne({ ...query, batchStatus: "processing_in_progress" })
+        .sort({ processingStartedAt: 1, updatedAt: 1 })
+        .select(
+          "_id referenceNumber type batchStatus queuedAt processingStartedAt totalTransactions processedTransactions failedTransactions"
+        )
+        .lean(),
+    ]);
+
+    const countsByStatus = Object.fromEntries(
+      statusCounts.map((x) => [String(x._id || ""), x.count])
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        queued: countsByStatus.queued || 0,
+        processing_in_progress: countsByStatus.processing_in_progress || 0,
+        processed: countsByStatus.processed || 0,
+        failed: countsByStatus.failed || 0,
+        inProgressBatch: inProgress || null,
+        queueOrder: queueRows,
+      },
+    });
+  } catch (error) {
+    logger.error({ err: error.message }, "[BatchDetail] getBatchQueueStats");
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch batch queue stats",
     });
   }
 }
