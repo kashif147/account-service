@@ -12,6 +12,9 @@ async function publishBatchProgressEvent({
   batchDetailId,
   queuedBy,
   createdBy,
+  batchName,
+  referenceNumber,
+  description,
   payload,
 }) {
   try {
@@ -24,6 +27,9 @@ async function publishBatchProgressEvent({
         tenantId: resolvedTenantId,
         userId: targetUserId,
         createdBy: createdBy || null,
+        batchName: batchName || null,
+        referenceNumber: referenceNumber || null,
+        description: description || null,
         ...payload,
       },
       {
@@ -128,6 +134,9 @@ export async function runBatchProcessing(
       batchDetailId,
       queuedBy: batch.queuedBy,
       createdBy: batch.createdBy,
+      batchName: batch.description || "",
+      referenceNumber: batch.referenceNumber || "",
+      description: batch.description || "",
       payload: {
         status: "failed",
         processedTransactions: 0,
@@ -218,6 +227,9 @@ export async function runBatchProcessing(
         batchDetailId,
         queuedBy: batch.queuedBy,
         createdBy: batch.createdBy,
+        batchName: batch.description || "",
+        referenceNumber: batch.referenceNumber || "",
+        description: batch.description || "",
         payload: {
           status: "processing_in_progress",
           processedTransactions: totalProcessed,
@@ -246,6 +258,9 @@ export async function runBatchProcessing(
       batchDetailId,
       queuedBy: batch.queuedBy,
       createdBy: batch.createdBy,
+      batchName: batch.description || "",
+      referenceNumber: batch.referenceNumber || "",
+      description: batch.description || "",
       payload: {
         status: "processed",
         processedTransactions: totalProcessed,
@@ -283,6 +298,9 @@ export async function runBatchProcessing(
       batchDetailId,
       queuedBy: batch.queuedBy,
       createdBy: batch.createdBy,
+      batchName: batch.description || "",
+      referenceNumber: batch.referenceNumber || "",
+      description: batch.description || "",
       payload: {
         status: "failed",
         processedTransactions: totalProcessed,
