@@ -51,10 +51,15 @@ export const creditNoteRules = [
 
 export const writeOffRules = [
   body("date").isISO8601().withMessage("date must be ISO (YYYY-MM-DD)"),
-  body("docNo").isString().notEmpty(),
+  body("docNo")
+    .trim()
+    .isString()
+    .notEmpty()
+    .withMessage("docNo is required"),
   body("memberId").isString().notEmpty(),
   body("amount").isFloat({ gt: 0 }),
-  body("periodBucket").optional().isIn(isBucket)
+  body("periodBucket").optional().isIn(isBucket),
+  body("memo").optional({ values: "null" }).isString()
 ];
 
 export const changeCategoryRules = [

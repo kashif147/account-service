@@ -1110,12 +1110,18 @@ export async function writeOff(req, res, next) {
       memberId,
       amount,
       periodBucket = "current",
+      memo: bodyMemo,
     } = req.body;
+    const userMemo =
+      bodyMemo != null && String(bodyMemo).trim() !== ""
+        ? String(bodyMemo).trim()
+        : "";
+    const memo = userMemo ? `Write off (${userMemo})` : "Write off";
     const out = await postBalancedJournal({
       date,
       docType: "WriteOff",
       docNo,
-      memo: "Bad debt write-off",
+      memo,
       lines: [
         { accountCode: "5200", dc: "D", amount, adjSubType: "writeoff" },
         { accountCode: "1400", dc: "C", amount, memberId, periodBucket },
