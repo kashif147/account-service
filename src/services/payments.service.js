@@ -1346,19 +1346,22 @@ export async function createRefund(input, ctx) {
     payment && parsed.amount == null ? payment.amount : parsed.amount;
   ensureIntegerCents(refundAmount);
 
+  let linkedPaymentRemainingCents;
   if (payment) {
     const alreadyRefunded = await sumRefundedForPayment(
       ctx.tenantId,
       payment._id,
     );
-    const remaining = payment.amount - alreadyRefunded;
-    if (refundAmount > remaining) {
-      const remainingRefundableAmount = centsToEuros(remaining);
+    linkedPaymentRemainingCents = payment.amount - alreadyRefunded;
+    if (refundAmount > linkedPaymentRemainingCents) {
+      const remainingRefundableAmount = centsToEuros(
+        linkedPaymentRemainingCents,
+      );
       throw AppError.badRequest(
         `Refund exceeds remaining refundable amount on payment. Maximum refundable amount is ${remainingRefundableAmount} EUR.`,
         {
           refundCents: refundAmount,
-          remainingRefundableCents: remaining,
+          remainingRefundableCents: linkedPaymentRemainingCents,
           remainingRefundableAmount,
         },
       );
@@ -1368,7 +1371,9 @@ export async function createRefund(input, ctx) {
   const refundBusinessDate = refundDocumentDate(parsed);
   const journalYear = refundBusinessDate.getFullYear();
   const paymentLike = paymentLikeForRefund(parsed, payment);
-  await assertRefundWithinCredit(refundAmount, paymentLike, journalYear);
+  await assertRefundWithinCredit(refundAmount, paymentLike, journalYear, {
+    linkedPaymentRemainingCents,
+  });
 
   const meta =
     parsed.metadata && Object.keys(parsed.metadata).length
@@ -1520,12 +1525,15 @@ export function clearingAccountCodeForRefund(refundDoc, payment) {
 }
 
 /**
- * GL refund: DR 2020 (reduce member credit), CR clearing (mirror receipt).
+ * GL refund: DR member buckets (mirror receipt), CR clearing.
  * Idempotent docNo RFD-{refundId}; postBalancedJournal also dedupes by docNo.
  */
 export async function postJournalForRefund(refundDoc, payment, _ctx) {
   const { postBalancedJournal } =
     await import("../controllers/journal.controller.js");
+  const { buildMemberRefundDebitEntries } = await import(
+    "../helpers/paymentReceiptAllocation.js"
+  );
   const logger = (await import("../config/logger.js")).default;
   const GLTransaction = (await import("../models/glTransaction.model.js"))
     .default;
@@ -1534,7 +1542,7 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
   const clearingCode = clearingAccountCodeForRefund(refundDoc, payment);
 
   let metadataObj = {};
-  if (payment.metadata) {
+  if (payment?.metadata) {
     if (payment.metadata instanceof Map) {
       metadataObj = Object.fromEntries(payment.metadata);
     } else if (typeof payment.metadata === "object") {
@@ -1544,13 +1552,13 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
 
   let memberId =
     refundDoc.memberId ||
-    payment.memberId ||
+    payment?.memberId ||
     metadataObj.memberId ||
     metadataObj.member_id ||
     null;
   const applicationId =
     refundDoc.applicationId ||
-    payment.applicationId ||
+    payment?.applicationId ||
     metadataObj.applicationId ||
     metadataObj.application_id ||
     null;
@@ -1570,24 +1578,43 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
     return null;
   }
 
-  const entry2020 = {
-    accountCode: "2020",
-    dc: "D",
-    amount,
-    periodBucket: "current",
-  };
-  if (memberId) entry2020.memberId = memberId;
-  else entry2020.applicationId = applicationId;
+  const journalDate = refundDoc.refundDate
+    ? new Date(refundDoc.refundDate)
+    : new Date();
 
-  const lines = [entry2020, { accountCode: clearingCode, dc: "C", amount }];
+  /** @type {object[]} */
+  let debitLines;
+  if (memberId) {
+    debitLines = await buildMemberRefundDebitEntries(
+      memberId,
+      amount,
+      journalDate,
+    );
+  } else {
+    debitLines = [
+      {
+        accountCode: "2020",
+        dc: "D",
+        amount,
+        periodBucket: "current",
+        applicationId,
+      },
+    ];
+  }
+
+  if (!debitLines.length) {
+    logger.warn(
+      { refundId: refundDoc._id, memberId, applicationId, amount },
+      "postJournalForRefund: no debit lines built",
+    );
+    return null;
+  }
+
+  const lines = [...debitLines, { accountCode: clearingCode, dc: "C", amount }];
 
   const docNo = `RFD-${refundDoc._id}`;
   const existing = await GLTransaction.findOne({ docNo }).lean();
   if (existing) return existing;
-
-  const journalDate = refundDoc.refundDate
-    ? new Date(refundDoc.refundDate)
-    : new Date();
   const refNoStr =
     refundDoc.refNo != null ? String(refundDoc.refNo).trim() : "";
   const memoStr = refundDoc.memo != null ? String(refundDoc.memo).trim() : "";
@@ -1679,27 +1706,46 @@ export async function postJournalForPayment(payment, ctx) {
     return null;
   }
 
-  // Build entry for account 2020 - prioritize applicationId over memberId
-  // If applicationId exists, use it (payment is for an application, not an approved member)
-  // Only use memberId if applicationId is not present
-  const entry2020 = {
-    accountCode: "2020",
-    dc: "C",
-    amount,
-    periodBucket: "current",
-  };
+  const date = new Date().toISOString().split("T")[0];
+  const docNo = `RCP-${payment._id}`;
 
+  const { buildMemberReceiptCreditEntries } = await import(
+    "../helpers/paymentReceiptAllocation.js"
+  );
+
+  /** @type {object[]} */
+  let creditEntries;
   if (applicationId) {
-    // Prioritize applicationId - this is a payment for an application, not an approved member
-    entry2020.applicationId = applicationId;
+    creditEntries = [
+      {
+        accountCode: "2020",
+        dc: "C",
+        amount,
+        periodBucket: "current",
+        applicationId,
+      },
+    ];
   } else if (memberId) {
-    // Only use memberId if applicationId is not present
-    entry2020.memberId = memberId;
+    creditEntries = await buildMemberReceiptCreditEntries(
+      memberId,
+      amount,
+      date,
+    );
+  } else {
+    creditEntries = [];
+  }
+
+  if (!creditEntries.length) {
+    logger.warn(
+      { paymentId: payment._id, memberId, applicationId },
+      "postJournalForPayment: no credit lines built",
+    );
+    return null;
   }
 
   const lines = [
-    { accountCode: clearingCode, dc: "D", amount }, // Debit clearing account
-    entry2020, // Credit Payment on Account - Member credits (2020)
+    { accountCode: clearingCode, dc: "D", amount },
+    ...creditEntries,
   ];
 
   // Add Stripe fee entries if payment is via Stripe
@@ -1714,10 +1760,6 @@ export async function postJournalForPayment(payment, ctx) {
       status: "PENDING",
     };
   }
-
-  // Generate document number
-  const docNo = `RCP-${payment._id}`;
-  const date = new Date().toISOString().split("T")[0];
 
   // Create receipt memo - prioritize applicationId if present, otherwise use memberId
   const memo = applicationId

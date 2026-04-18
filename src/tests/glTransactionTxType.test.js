@@ -61,4 +61,16 @@ describe("resolveTxTypeAccountCode", () => {
       })
     ).toBeNull();
   });
+
+  test("WriteOff: adjSubType writeoff line → 5200", () => {
+    expect(
+      resolveTxTypeAccountCode({
+        docType: "WriteOff",
+        entries: [
+          { accountCode: "5200", dc: "D", amount: 200, adjSubType: "writeoff" },
+          { accountCode: "1400", dc: "C", amount: 200, memberId: "B1" },
+        ],
+      })
+    ).toBe("5200");
+  });
 });

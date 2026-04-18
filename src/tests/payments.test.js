@@ -88,10 +88,13 @@ describe("Payments API", () => {
     });
     jest.spyOn(CoA, "find").mockReturnValue({
       lean: jest.fn().mockResolvedValue([
+        { code: "1400", description: "Accounts receivable (Members)" },
         { code: "2020", description: "Member credits" },
         { code: "1200", description: "Bank" },
         { code: "1220", description: "Card Gateway Clearing" },
         { code: "1210", description: "Undeposited Cheques" },
+        { code: "5100", description: "Payment processing fees" },
+        { code: "1200", description: "Bank" },
       ]),
     });
 
@@ -339,15 +342,24 @@ describe("Payments API", () => {
     expect(res.status).toBe(400);
   });
 
-  test("POST /api/payments/refunds rejects when credit insufficient", async () => {
-    MaterializedBalance.find.mockReturnValueOnce({
-      lean: jest.fn().mockResolvedValue([{ amount: 0 }]),
-    });
+  test("POST /api/payments/refunds standalone external rejects without matbal credit", async () => {
+    MaterializedBalance.find.mockImplementation(() => ({
+      lean: jest.fn().mockResolvedValue([]),
+    }));
     const res = await request(app)
       .post("/api/payments/refunds")
       .set(headers)
-      .send({ mode: "stripe", paymentIntentId: "pi_fake", amount: 100 });
+      .send({
+        mode: "external",
+        memberId: "nomoney",
+        amount: 100,
+        payoutMethod: "bank_transfer",
+        currency: "eur",
+      });
     expect(res.status).toBe(400);
+    MaterializedBalance.find.mockReturnValue({
+      lean: jest.fn().mockResolvedValue([{ amount: -100000 }]),
+    });
   });
 
   test("GET /api/payments/refunds", async () => {

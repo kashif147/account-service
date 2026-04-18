@@ -27,10 +27,21 @@ function pickLargestAmount(lines) {
  */
 export function resolveTxTypeAccountCode(txn) {
   const entries = txn.entries || [];
+  const docType = String(txn.docType || "");
+
+  // Write-off: no clearing/cash legs — label by bad-debt line or AR reduction
+  if (docType === "WriteOff" && entries.length) {
+    const byAdj = entries.find((e) => e.adjSubType === "writeoff");
+    if (byAdj?.accountCode) return String(byAdj.accountCode);
+    const expense = entries.find((e) => e.accountCode === "5200");
+    if (expense) return "5200";
+    const ar = entries.find((e) => e.accountCode === "1400");
+    if (ar) return "1400";
+    return null;
+  }
+
   const hits = entries.filter((e) => CODE_SET.has(e.accountCode));
   if (!hits.length) return null;
-
-  const docType = String(txn.docType || "");
 
   if (docType === "Refund") {
     const credits = hits.filter((e) => e.dc === "C");
@@ -54,9 +65,12 @@ export function resolveTxTypeAccountCode(txn) {
   return hits[0].accountCode;
 }
 
-export async function loadCoaTxTypeDescriptionMap() {
+export async function loadCoaTxTypeDescriptionMap(extraCodes = []) {
+  const codes = [
+    ...new Set([...GL_TX_TYPE_ACCOUNT_CODES, ...extraCodes].filter(Boolean)),
+  ];
   const rows = await CoA.find({
-    code: { $in: [...GL_TX_TYPE_ACCOUNT_CODES] },
+    code: { $in: codes },
   })
     .select({ code: 1, description: 1 })
     .lean();
@@ -69,7 +83,10 @@ export async function loadCoaTxTypeDescriptionMap() {
  */
 export async function attachTxTypesToLedgerItems(items) {
   if (!Array.isArray(items) || items.length === 0) return items || [];
-  const descMap = await loadCoaTxTypeDescriptionMap();
+  const resolvedCodes = items
+    .map((txn) => resolveTxTypeAccountCode(txn))
+    .filter((c) => c != null);
+  const descMap = await loadCoaTxTypeDescriptionMap(resolvedCodes);
   return items.map((txn) => {
     const code = resolveTxTypeAccountCode(txn);
     const txType =

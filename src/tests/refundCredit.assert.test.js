@@ -44,15 +44,16 @@ describe("assertRefundWithinCredit with CLAIM fallback", () => {
       }),
     });
 
-    matBalFindMock.mockImplementation((query) => ({
-      lean: jest.fn().mockResolvedValue(
-        query.memberId === "app:app-uuid-1"
-          ? [{ amount: 0 }]
-          : query.memberId === "B00004"
-          ? [{ amount: -8150 }]
-          : []
-      ),
-    }));
+    matBalFindMock.mockImplementation((query) => {
+      const mid = query?.memberId;
+      if (mid === "app:app-uuid-1") {
+        return { lean: jest.fn().mockResolvedValue([{ amount: 0 }]) };
+      }
+      if (mid === "B00004") {
+        return { lean: jest.fn().mockResolvedValue([{ amount: -8150 }]) };
+      }
+      return { lean: jest.fn().mockResolvedValue([]) };
+    });
 
     await expect(
       assertRefundWithinCredit(

@@ -19,6 +19,7 @@ import { globalDBLimiter } from "../config/globalLimiter.js";
 import { randomUUID } from "crypto";
 import { enrichStripePaymentItems } from "../services/stripe.payment.enrichment.service.js";
 import { attachTxTypesToLedgerItems } from "../helpers/glTransactionTxType.js";
+import { buildMemberReceiptCreditEntries } from "../helpers/paymentReceiptAllocation.js";
 
 // Amounts are stored as integer cents - sum them as integers
 function sumArray(arr, sel) {
@@ -730,23 +731,24 @@ export async function receipt(req, res, next) {
         applicationId,
       });
 
-    // Build entry for account 2020 - use memberId if present, otherwise applicationId
-    const entry2020 = {
-      accountCode: "2020",
-      dc: "C",
-      amount,
-      periodBucket: bucket,
-    };
-
-    if (memberId) {
-      entry2020.memberId = memberId;
-    } else if (applicationId) {
-      entry2020.applicationId = applicationId;
+    let creditLines;
+    if (memberId && bucket === "current") {
+      creditLines = await buildMemberReceiptCreditEntries(memberId, amount, date);
+    } else {
+      const entry2020 = {
+        accountCode: "2020",
+        dc: "C",
+        amount,
+        periodBucket: bucket,
+      };
+      if (memberId) entry2020.memberId = memberId;
+      else entry2020.applicationId = applicationId;
+      creditLines = [entry2020];
     }
 
     const lines = [
-      { accountCode: clearingCode, dc: "D", amount }, // 1210..1250
-      entry2020, // Payment on Account - Member credits (2020)
+      { accountCode: clearingCode, dc: "D", amount },
+      ...creditLines,
     ];
 
     // Stripe fee applied against the clearing account
@@ -825,15 +827,14 @@ export async function runProcessDeductionBatchPayments(paymentDate, batchPayment
 
     const amountNum = Number(amount);
 
+    const creditLines = await buildMemberReceiptCreditEntries(
+      String(membershipNumber),
+      amountNum,
+      date,
+    );
     const lines = [
       { accountCode: "1230", dc: "D", amount: amountNum },
-      {
-        accountCode: "2020",
-        dc: "C",
-        amount: amountNum,
-        periodBucket: "current",
-        memberId: String(membershipNumber),
-      },
+      ...creditLines,
     ];
 
     const settlement = {
@@ -939,15 +940,14 @@ export async function runProcessBatchPayments(
     }
 
     const amountNum = Number(amount);
+    const creditLines = await buildMemberReceiptCreditEntries(
+      String(membershipNumber),
+      amountNum,
+      date,
+    );
     const lines = [
       { accountCode: clearingCode, dc: "D", amount: amountNum },
-      {
-        accountCode: "2020",
-        dc: "C",
-        amount: amountNum,
-        periodBucket: "current",
-        memberId: String(membershipNumber),
-      },
+      ...creditLines,
     ];
 
     try {

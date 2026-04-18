@@ -111,15 +111,39 @@ export async function getAvailableCredit2020ForKey(memberKey, year) {
 }
 
 /**
+ * Member credit stored as negative materialized balances on 2020 / 1400 (cents).
+ * @param {string} memberKey
+ * @param {number} year
+ */
+export async function getMemberStoredCreditCents(memberKey, year) {
+  if (String(memberKey).startsWith("app:")) return 0;
+  const rows = await MaterializedBalance.find({
+    memberId: memberKey,
+    year,
+    accountCode: { $in: ["2020", "1400"] },
+    bucket: { $in: BUCKETS },
+  }).lean();
+  let cred = 0;
+  for (const r of rows) {
+    const amt = Number(r.amount) || 0;
+    if (amt < 0) cred += -amt;
+  }
+  return cred;
+}
+
+/**
  * @param {number} refundCents
  * @param {import("mongoose").Document|object} payment
  * @param {number} journalYear
+ * @param {{ linkedPaymentRemainingCents?: number }} [options]
  */
 export async function assertRefundWithinCredit(
   refundCents,
   payment,
-  journalYear
+  journalYear,
+  options = {}
 ) {
+  const { linkedPaymentRemainingCents } = options;
   const resolved = matBalMemberKeyFromPayment(payment);
   if (!resolved) {
     throw AppError.badRequest(
@@ -131,6 +155,13 @@ export async function assertRefundWithinCredit(
     journalYear
   );
 
+  if (!String(resolved.key).startsWith("app:")) {
+    available = Math.max(
+      available,
+      await getMemberStoredCreditCents(resolved.key, journalYear),
+    );
+  }
+
   const appId = applicationIdForClaimLookup(payment, resolved);
   if (appId) {
     const claimMemberId = await getClaimRecipientMemberIdForApplication(appId);
@@ -140,7 +171,21 @@ export async function assertRefundWithinCredit(
         journalYear
       );
       available = Math.max(available, claimedMemberCredit);
+      available = Math.max(
+        available,
+        await getMemberStoredCreditCents(claimMemberId, journalYear),
+      );
     }
+  }
+
+  if (
+    linkedPaymentRemainingCents != null &&
+    Number.isFinite(linkedPaymentRemainingCents)
+  ) {
+    available = Math.max(
+      available,
+      Math.max(0, Math.floor(linkedPaymentRemainingCents)),
+    );
   }
 
   if (refundCents > available) {

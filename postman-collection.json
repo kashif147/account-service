@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Account Service API",
-    "description": "Latest API collection for account-service",
+    "description": "Account-service routes. Authenticated CRM/API flows use Bearer {{authToken}}. Payment routes also accept x-api-key + x-tenant-id (see payment.controller). POST routes that use idempotency() accept optional Idempotency-Key (8–128 chars).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -10,9 +10,69 @@
     { "key": "memberId", "value": "", "type": "string" },
     { "key": "coaId", "value": "", "type": "string" },
     { "key": "paymentIntentId", "value": "", "type": "string" },
-    { "key": "applicationId", "value": "", "type": "string" }
+    { "key": "applicationId", "value": "", "type": "string" },
+    { "key": "batchDetailId", "value": "", "type": "string" },
+    { "key": "tenantId", "value": "", "type": "string" },
+    { "key": "accountsApiKey", "value": "", "type": "string" },
+    { "key": "idempotencyKey", "value": "", "type": "string" }
   ],
   "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+          }
+        },
+        {
+          "name": "Ready",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/ready", "host": ["{{baseUrl}}"], "path": ["ready"] }
+          }
+        },
+        {
+          "name": "Idempotency Cache Stats",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health/idempotency", "host": ["{{baseUrl}}"], "path": ["health", "idempotency"] }
+          }
+        },
+        {
+          "name": "Clear Idempotency Cache",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/health/idempotency", "host": ["{{baseUrl}}"], "path": ["health", "idempotency"] },
+            "body": { "mode": "raw", "raw": "{\n  \"action\": \"clear_cache\"\n}" }
+          }
+        },
+        {
+          "name": "Logging Health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health/logging", "host": ["{{baseUrl}}"], "path": ["health", "logging"] }
+          }
+        },
+        {
+          "name": "Events Health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health/events", "host": ["{{baseUrl}}"], "path": ["health", "events"] }
+          }
+        },
+        {
+          "name": "RabbitMQ Health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health/rabbitmq", "host": ["{{baseUrl}}"], "path": ["health", "rabbitmq"] }
+          }
+        }
+      ]
+    },
     {
       "name": "Service",
       "item": [
@@ -40,7 +100,11 @@
           "name": "Create CoA",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
             "url": { "raw": "{{baseUrl}}/api/admin/coa", "host": ["{{baseUrl}}"], "path": ["api", "admin", "coa"] },
             "body": { "mode": "raw", "raw": "{\n  \"name\": \"Sample CoA\"\n}" }
           }
@@ -49,7 +113,11 @@
           "name": "Update CoA",
           "request": {
             "method": "PUT",
-            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
             "url": { "raw": "{{baseUrl}}/api/admin/coa/{{coaId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "coa", "{{coaId}}"] },
             "body": { "mode": "raw", "raw": "{\n  \"name\": \"Updated CoA\"\n}" }
           }
@@ -59,32 +127,537 @@
     {
       "name": "Journal",
       "item": [
-        { "name": "List Journals", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/journal", "host": ["{{baseUrl}}"], "path": ["api", "journal"] } } },
-        { "name": "List Stripe Payments", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/journal/stripe-payments", "host": ["{{baseUrl}}"], "path": ["api", "journal", "stripe-payments"] } } },
-        { "name": "Create Invoice", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/journal/invoice", "host": ["{{baseUrl}}"], "path": ["api", "journal", "invoice"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\"\n}" } } },
-        { "name": "Create Receipt", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/journal/receipt", "host": ["{{baseUrl}}"], "path": ["api", "journal", "receipt"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\"\n}" } } }
+        {
+          "name": "List Journals",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/journal?from=2026-01-01&to=2026-12-31&limit=50&skip=0",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "journal"],
+              "query": [
+                { "key": "from", "value": "2026-01-01" },
+                { "key": "to", "value": "2026-12-31" },
+                { "key": "limit", "value": "50" },
+                { "key": "skip", "value": "0" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List Stripe Payments",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/journal/stripe-payments?status=ALL&limit=50&skip=0",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "journal", "stripe-payments"],
+              "query": [
+                { "key": "status", "value": "ALL" },
+                { "key": "limit", "value": "50" },
+                { "key": "skip", "value": "0" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create Invoice",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/invoice", "host": ["{{baseUrl}}"], "path": ["api", "journal", "invoice"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-04-01\",\n  \"docNo\": \"INV-001\",\n  \"memberId\": \"{{memberId}}\",\n  \"annualFee\": 100,\n  \"incomeCode\": \"4100\",\n  \"categoryName\": \"Full\",\n  \"periodBucket\": \"current\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create Receipt",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/receipt", "host": ["{{baseUrl}}"], "path": ["api", "journal", "receipt"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-04-01\",\n  \"docNo\": \"RCPT-001\",\n  \"memberId\": \"{{memberId}}\",\n  \"amount\": 50,\n  \"clearingCode\": \"1210\",\n  \"bucket\": \"current\",\n  \"provider\": \"stripe\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create Credit Note",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/credit-note", "host": ["{{baseUrl}}"], "path": ["api", "journal", "credit-note"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-04-01\",\n  \"docNo\": \"CN-001\",\n  \"memberId\": \"{{memberId}}\",\n  \"amount\": 25,\n  \"periodBucket\": \"current\",\n  \"adjSubType\": \"discount\",\n  \"categoryName\": \"Full\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Write Off",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/writeoff", "host": ["{{baseUrl}}"], "path": ["api", "journal", "writeoff"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-04-01\",\n  \"docNo\": \"WO-001\",\n  \"memberId\": \"{{memberId}}\",\n  \"amount\": 10,\n  \"periodBucket\": \"arrears\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Change Category",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/change-category", "host": ["{{baseUrl}}"], "path": ["api", "journal", "change-category"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-04-01\",\n  \"docNoBase\": \"CC-001\",\n  \"memberId\": \"{{memberId}}\",\n  \"periodBucket\": \"current\",\n  \"oldIncomeCode\": \"4100\",\n  \"oldCategoryName\": \"Full\",\n  \"oldAnnualFee\": 100,\n  \"newIncomeCode\": \"4101\",\n  \"newCategoryName\": \"Reduced\",\n  \"newAnnualFee\": 80,\n  \"changeDate\": \"2026-04-15\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Process Deduction Batch",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/process-batch", "host": ["{{baseUrl}}"], "path": ["api", "journal", "process-batch"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentDate\": \"2026-04-01\",\n  \"batchPayments\": [\n    {\n      \"membershipNumber\": \"M12345\",\n      \"valueForPeriodSelected\": 5000\n    }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Claim Application Credit",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/claim-credit", "host": ["{{baseUrl}}"], "path": ["api", "journal", "claim-credit"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-04-01\",\n  \"docNo\": \"CLAIM-001\",\n  \"applicationId\": \"{{applicationId}}\",\n  \"memberId\": \"{{memberId}}\",\n  \"bucket\": \"current\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Online Payment (Receipt)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/journal/online-payment", "host": ["{{baseUrl}}"], "path": ["api", "journal", "online-payment"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"2026-04-01\",\n  \"docNo\": \"ONL-001\",\n  \"memberId\": \"{{memberId}}\",\n  \"amount\": 50,\n  \"clearingCode\": \"1210\",\n  \"bucket\": \"current\",\n  \"provider\": \"stripe\"\n}"
+            }
+          }
+        }
       ]
     },
     {
       "name": "Reports",
       "item": [
-        { "name": "Member Statement", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/statement", "host": ["{{baseUrl}}"], "path": ["api", "reports", "member", "{{memberId}}", "statement"] } } },
-        { "name": "Member Net Balance", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/net-balance", "host": ["{{baseUrl}}"], "path": ["api", "reports", "member", "{{memberId}}", "net-balance"] } } },
-        { "name": "Balances Snapshot", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/balances/snapshot", "host": ["{{baseUrl}}"], "path": ["api", "reports", "balances", "snapshot"] } } },
-        { "name": "Month End", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/month-end", "host": ["{{baseUrl}}"], "path": ["api", "reports", "month-end"] } } },
-        { "name": "Year End", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/year-end", "host": ["{{baseUrl}}"], "path": ["api", "reports", "year-end"] } } },
-        { "name": "Refunds List", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/reports/refunds?limit=20&skip=0", "host": ["{{baseUrl}}"], "path": ["api", "reports", "refunds"], "query": [{ "key": "limit", "value": "20" }, { "key": "skip", "value": "0" }] } } }
+        {
+          "name": "Refunds List",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/refunds?limit=20&skip=0",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "reports", "refunds"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "skip", "value": "0" },
+                { "key": "mode", "value": "stripe", "disabled": true },
+                { "key": "memberId", "value": "{{memberId}}", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Member Statement",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/statement", "host": ["{{baseUrl}}"], "path": ["api", "reports", "member", "{{memberId}}", "statement"] }
+          }
+        },
+        {
+          "name": "Member Net Balance",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/net-balance?year=2026",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "reports", "member", "{{memberId}}", "net-balance"],
+              "query": [{ "key": "year", "value": "2026" }]
+            }
+          }
+        },
+        {
+          "name": "Member Summary",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/summary?year=2026",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "reports", "member", "{{memberId}}", "summary"],
+              "query": [{ "key": "year", "value": "2026" }]
+            }
+          }
+        },
+        {
+          "name": "Member Ledger",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/member/{{memberId}}/ledger?view=simple",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "reports", "member", "{{memberId}}", "ledger"],
+              "query": [
+                { "key": "view", "value": "simple" },
+                { "key": "accountCode", "value": "1200", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Balances Snapshot",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/reports/balances/snapshot", "host": ["{{baseUrl}}"], "path": ["api", "reports", "balances", "snapshot"] }
+          }
+        },
+        {
+          "name": "Balances As Of",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/balances/as-of?asOf=2026-04-01",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "reports", "balances", "as-of"],
+              "query": [{ "key": "asOf", "value": "2026-04-01" }]
+            }
+          }
+        },
+        {
+          "name": "Month End",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/month-end?period=2026-03",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "reports", "month-end"],
+              "query": [{ "key": "period", "value": "2026-03" }]
+            }
+          }
+        },
+        {
+          "name": "Year End",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/reports/year-end?year=2026",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "reports", "year-end"],
+              "query": [{ "key": "year", "value": "2026" }]
+            }
+          }
+        }
       ]
     },
     {
       "name": "Payments",
       "item": [
-        { "name": "Create Intent", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/intents", "host": ["{{baseUrl}}"], "path": ["api", "payments", "intents"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\"\n}" } } },
-        { "name": "Reconcile Payment", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/reconcile", "host": ["{{baseUrl}}"], "path": ["api", "payments", "reconcile"] }, "body": { "mode": "raw", "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\"\n}" } } },
-        { "name": "Get Payment By Stripe ID", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/payments/by-stripe/{{paymentIntentId}}", "host": ["{{baseUrl}}"], "path": ["api", "payments", "by-stripe", "{{paymentIntentId}}"] } } },
-        { "name": "List Refunds", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }], "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] } } },
-        { "name": "Create Refund", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] }, "body": { "mode": "raw", "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\",\n  \"mode\": \"external\",\n  \"memberId\": \"{{memberId}}\",\n  \"applicationId\": \"{{applicationId}}\",\n  \"amount\": 1000,\n  \"payoutMethod\": \"bank_transfer\",\n  \"refNo\": \"MAN-REF-001\",\n  \"memo\": \"Manual refund\",\n  \"refundDate\": \"2026-04-15\"\n}" } } },
-        { "name": "Associate Member (Payments/Refunds)", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }, { "key": "Content-Type", "value": "application/json" }], "url": { "raw": "{{baseUrl}}/api/payments/associate-member", "host": ["{{baseUrl}}"], "path": ["api", "payments", "associate-member"] }, "body": { "mode": "raw", "raw": "{\n  \"memberId\": \"{{memberId}}\",\n  \"applicationId\": \"{{applicationId}}\",\n  \"includePayments\": true,\n  \"includeRefunds\": true,\n  \"onlyIfMissingMemberId\": true\n}" } } }
+        {
+          "name": "Create Intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/intents", "host": ["{{baseUrl}}"], "path": ["api", "payments", "intents"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"purpose\": \"subscriptionFee\",\n  \"amount\": 5000,\n  \"currency\": \"eur\",\n  \"memberId\": \"{{memberId}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Reconcile Payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/reconcile", "host": ["{{baseUrl}}"], "path": ["api", "payments", "reconcile"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventId\": \"evt_test_123\",\n  \"type\": \"payment_intent.succeeded\",\n  \"payment\": {\n    \"paymentIntentId\": \"{{paymentIntentId}}\",\n    \"amount\": 5000,\n    \"currency\": \"eur\",\n    \"status\": \"succeeded\"\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "List Payments By Members (Batch)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/batch", "host": ["{{baseUrl}}"], "path": ["api", "payments", "batch"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"memberIds\": [\"{{memberId}}\"],\n  \"status\": \"succeeded\",\n  \"purpose\": \"subscriptionFee\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Record External Payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/record-external", "host": ["{{baseUrl}}"], "path": ["api", "payments", "record-external"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"direction\": \"in\",\n  \"amount\": 1000,\n  \"currency\": \"eur\",\n  \"reason\": \"Bank transfer\",\n  \"memberId\": \"{{memberId}}\",\n  \"externalRef\": \"EXT-REF-001\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Payment By Stripe ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/by-stripe/{{paymentIntentId}}", "host": ["{{baseUrl}}"], "path": ["api", "payments", "by-stripe", "{{paymentIntentId}}"] }
+          }
+        },
+        {
+          "name": "List Refunds",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] }
+          }
+        },
+        {
+          "name": "Create Refund",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/refunds", "host": ["{{baseUrl}}"], "path": ["api", "payments", "refunds"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentIntentId\": \"{{paymentIntentId}}\",\n  \"mode\": \"external\",\n  \"memberId\": \"{{memberId}}\",\n  \"applicationId\": \"{{applicationId}}\",\n  \"amount\": 1000,\n  \"payoutMethod\": \"bank_transfer\",\n  \"refNo\": \"MAN-REF-001\",\n  \"memo\": \"Manual refund\",\n  \"refundDate\": \"2026-04-15\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Associate Member (Payments/Refunds)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/payments/associate-member", "host": ["{{baseUrl}}"], "path": ["api", "payments", "associate-member"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"memberId\": \"{{memberId}}\",\n  \"applicationId\": \"{{applicationId}}\",\n  \"includePayments\": true,\n  \"includeRefunds\": true,\n  \"onlyIfMissingMemberId\": true\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Batch details",
+      "item": [
+        {
+          "name": "Create Batch Detail (multipart)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/batch-details", "host": ["{{baseUrl}}"], "path": ["api", "batch-details"] },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "type", "value": "other", "type": "text" },
+                { "key": "batchDate", "value": "2026-04-01", "type": "text" },
+                { "key": "paymentDate", "value": "2026-04-15", "type": "text" },
+                { "key": "referenceNumber", "value": "BATCH-REF-001", "type": "text" },
+                { "key": "description", "value": "Sample batch", "type": "text" },
+                { "key": "file", "type": "file", "src": "" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create Batch (legacy /api/create-batch)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/create-batch", "host": ["{{baseUrl}}"], "path": ["api", "create-batch"] },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "type", "value": "other", "type": "text" },
+                { "key": "batchDate", "value": "2026-04-01", "type": "text" },
+                { "key": "paymentDate", "value": "2026-04-15", "type": "text" },
+                { "key": "referenceNumber", "value": "BATCH-REF-002", "type": "text" },
+                { "key": "description", "value": "Legacy create-batch path", "type": "text" },
+                { "key": "file", "type": "file", "src": "" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Batch Queue Stats",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/batch-details/queue-stats", "host": ["{{baseUrl}}"], "path": ["api", "batch-details", "queue-stats"] }
+          }
+        },
+        {
+          "name": "List Batch Details",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/batch-details", "host": ["{{baseUrl}}"], "path": ["api", "batch-details"] }
+          }
+        },
+        {
+          "name": "Get Batch Detail By Id",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/batch-details/{{batchDetailId}}", "host": ["{{baseUrl}}"], "path": ["api", "batch-details", "{{batchDetailId}}"] }
+          }
+        },
+        {
+          "name": "Add Payment To Batch",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/batch-details/add-profile/{{batchDetailId}}", "host": ["{{baseUrl}}"], "path": ["api", "batch-details", "add-profile", "{{batchDetailId}}"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"membershipNumber\": \"M12345\",\n  \"memberName\": \"Jane Doe\",\n  \"badgeReferenceNumber\": \"BATCH-REF-001\",\n  \"amount\": 100.5\n}"
+            }
+          }
+        },
+        {
+          "name": "Resolve Batch Exception",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": { "raw": "{{baseUrl}}/api/batch-details/resolve-exception/{{batchDetailId}}", "host": ["{{baseUrl}}"], "path": ["api", "batch-details", "resolve-exception", "{{batchDetailId}}"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"membershipNumber\": \"M12345\",\n  \"exceptionMembershipNumber\": \"BADREF001\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Process Batch Detail",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/batch-details/process/{{batchDetailId}}", "host": ["{{baseUrl}}"], "path": ["api", "batch-details", "process", "{{batchDetailId}}"] }
+          }
+        },
+        {
+          "name": "Delete Batch Detail",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
+            "url": { "raw": "{{baseUrl}}/api/batch-details/{{batchDetailId}}", "host": ["{{baseUrl}}"], "path": ["api", "batch-details", "{{batchDetailId}}"] }
+          }
+        }
       ]
     },
     {
