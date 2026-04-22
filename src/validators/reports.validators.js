@@ -16,7 +16,11 @@ export const memberNetBalanceRules = [
   query("year")
     .optional()
     .isInt({ min: 2000, max: 2100 })
-    .withMessage("year must be YYYY")
+    .withMessage("year must be YYYY"),
+  query("scope")
+    .optional()
+    .isIn(["all", "current"])
+    .withMessage("scope must be all or current"),
 ];
 
 export const memberLedgerRules = [

@@ -5,7 +5,10 @@ import MatBal from "../models/materializedBalance.model.js";
 import Refund from "../models/refund.model.js";
 import User from "../models/user.model.js";
 import { monthRange, yearRange } from "../helpers/period.js";
-import { simplifyMemberLedgerPresentations } from "../helpers/memberLedgerPresentation.js";
+import {
+  simplifyMemberLedgerPresentations,
+  memberNetAr1400Cents,
+} from "../helpers/memberLedgerPresentation.js";
 import { attachPaymentIntentIdsToLedgerItems } from "../helpers/memberLedgerPaymentIntent.js";
 import { attachTxTypesToLedgerItems } from "../helpers/glTransactionTxType.js";
 import ReportSnapshot from "../models/reportSnapshot.model.js";
@@ -444,11 +447,23 @@ export async function balancesAsOf(req, res, next) {
 export async function memberNetBalance(req, res, next) {
   try {
     const { memberId } = req.params;
-    const { year } = req.query;
+    const { year, scope } = req.query;
     const query = { memberId };
-    const y = year ? parseInt(year, 10) : new Date().getFullYear();
-    if (Number.isNaN(y)) throw AppError.badRequest("year must be YYYY");
-    query.year = y;
+    const normalizedScope = String(scope || "all").toLowerCase();
+    if (!["all", "current"].includes(normalizedScope)) {
+      throw AppError.badRequest("scope must be all or current");
+    }
+
+    let effectiveYear = null;
+    if (year != null && year !== "") {
+      const parsedYear = parseInt(year, 10);
+      if (Number.isNaN(parsedYear)) throw AppError.badRequest("year must be YYYY");
+      effectiveYear = parsedYear;
+      query.year = parsedYear;
+    } else if (normalizedScope === "current") {
+      effectiveYear = new Date().getFullYear();
+      query.year = effectiveYear;
+    }
 
     const rows = await MatBal.find(query).lean();
     let net = 0;
@@ -465,7 +480,8 @@ export async function memberNetBalance(req, res, next) {
     // Return amounts in cents (no conversion - frontend will handle display formatting)
     res.success({
       memberId,
-      year: y,
+      year: effectiveYear,
+      scope: effectiveYear == null ? "all" : "year",
       net: net, // Return in cents
       accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
         accountCode,
@@ -482,23 +498,42 @@ export async function memberNetBalance(req, res, next) {
 }
 
 /**
- * Member summary: net balance + most recent payment (Receipt, including app-credit claim receipts).
- * Uses two parallel indexed queries for performance.
+ * Member summary: net balance + most recent payment (Receipt, including app-credit claim receipts)
+ * + most recent Invoice (AR on 1400 for the member, same basis as simple ledger).
+ * Uses parallel indexed queries for performance.
  */
 export async function memberSummary(req, res, next) {
   try {
     const { memberId } = req.params;
-    const { year } = req.query;
+    const { year, scope } = req.query;
     const query = { memberId };
-    const y = year ? parseInt(year, 10) : new Date().getFullYear();
-    if (Number.isNaN(y)) throw AppError.badRequest("year must be YYYY");
-    query.year = y;
+    const normalizedScope = String(scope || "all").toLowerCase();
+    if (!["all", "current"].includes(normalizedScope)) {
+      throw AppError.badRequest("scope must be all or current");
+    }
 
-    const [matBalRows, lastPaymentTxn] = await Promise.all([
+    let effectiveYear = null;
+    if (year != null && year !== "") {
+      const parsedYear = parseInt(year, 10);
+      if (Number.isNaN(parsedYear)) throw AppError.badRequest("year must be YYYY");
+      effectiveYear = parsedYear;
+      query.year = parsedYear;
+    } else if (normalizedScope === "current") {
+      effectiveYear = new Date().getFullYear();
+      query.year = effectiveYear;
+    }
+
+    const [matBalRows, lastPaymentTxn, latestInvoiceTxn] = await Promise.all([
       MatBal.find(query).lean(),
       GL.findOne({
         "entries.memberId": memberId,
         docType: { $in: ["Receipt", "Claim"] },
+      })
+        .sort({ date: -1, createdAt: -1 })
+        .lean(),
+      GL.findOne({
+        "entries.memberId": memberId,
+        docType: "Invoice",
       })
         .sort({ date: -1, createdAt: -1 })
         .lean(),
@@ -531,9 +566,22 @@ export async function memberSummary(req, res, next) {
       };
     }
 
+    let latestInvoice = null;
+    if (latestInvoiceTxn) {
+      const amount = memberNetAr1400Cents(latestInvoiceTxn, memberId);
+      latestInvoice = {
+        docNo: latestInvoiceTxn.docNo,
+        docType: latestInvoiceTxn.docType,
+        date: latestInvoiceTxn.date,
+        amount,
+        reference: buildMemberLedgerReference(latestInvoiceTxn),
+      };
+    }
+
     res.success({
       memberId,
-      year: y,
+      year: effectiveYear,
+      scope: effectiveYear == null ? "all" : "year",
       net,
       accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
         accountCode,
@@ -544,6 +592,7 @@ export async function memberSummary(req, res, next) {
         return { accountCode, bucket, amount };
       }),
       lastPayment,
+      latestInvoice,
     });
   } catch (e) {
     next(e);
