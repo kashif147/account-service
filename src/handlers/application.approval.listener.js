@@ -26,8 +26,40 @@ function escapeRegex(value) {
 
 function parseDate(value) {
   if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return new Date(
+      Date.UTC(
+        value.getUTCFullYear(),
+        value.getUTCMonth(),
+        value.getUTCDate(),
+        12,
+        0,
+        0,
+        0
+      )
+    );
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const datePart = raw.split("T")[0];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+    const [year, month, day] = datePart.split("-").map(Number);
+    return new Date(Date.UTC(year, month - 1, day, 12, 0, 0, 0));
+  }
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Date(
+    Date.UTC(
+      date.getUTCFullYear(),
+      date.getUTCMonth(),
+      date.getUTCDate(),
+      12,
+      0,
+      0,
+      0
+    )
+  );
 }
 
 /** Normalize to YYYY-MM-DD or null. */
@@ -247,14 +279,19 @@ export async function getMembershipPricing({
           // - effectiveFrom <= subscriptionStartDate (pricing has started)
           // - effectiveTo >= subscriptionStartDate OR effectiveTo is null (pricing hasn't ended or has no end date)
           // Sort by effectiveFrom descending to get the most recent applicable pricing
+          const pricingDateStartUtc = new Date(subscriptionStartDate);
+          pricingDateStartUtc.setUTCHours(0, 0, 0, 0);
+          const pricingDateEndUtc = new Date(subscriptionStartDate);
+          pricingDateEndUtc.setUTCHours(23, 59, 59, 999);
+
           const pricing = await Pricing.findOne({
             tenantId,
             productId: product._id,
             isDeleted: false,
             isActive: true,
-            effectiveFrom: { $lte: subscriptionStartDate },
+            effectiveFrom: { $lte: pricingDateEndUtc },
             $or: [
-              { effectiveTo: { $gte: subscriptionStartDate } },
+              { effectiveTo: { $gte: pricingDateStartUtc } },
               { effectiveTo: null },
             ],
           })
