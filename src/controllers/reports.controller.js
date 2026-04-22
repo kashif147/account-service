@@ -128,6 +128,11 @@ function normalizeDateRange(from, to) {
   return Object.keys(date).length ? date : null;
 }
 
+async function getMemberTrackedAccountCodes() {
+  const rows = await CoA.find({ isMemberTracked: true }).select("code").lean();
+  return rows.map((r) => r.code).filter(Boolean);
+}
+
 export async function refundsList(req, res, next) {
   try {
     const tenantId = req.tenantId || req.ctx?.tenantId;
@@ -463,9 +468,11 @@ export async function memberNetBalance(req, res, next) {
   try {
     const { memberId } = req.params;
     const { year, scope } = req.query;
-    // Member net balance is derived from member-balance control accounts only.
-    // Keep this strict to avoid distortions from any non-ledger accounts.
-    const query = { memberId, accountCode: { $in: ["1400", "2020"] } };
+    const memberTrackedCodes = await getMemberTrackedAccountCodes();
+    const query = { memberId };
+    if (memberTrackedCodes.length) {
+      query.accountCode = { $in: memberTrackedCodes };
+    }
     const normalizedScope = String(scope || "all").toLowerCase();
     if (!["all", "current"].includes(normalizedScope)) {
       throw AppError.badRequest("scope must be all or current");
@@ -499,6 +506,7 @@ export async function memberNetBalance(req, res, next) {
       memberId,
       year: effectiveYear,
       scope: effectiveYear == null ? "all" : "year",
+      accountCodesUsed: memberTrackedCodes,
       net: net, // Return in cents
       accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
         accountCode,
@@ -523,8 +531,11 @@ export async function memberSummary(req, res, next) {
   try {
     const { memberId } = req.params;
     const { year, scope } = req.query;
-    // Same basis as memberNetBalance: only member-balance control accounts.
-    const query = { memberId, accountCode: { $in: ["1400", "2020"] } };
+    const memberTrackedCodes = await getMemberTrackedAccountCodes();
+    const query = { memberId };
+    if (memberTrackedCodes.length) {
+      query.accountCode = { $in: memberTrackedCodes };
+    }
     const normalizedScope = String(scope || "all").toLowerCase();
     if (!["all", "current"].includes(normalizedScope)) {
       throw AppError.badRequest("scope must be all or current");
@@ -600,6 +611,7 @@ export async function memberSummary(req, res, next) {
       memberId,
       year: effectiveYear,
       scope: effectiveYear == null ? "all" : "year",
+      accountCodesUsed: memberTrackedCodes,
       net,
       accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({
         accountCode,
