@@ -7,7 +7,6 @@ import User from "../models/user.model.js";
 import { monthRange, yearRange } from "../helpers/period.js";
 import {
   simplifyMemberLedgerPresentations,
-  memberNetAr1400Cents,
 } from "../helpers/memberLedgerPresentation.js";
 import { attachPaymentIntentIdsToLedgerItems } from "../helpers/memberLedgerPaymentIntent.js";
 import { attachTxTypesToLedgerItems } from "../helpers/glTransactionTxType.js";
@@ -98,6 +97,22 @@ function getMapValue(mapLike, key) {
   if (typeof mapLike.get === "function") return mapLike.get(key) ?? null;
   if (typeof mapLike === "object") return mapLike[key] ?? null;
   return null;
+}
+
+function memberNetAr1400Cents(txn, memberId) {
+  const normalizedMemberId = String(memberId || "").trim().toLowerCase();
+  let debit = 0;
+  let credit = 0;
+  for (const entry of txn?.entries || []) {
+    if (String(entry.memberId || "").trim().toLowerCase() !== normalizedMemberId) {
+      continue;
+    }
+    if (entry.accountCode !== "1400") continue;
+    const amount = Number(entry.amount) || 0;
+    if (entry.dc === "D") debit += amount;
+    else if (entry.dc === "C") credit += amount;
+  }
+  return debit - credit;
 }
 
 function normalizeDateRange(from, to) {
