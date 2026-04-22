@@ -463,7 +463,9 @@ export async function memberNetBalance(req, res, next) {
   try {
     const { memberId } = req.params;
     const { year, scope } = req.query;
-    const query = { memberId };
+    // Member net balance is derived from member-balance control accounts only.
+    // Keep this strict to avoid distortions from any non-ledger accounts.
+    const query = { memberId, accountCode: { $in: ["1400", "2020"] } };
     const normalizedScope = String(scope || "all").toLowerCase();
     if (!["all", "current"].includes(normalizedScope)) {
       throw AppError.badRequest("scope must be all or current");
@@ -521,7 +523,8 @@ export async function memberSummary(req, res, next) {
   try {
     const { memberId } = req.params;
     const { year, scope } = req.query;
-    const query = { memberId };
+    // Same basis as memberNetBalance: only member-balance control accounts.
+    const query = { memberId, accountCode: { $in: ["1400", "2020"] } };
     const normalizedScope = String(scope || "all").toLowerCase();
     if (!["all", "current"].includes(normalizedScope)) {
       throw AppError.badRequest("scope must be all or current");
