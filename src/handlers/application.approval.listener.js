@@ -42,6 +42,13 @@ function parseDate(value) {
   }
   const raw = String(value).trim();
   if (!raw) return null;
+  const dmyMatch = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (dmyMatch) {
+    const [, day, month, year] = dmyMatch;
+    return new Date(
+      Date.UTC(Number(year), Number(month) - 1, Number(day), 12, 0, 0, 0)
+    );
+  }
   const datePart = raw.split("T")[0];
   if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
     const [year, month, day] = datePart.split("-").map(Number);
