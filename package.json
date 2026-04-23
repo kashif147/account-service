@@ -10,7 +10,8 @@
     "start:staging": "cross-env NODE_ENV=staging node bin/account-service.js",
     "start:prod": "cross-env NODE_ENV=production node bin/account-service.js",
     "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
-    "test:rabbitmq": "node scripts/test-rabbitmq-events.js"
+    "test:rabbitmq": "node scripts/test-rabbitmq-events.js",
+    "rebuild:matbal": "node scripts/rebuild-materialized-balances.js"
   },
   "dependencies": {
     "@azure/storage-blob": "^12.26.0",

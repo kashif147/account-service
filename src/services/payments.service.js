@@ -1528,7 +1528,7 @@ export function clearingAccountCodeForRefund(refundDoc, payment) {
  * GL refund: DR member buckets (mirror receipt), CR clearing.
  * Idempotent docNo RFD-{refundId}; postBalancedJournal also dedupes by docNo.
  */
-export async function postJournalForRefund(refundDoc, payment, _ctx) {
+export async function postJournalForRefund(refundDoc, payment, ctx) {
   const { postBalancedJournal } =
     await import("../controllers/journal.controller.js");
   const { buildMemberRefundDebitEntries } = await import(
@@ -1630,6 +1630,7 @@ export async function postJournalForRefund(refundDoc, payment, _ctx) {
 
   return postBalancedJournal({
     date: journalDate,
+    userId: ctx?.userId,
     docType: "Refund",
     docNo,
     reference,
@@ -1772,6 +1773,7 @@ export async function postJournalForPayment(payment, ctx) {
   // Note: postBalancedJournal needs to be exported from journal.controller.js
   const journal = await postBalancedJournal({
     date,
+    userId: ctx?.userId,
     docType: "Receipt",
     docNo,
     memo,

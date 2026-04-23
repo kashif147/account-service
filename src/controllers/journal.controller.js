@@ -259,6 +259,7 @@ export async function postBalancedJournal({
   settlement,
   sourceApplicationId,
   claimMemberId,
+  userId,
 }) {
   // Wrap entire function in global DB limiter
   // This ensures all journal operations share the same resource pool
@@ -319,6 +320,9 @@ export async function postBalancedJournal({
     const entries = enriched.map(({ _a, ...rest }) => rest);
     const txn = await GLTransaction.create({
       date,
+      ...(userId != null && String(userId).trim() !== ""
+        ? { userId: String(userId).trim() }
+        : {}),
       docType,
       docNo,
       ...(reference != null && String(reference).trim() !== ""
@@ -424,6 +428,7 @@ export async function invoice(req, res, next) {
     // 1) Full-year invoice
     const inv = await postBalancedJournal({
       date,
+      userId: req.ctx?.userId,
       docType: "Invoice",
       docNo,
       memo: memoBase,
@@ -454,6 +459,7 @@ export async function invoice(req, res, next) {
         const memo = `Adjustment – Pro-rata fee (${categoryName}) credit for unused period ${startISO} → ${lastUnusedISO} (subscription period ${joinDate} → ${endISO})`;
         const cn = await postBalancedJournal({
           date,
+          userId: req.ctx?.userId,
           docType: "Adjustment",
           docNo: `${docNo}-PRORATA`,
           memo,
@@ -512,6 +518,7 @@ export async function postCategoryChangeJournals({
   newAnnualFee,
   changeDate, // ISO (within target year)
   periodBucket = "current",
+  userId,
 }) {
   if (!Number.isInteger(oldAnnualFee) || oldAnnualFee < 0) {
     throw AppError.badRequest(
@@ -544,6 +551,7 @@ export async function postCategoryChangeJournals({
   results.push(
     await postBalancedJournal({
       date,
+      userId,
       docType: "Invoice",
       docNo: `${docNoBase}-INVNEW`,
       memo: `Subscription ${year} – ${newCategoryName}`,
@@ -621,6 +629,7 @@ export async function postCategoryChangeJournals({
     results.push(
       await postBalancedJournal({
         date,
+        userId,
         docType: "Adjustment",
         docNo: `${docNoBase}-CADJ`,
         memo: `Adjustment – Category change proration (${memoParts.join("; ")})`,
@@ -661,6 +670,7 @@ export async function changeCategory(req, res, next) {
       newAnnualFee,
       changeDate,
       periodBucket,
+      userId: req.ctx?.userId,
     });
 
     res.created(results);
@@ -689,6 +699,7 @@ export async function creditNote(req, res, next) {
     }
     const out = await postBalancedJournal({
       date,
+      userId: req.ctx?.userId,
       docType: "Adjustment",
       docNo,
       memo: `Adjustment – ${categoryName || adjSubType}`,
@@ -773,6 +784,7 @@ export async function receipt(req, res, next) {
 
     const out = await postBalancedJournal({
       date,
+      userId: req.ctx?.userId,
       docType: "Receipt",
       docNo,
       memo,
@@ -791,7 +803,15 @@ export async function receipt(req, res, next) {
  * @param {Array} batchPayments
  * @returns {Promise<{ processed: number, failed: number, results: array, errors?: array }>}
  */
-export async function runProcessDeductionBatchPayments(paymentDate, batchPayments) {
+export async function runProcessDeductionBatchPayments(
+  paymentDate,
+  batchPayments,
+  options = {}
+) {
+  const userId =
+    options?.userId != null && String(options.userId).trim() !== ""
+      ? String(options.userId).trim()
+      : undefined;
   if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
     throw AppError.badRequest("batchPayments array is required and must not be empty", {
       batchPayments: batchPayments ?? "missing",
@@ -845,6 +865,7 @@ export async function runProcessDeductionBatchPayments(paymentDate, batchPayment
     try {
       const txn = await postBalancedJournal({
         date,
+        userId,
         docType: "Receipt",
         docNo: `test-${randomUUID()}`,
         memo: "test",
@@ -897,6 +918,10 @@ export async function runProcessBatchPayments(
   batchType,
   options = {}
 ) {
+  const userId =
+    options?.userId != null && String(options.userId).trim() !== ""
+      ? String(options.userId).trim()
+      : undefined;
   const batchName =
     typeof options.batchName === "string" ? options.batchName.trim() : "";
   const referenceNumber =
@@ -958,6 +983,7 @@ export async function runProcessBatchPayments(
 
       const txn = await postBalancedJournal({
         date,
+        userId,
         docType: "Receipt",
         docNo: `batch-${randomUUID()}`,
         memo: memoParts.join(" | "),
@@ -1001,7 +1027,8 @@ export async function processDeductionBatch(req, res, next) {
   try {
     const out = await runProcessDeductionBatchPayments(
       req.body.paymentDate,
-      req.body.batchPayments
+      req.body.batchPayments,
+      { userId: req.ctx?.userId }
     );
     res.status(201).json(out);
   } catch (e) {
@@ -1088,6 +1115,7 @@ export async function claimApplicationCredit(req, res, next) {
 
     const out = await postBalancedJournal({
       date,
+      userId: req.ctx?.userId,
       docType: "Claim",
       docNo,
       memo: `Claim app credit ${applicationId} → ${memberId}`,
@@ -1119,6 +1147,7 @@ export async function writeOff(req, res, next) {
     const memo = userMemo ? `Write off (${userMemo})` : "Write off";
     const out = await postBalancedJournal({
       date,
+      userId: req.ctx?.userId,
       docType: "WriteOff",
       docNo,
       memo,

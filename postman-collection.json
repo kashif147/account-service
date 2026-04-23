@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Account Service API",
-    "description": "Account-service routes. Authenticated CRM/API flows use Bearer {{authToken}}. Payment routes also accept x-api-key + x-tenant-id (see payment.controller). POST routes that use idempotency() accept optional Idempotency-Key (8–128 chars).",
+    "description": "Account-service routes. Authenticated CRM/API flows use Bearer {{authToken}}. Payment routes also accept x-api-key + x-tenant-id (see payment.controller). POST routes that use idempotency() accept optional Idempotency-Key (8–128 chars). Internal reminder eligibility: folder \"Internal — reminder eligibility\" (x-api-key + x-tenant-id, used by subscription-service build).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -656,6 +656,56 @@
             "method": "DELETE",
             "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
             "url": { "raw": "{{baseUrl}}/api/batch-details/{{batchDetailId}}", "host": ["{{baseUrl}}"], "path": ["api", "batch-details", "{{batchDetailId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Internal — reminder eligibility",
+      "description": "Service-to-service under /api/internal. Headers: x-tenant-id (required), x-api-key (must match server ACCOUNTS_API_KEY). No Bearer required. Used by subscription-service when building reminder batches.",
+      "item": [
+        {
+          "name": "GET reminder eligibility (single member)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "x-tenant-id", "value": "{{tenantId}}" },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/internal/members/{{memberId}}/reminder-eligibility?asOf=",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "internal", "members", "{{memberId}}", "reminder-eligibility"],
+              "query": [
+                {
+                  "key": "asOf",
+                  "value": "",
+                  "description": "Optional ISO datetime; defaults to now"
+                }
+              ]
+            },
+            "description": "Snapshot: net1400ArrearsCents, lastReceiptGlDate, balanceAsOf, etc."
+          }
+        },
+        {
+          "name": "POST reminder eligibility bulk",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}" },
+              { "key": "x-api-key", "value": "{{accountsApiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"memberIds\": [\"{{memberId}}\"],\n  \"asOf\": \"2026-04-18T12:00:00.000Z\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/internal/members/reminder-eligibility-bulk",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "internal", "members", "reminder-eligibility-bulk"]
+            },
+            "description": "Body: memberIds (string[], max 5000 per request), optional asOf ISO. Response data.items[] snapshots."
           }
         }
       ]

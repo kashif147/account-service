@@ -18,6 +18,7 @@ const EntrySchema = new mongoose.Schema(
 const GLSchema = new mongoose.Schema(
   {
     date: { type: Date, required: true },
+    userId: { type: String, index: true },
     docType: { type: String, required: true }, // Invoice, CreditNote, Receipt, Claim, Refund, WriteOff, Adjustment, etc.
     docNo: { type: String, required: true, unique: true },
     reference: { type: String },

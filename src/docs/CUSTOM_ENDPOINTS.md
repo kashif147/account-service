@@ -53,12 +53,18 @@ Response (example):
 GET `{{baseUrl}}/reports/member/:memberId/net-balance`
 
 Query params:
-- `year`: YYYY (optional, default current year)
+- `year`: YYYY (optional, forces a specific year)
+- `scope`: `all` | `current` (optional, default `all`)
 
 Example:
 ```bash
 curl -H "Authorization: Bearer {{token}}" \
   "{{baseUrl}}/reports/member/MEMBER123/net-balance?year=2026"
+```
+
+```bash
+curl -H "Authorization: Bearer {{token}}" \
+  "{{baseUrl}}/reports/member/MEMBER123/net-balance?scope=current"
 ```
 
 Response (example):
@@ -81,7 +87,8 @@ Response (example):
 GET `{{baseUrl}}/reports/member/:memberId/summary`
 
 Query params:
-- `year`: YYYY (optional, default current year)
+- `year`: YYYY (optional, forces a specific year)
+- `scope`: `all` | `current` (optional, default `all`)
 
 Returns net balance and most recent payment in one call. Uses parallel indexed queries.
 

@@ -26,6 +26,11 @@ function netMemberArCents(txn, norm) {
   return debit - credit;
 }
 
+/** Net member AR on 1400 for one GL document (cents). Shared with member summary (latest invoice). */
+export function memberNetAr1400Cents(txn, memberId) {
+  return netMemberArCents(txn, memberNormId(memberId));
+}
+
 function pickCategoryName(txn) {
   const feeLine = txn.entries?.find(
     (e) =>
