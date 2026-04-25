@@ -7,6 +7,7 @@ import {
   balancesAsOf,
   memberNetBalance,
   memberSummary,
+  memberSummaryBatch,
   memberLedger,
   refundsList,
 } from "../controllers/reports.controller.js";
@@ -57,6 +58,13 @@ router.get(
   memberNetBalanceRules,
   validate,
   memberSummary
+);
+
+router.post(
+  "/members/summary-batch",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  memberSummaryBatch
 );
 
 router.get(

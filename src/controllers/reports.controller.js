@@ -629,6 +629,214 @@ export async function memberSummary(req, res, next) {
   }
 }
 
+/**
+ * Bulk member summary for high-volume list screens.
+ * POST /api/reports/members/summary-batch
+ * Body: { memberIds: string[], year?: number, scope?: "all"|"current" }
+ */
+export async function memberSummaryBatch(req, res, next) {
+  try {
+    const tenantId = req.tenantId || req.ctx?.tenantId;
+    if (!tenantId) {
+      throw AppError.badRequest("Tenant context required");
+    }
+    const { memberIds, year, scope } = req.body || {};
+    if (!Array.isArray(memberIds) || memberIds.length === 0) {
+      throw AppError.badRequest("memberIds must be a non-empty array");
+    }
+    const normalizedMemberIds = [
+      ...new Set(
+        memberIds
+          .map((id) => String(id || "").trim())
+          .filter(Boolean)
+      ),
+    ];
+    if (normalizedMemberIds.length === 0) {
+      throw AppError.badRequest("memberIds must contain valid values");
+    }
+    if (normalizedMemberIds.length > 5000) {
+      throw AppError.badRequest("memberIds exceeds maximum of 5000");
+    }
+
+    const memberTrackedCodes = await getMemberTrackedAccountCodes();
+    const normalizedScope = String(scope || "all").toLowerCase();
+    if (!["all", "current"].includes(normalizedScope)) {
+      throw AppError.badRequest("scope must be all or current");
+    }
+
+    let effectiveYear = null;
+    const matBalQuery = {
+      tenantId,
+      memberId: { $in: normalizedMemberIds },
+    };
+    if (memberTrackedCodes.length) {
+      matBalQuery.accountCode = { $in: memberTrackedCodes };
+    }
+    if (year != null && year !== "") {
+      const parsedYear = parseInt(year, 10);
+      if (Number.isNaN(parsedYear)) throw AppError.badRequest("year must be YYYY");
+      effectiveYear = parsedYear;
+      matBalQuery.year = parsedYear;
+    } else if (normalizedScope === "current") {
+      effectiveYear = new Date().getFullYear();
+      matBalQuery.year = effectiveYear;
+    }
+
+    const [matBalRows, paymentRows, invoiceRows] = await Promise.all([
+      MatBal.find(matBalQuery).lean(),
+      GL.aggregate([
+        {
+          $match: {
+            tenantId,
+            docType: { $in: ["Receipt", "Claim"] },
+            "entries.memberId": { $in: normalizedMemberIds },
+          },
+        },
+        { $sort: { date: -1, createdAt: -1 } },
+        { $unwind: "$entries" },
+        {
+          $match: {
+            "entries.memberId": { $in: normalizedMemberIds },
+            "entries.accountCode": "2020",
+          },
+        },
+        {
+          $group: {
+            _id: "$entries.memberId",
+            docNo: { $first: "$docNo" },
+            docType: { $first: "$docType" },
+            date: { $first: "$date" },
+            amount: { $first: "$entries.amount" },
+            memo: { $first: "$memo" },
+          },
+        },
+      ]),
+      GL.aggregate([
+        {
+          $match: {
+            tenantId,
+            docType: "Invoice",
+            "entries.memberId": { $in: normalizedMemberIds },
+          },
+        },
+        { $sort: { date: -1, createdAt: -1 } },
+        { $unwind: "$entries" },
+        {
+          $match: {
+            "entries.memberId": { $in: normalizedMemberIds },
+            "entries.accountCode": "1400",
+          },
+        },
+        {
+          $group: {
+            _id: { memberId: "$entries.memberId", txnId: "$_id" },
+            docNo: { $first: "$docNo" },
+            docType: { $first: "$docType" },
+            date: { $first: "$date" },
+            reference: { $first: "$reference" },
+            debit: {
+              $sum: {
+                $cond: [{ $eq: ["$entries.dc", "D"] }, "$entries.amount", 0],
+              },
+            },
+            credit: {
+              $sum: {
+                $cond: [{ $eq: ["$entries.dc", "C"] }, "$entries.amount", 0],
+              },
+            },
+          },
+        },
+        { $sort: { date: -1 } },
+        {
+          $group: {
+            _id: "$_id.memberId",
+            docNo: { $first: "$docNo" },
+            docType: { $first: "$docType" },
+            date: { $first: "$date" },
+            reference: { $first: "$reference" },
+            amount: { $first: { $subtract: ["$debit", "$credit"] } },
+          },
+        },
+      ]),
+    ]);
+
+    const matByMember = new Map();
+    for (const row of matBalRows) {
+      const memberId = String(row.memberId || "").trim();
+      if (!memberId) continue;
+      if (!matByMember.has(memberId)) {
+        matByMember.set(memberId, { net: 0, byAccount: {}, byBucket: {} });
+      }
+      const agg = matByMember.get(memberId);
+      agg.net += row.amount;
+      agg.byAccount[row.accountCode] = (agg.byAccount[row.accountCode] || 0) + row.amount;
+      const bKey = `${row.accountCode}:${row.bucket}`;
+      agg.byBucket[bKey] = (agg.byBucket[bKey] || 0) + row.amount;
+    }
+
+    const paymentByMember = new Map(
+      paymentRows.map((r) => [String(r._id || "").trim(), r])
+    );
+    const invoiceByMember = new Map(
+      invoiceRows.map((r) => [String(r._id || "").trim(), r])
+    );
+
+    const items = normalizedMemberIds.map((memberId) => {
+      const mat = matByMember.get(memberId) || {
+        net: 0,
+        byAccount: {},
+        byBucket: {},
+      };
+      const payment = paymentByMember.get(memberId) || null;
+      const invoice = invoiceByMember.get(memberId) || null;
+
+      const lastPayment = payment
+        ? {
+            docNo: payment.docNo,
+            docType: payment.docType,
+            date: payment.date,
+            amount: Number(payment.amount) || 0,
+            displayLabel: isApplicationCreditClaimReceipt(payment)
+              ? "Claim"
+              : payment.memo || "Payment",
+          }
+        : null;
+
+      const latestInvoice = invoice
+        ? {
+            docNo: invoice.docNo,
+            docType: invoice.docType,
+            date: invoice.date,
+            amount: Number(invoice.amount) || 0,
+            reference: invoice.reference || invoice.docNo || "-",
+          }
+        : null;
+
+      return {
+        memberId,
+        year: effectiveYear,
+        scope: effectiveYear == null ? "all" : "year",
+        accountCodesUsed: memberTrackedCodes,
+        net: mat.net || 0,
+        accounts: Object.entries(mat.byAccount).map(([accountCode, amount]) => ({
+          accountCode,
+          amount,
+        })),
+        buckets: Object.entries(mat.byBucket).map(([key, amount]) => {
+          const [accountCode, bucket] = key.split(":");
+          return { accountCode, bucket, amount };
+        }),
+        lastPayment,
+        latestInvoice,
+      };
+    });
+
+    res.success({ count: items.length, items });
+  } catch (e) {
+    next(e);
+  }
+}
+
 const CATEGORY_CHANGE_DOCNO_RE = /^(.+?)-(INVNEW|CADJ|COLD|CNEW)$/;
 
 /** Human-readable reference for ledger (membership category, not docNo IDs). */
