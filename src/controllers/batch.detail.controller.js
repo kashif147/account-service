@@ -6,6 +6,7 @@ import User from "../models/user.model.js";
 import { getProfileReadModel } from "../models/profileRead.model.js";
 import * as azureBlob from "../services/azure.blob.service.js";
 import * as batchPaymentProcess from "../services/batch.payment.process.service.js";
+import { enrichBatchDetailWithMembershipStatus } from "../services/batch.membershipStatus.service.js";
 import logger from "../config/logger.js";
 import { publisher } from "../rabbitMQ/index.js";
 
@@ -384,8 +385,9 @@ export async function getBatchDetailById(req, res) {
     }
     const tenantId = req.user?.tenantId || null;
     const createdByName = await resolveCreatedByName(batch.createdBy, tenantId);
+    const withStatus = await enrichBatchDetailWithMembershipStatus(batch);
     const data = enrichBatchWithDownloadUrl({
-      ...batch,
+      ...withStatus,
       createdBy: createdByName,
     });
     return res.json({ data });
