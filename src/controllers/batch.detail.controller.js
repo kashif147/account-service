@@ -521,8 +521,11 @@ export async function resolveBatchException(req, res) {
     }
 
     const exceptions = batch.batchExceptions || [];
+    const refKey = (ex) =>
+      String(ex?.fileRow?.membershipNumber ?? ex?.membershipNumber ?? "")
+        .trim();
     const matchingExceptions = exceptions.filter(
-      (ex) => String(ex.membershipNumber || "").trim() === exceptionRefTrimmed
+      (ex) => refKey(ex) === exceptionRefTrimmed
     );
     if (matchingExceptions.length === 0) {
       return res.status(404).json({
@@ -544,13 +547,16 @@ export async function resolveBatchException(req, res) {
 
     batch.batchPayments = batch.batchPayments || [];
     for (const exceptionRow of matchingExceptions) {
+      const fr = exceptionRow.fileRow || {};
       const fileRow = {
-        membershipNumber: exceptionRow.membershipNumber,
-        lastName: exceptionRow.lastName,
-        firstName: exceptionRow.firstName,
-        fullName: exceptionRow.fullName,
-        valueForPeriodSelected: exceptionRow.valueForPeriodSelected,
-        rowIndex: exceptionRow.rowIndex,
+        membershipNumber:
+          fr.membershipNumber ?? exceptionRow.membershipNumber,
+        lastName: fr.lastName ?? exceptionRow.lastName,
+        firstName: fr.firstName ?? exceptionRow.firstName,
+        fullName: fr.fullName ?? exceptionRow.fullName,
+        valueForPeriodSelected:
+          fr.valueForPeriodSelected ?? exceptionRow.valueForPeriodSelected,
+        rowIndex: fr.rowIndex ?? exceptionRow.rowIndex,
       };
       const paymentEntry =
         batchPaymentProcess.buildBatchPaymentEntryFromProfile(profile, fileRow);
@@ -558,7 +564,7 @@ export async function resolveBatchException(req, res) {
     }
 
     batch.batchExceptions = exceptions.filter(
-      (ex) => String(ex.membershipNumber || "").trim() !== exceptionRefTrimmed
+      (ex) => refKey(ex) !== exceptionRefTrimmed
     );
     await batch.save();
 

@@ -42,6 +42,34 @@ function getCell(row, index) {
   return s === "" ? null : s;
 }
 
+/**
+ * Read a cell as displayed in Excel: use cached `w` or `format_cell` (shared strings,
+ * custom formats) so alphanumerics like B0000S are not misread from the row array.
+ */
+function getTextFromSheetCell(sheet, row0Based, col0Based, rowFallback, colIndex) {
+  if (!sheet || row0Based < 0 || col0Based < 0) {
+    return getCell(rowFallback, colIndex);
+  }
+  const addr = XLSX.utils.encode_cell({ r: row0Based, c: col0Based });
+  const cell = sheet[addr];
+  if (cell == null || cell.t === "z" || cell.t === "e") {
+    return getCell(rowFallback, colIndex);
+  }
+  if (cell.w != null && String(cell.w).trim() !== "") {
+    return String(cell.w).trim();
+  }
+  try {
+    const formatted = XLSX.utils.format_cell(cell);
+    if (formatted != null && String(formatted).trim() !== "") {
+      return String(formatted).trim();
+    }
+  } catch (e) {
+    /* use fallback */
+  }
+  if (cell.v == null) return getCell(rowFallback, colIndex);
+  return String(cell.v).trim() === "" ? null : String(cell.v).trim();
+}
+
 function findColumnIndex(headerRow, keywords) {
   if (!Array.isArray(headerRow)) return -1;
   for (let c = 0; c < headerRow.length; c++) {
@@ -67,15 +95,25 @@ export function parseRows(buffer) {
   let firstCol = DEFAULT_COL.FIRST_NAME;
   let fullNameCol = DEFAULT_COL.FULL_NAME;
   let valueCol = DEFAULT_COL.VALUE_FOR_PERIOD;
-  const membershipHeader = findColumnIndex(headerRow, [
-    "membership",
-    "member no",
-    "member no.",
-    "membership no",
-    "membership no.",
+  const fileRefCol = findColumnIndex(headerRow, [
+    "file ref",
+    "file ref no",
+    "file reference",
+    "fileref",
   ]);
-  if (membershipHeader >= 0) {
-    membershipCol = membershipHeader;
+  if (fileRefCol >= 0) {
+    membershipCol = fileRefCol;
+  } else {
+    const membershipHeader = findColumnIndex(headerRow, [
+      "membership",
+      "member no",
+      "member no.",
+      "membership no",
+      "membership no.",
+    ]);
+    if (membershipHeader >= 0) {
+      membershipCol = membershipHeader;
+    }
   }
   // Map columns from header whenever labels exist (not only when membership col matched).
   // Do not use generic "name" for full name — it matches "first name" before "full name".
@@ -110,14 +148,26 @@ export function parseRows(buffer) {
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     if (!Array.isArray(row)) continue;
-    const membershipNo = getCell(row, membershipCol);
+    const membershipNo = getTextFromSheetCell(
+      firstSheet,
+      i,
+      membershipCol,
+      row,
+      membershipCol,
+    );
     if (!membershipNo) continue;
     dataRows.push({
       rowIndex: i + 1,
       membershipNumber: membershipNo,
-      lastName: getCell(row, lastCol),
-      firstName: getCell(row, firstCol),
-      fullName: getCell(row, fullNameCol),
+      lastName: getTextFromSheetCell(firstSheet, i, lastCol, row, lastCol),
+      firstName: getTextFromSheetCell(firstSheet, i, firstCol, row, firstCol),
+      fullName: getTextFromSheetCell(
+        firstSheet,
+        i,
+        fullNameCol,
+        row,
+        fullNameCol,
+      ),
       valueForPeriodSelected: (() => {
         const v = row[valueCol];
         if (v === undefined || v === null || v === "") return null;
@@ -201,12 +251,20 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
       const piEx = profile.personalInfo || {};
       batchExceptions.push({
         profileId: profile._id,
-        membershipNumber: row.membershipNumber,
+        membershipNumber: String(profile.membershipNumber ?? "").trim() || null,
         lastName: row.lastName,
         firstName: row.firstName,
         fullName: fullNameFromFileOrProfile(row, piEx),
         valueForPeriodSelected: null,
         rowIndex: row.rowIndex,
+        fileRow: {
+          membershipNumber: row.membershipNumber,
+          lastName: row.lastName,
+          firstName: row.firstName,
+          fullName: row.fullName,
+          valueForPeriodSelected: null,
+          rowIndex: row.rowIndex,
+        },
       });
       continue;
     }
@@ -218,7 +276,7 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
       const pref = profile.preferences || {};
       batchPayments.push({
         profileId: profile._id,
-        membershipNumber: profile.membershipNumber || row.membershipNumber,
+        membershipNumber: String(profile.membershipNumber ?? "").trim(),
         valueForPeriodSelected: valueInCents,
         rowIndex: row.rowIndex,
         forename: pi.forename ?? null,
@@ -245,12 +303,21 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
       });
     } else {
       batchExceptions.push({
-        membershipNumber: row.membershipNumber,
+        profileId: null,
+        membershipNumber: null,
         lastName: row.lastName,
         firstName: row.firstName,
         fullName: row.fullName,
         valueForPeriodSelected: valueInCents,
         rowIndex: row.rowIndex,
+        fileRow: {
+          membershipNumber: row.membershipNumber,
+          lastName: row.lastName,
+          firstName: row.firstName,
+          fullName: row.fullName,
+          valueForPeriodSelected: valueInCents,
+          rowIndex: row.rowIndex,
+        },
       });
     }
   }
@@ -332,12 +399,20 @@ export async function processBatchDetailWithBuffer(
       const piEx = profile.personalInfo || {};
       batchExceptions.push({
         profileId: profile._id,
-        membershipNumber: row.membershipNumber,
+        membershipNumber: String(profile.membershipNumber ?? "").trim() || null,
         lastName: row.lastName,
         firstName: row.firstName,
         fullName: fullNameFromFileOrProfile(row, piEx),
         valueForPeriodSelected: null,
         rowIndex: row.rowIndex,
+        fileRow: {
+          membershipNumber: row.membershipNumber,
+          lastName: row.lastName,
+          firstName: row.firstName,
+          fullName: row.fullName,
+          valueForPeriodSelected: null,
+          rowIndex: row.rowIndex,
+        },
       });
       continue;
     }
@@ -349,7 +424,7 @@ export async function processBatchDetailWithBuffer(
       const pref = profile.preferences || {};
       batchPayments.push({
         profileId: profile._id,
-        membershipNumber: profile.membershipNumber || row.membershipNumber,
+        membershipNumber: String(profile.membershipNumber ?? "").trim(),
         valueForPeriodSelected: valueInCents,
         rowIndex: row.rowIndex,
         forename: pi.forename ?? null,
@@ -376,12 +451,21 @@ export async function processBatchDetailWithBuffer(
       });
     } else {
       batchExceptions.push({
-        membershipNumber: row.membershipNumber,
+        profileId: null,
+        membershipNumber: null,
         lastName: row.lastName,
         firstName: row.firstName,
         fullName: row.fullName,
         valueForPeriodSelected: valueInCents,
         rowIndex: row.rowIndex,
+        fileRow: {
+          membershipNumber: row.membershipNumber,
+          lastName: row.lastName,
+          firstName: row.firstName,
+          fullName: row.fullName,
+          valueForPeriodSelected: valueInCents,
+          rowIndex: row.rowIndex,
+        },
       });
     }
   }
@@ -407,12 +491,20 @@ export function batchPaymentEntryToException(payment) {
   const fr = payment.fileRow || {};
   return {
     profileId: payment.profileId || null,
-    membershipNumber: payment.membershipNumber,
+    membershipNumber: payment.membershipNumber ?? null,
     lastName: fr.lastName ?? payment.surname ?? null,
     firstName: fr.firstName ?? payment.forename ?? null,
     fullName: fr.fullName ?? payment.fullName ?? null,
     valueForPeriodSelected: fr.valueForPeriodSelected ?? null,
     rowIndex: fr.rowIndex ?? null,
+    fileRow: {
+      membershipNumber: fr.membershipNumber ?? null,
+      lastName: fr.lastName ?? null,
+      firstName: fr.firstName ?? null,
+      fullName: fr.fullName ?? null,
+      valueForPeriodSelected: fr.valueForPeriodSelected ?? null,
+      rowIndex: fr.rowIndex ?? null,
+    },
   };
 }
 
@@ -423,7 +515,7 @@ export function buildBatchPaymentEntryFromProfile(profile, fileRow) {
   const pref = profile.preferences || {};
   return {
     profileId: profile._id,
-    membershipNumber: profile.membershipNumber || fileRow.membershipNumber,
+    membershipNumber: String(profile.membershipNumber ?? "").trim(),
     valueForPeriodSelected: fileRow.valueForPeriodSelected ?? null,
     rowIndex: fileRow.rowIndex ?? null,
     forename: pi.forename ?? null,

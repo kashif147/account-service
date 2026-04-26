@@ -134,12 +134,21 @@ const BatchDetailSchema = new mongoose.Schema(
           ref: "Profile",
           required: false,
         },
-        membershipNumber: { type: String, required: true, trim: true },
+        /** Resolved membership (CRM) — not the file ref; may be empty when unlinked */
+        membershipNumber: { type: String, required: false, default: null, trim: true },
         lastName: { type: String, default: null, trim: true },
         firstName: { type: String, default: null, trim: true },
         fullName: { type: String, default: null, trim: true },
         valueForPeriodSelected: { type: Number, default: null },
         rowIndex: { type: Number, default: null },
+        fileRow: {
+          membershipNumber: { type: String, default: null, trim: true },
+          lastName: { type: String, default: null, trim: true },
+          firstName: { type: String, default: null, trim: true },
+          fullName: { type: String, default: null, trim: true },
+          valueForPeriodSelected: { type: Number, default: null },
+          rowIndex: { type: Number, default: null },
+        },
       },
     ],
     createdBy: {
