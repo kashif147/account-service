@@ -15,6 +15,18 @@ function memberFullNameFromPersonalInfo(pi) {
   return parts.length ? parts.join(" ") : null;
 }
 
+/** Prefer name from the uploaded row; else CRM profile. */
+function fullNameFromFileOrProfile(row, pi) {
+  const fromFile =
+    row?.fullName != null && String(row.fullName).trim() !== ""
+      ? String(row.fullName).trim()
+      : null;
+  if (fromFile) {
+    return fromFile;
+  }
+  return memberFullNameFromPersonalInfo(pi) || null;
+}
+
 const DEFAULT_COL = {
   MEMBERSHIP_NO: 0,
   LAST_NAME: 1,
@@ -64,27 +76,36 @@ export function parseRows(buffer) {
   ]);
   if (membershipHeader >= 0) {
     membershipCol = membershipHeader;
-    const lastIdx = findColumnIndex(headerRow, [
-      "last name",
-      "surname",
-      "lastname",
-    ]);
-    const firstIdx = findColumnIndex(headerRow, [
-      "first name",
-      "forename",
-      "firstname",
-    ]);
-    const fullIdx = findColumnIndex(headerRow, [
-      "full name",
-      "fullname",
-      "name",
-    ]);
-    const valueIdx = findColumnIndex(headerRow, ["value", "amount", "period"]);
-    if (lastIdx >= 0) lastCol = lastIdx;
-    if (firstIdx >= 0) firstCol = firstIdx;
-    if (fullIdx >= 0) fullNameCol = fullIdx;
-    if (valueIdx >= 0) valueCol = valueIdx;
   }
+  // Map columns from header whenever labels exist (not only when membership col matched).
+  // Do not use generic "name" for full name — it matches "first name" before "full name".
+  const lastIdx = findColumnIndex(headerRow, [
+    "last name",
+    "surname",
+    "lastname",
+  ]);
+  const firstIdx = findColumnIndex(headerRow, [
+    "first name",
+    "forename",
+    "firstname",
+  ]);
+  const fullIdx = findColumnIndex(headerRow, [
+    "full name",
+    "fullname",
+    "member name",
+    "name as shown",
+    "display name",
+  ]);
+  const valueIdx = findColumnIndex(headerRow, [
+    "value",
+    "amount",
+    "period",
+    "value for",
+  ]);
+  if (lastIdx >= 0) lastCol = lastIdx;
+  if (firstIdx >= 0) firstCol = firstIdx;
+  if (fullIdx >= 0) fullNameCol = fullIdx;
+  if (valueIdx >= 0) valueCol = valueIdx;
   const dataRows = [];
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
@@ -177,12 +198,13 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
     const valueInCents = toCents(row.valueForPeriodSelected);
 
     if (profile && valueMissingOrZero) {
+      const piEx = profile.personalInfo || {};
       batchExceptions.push({
         profileId: profile._id,
         membershipNumber: row.membershipNumber,
         lastName: row.lastName,
         firstName: row.firstName,
-        fullName: row.fullName,
+        fullName: fullNameFromFileOrProfile(row, piEx),
         valueForPeriodSelected: null,
         rowIndex: row.rowIndex,
       });
@@ -201,7 +223,7 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
         rowIndex: row.rowIndex,
         forename: pi.forename ?? null,
         surname: pi.surname ?? null,
-        fullName: memberFullNameFromPersonalInfo(pi),
+        fullName: fullNameFromFileOrProfile(row, pi),
         dateOfBirth: pi.dateOfBirth ?? null,
         gender: pi.gender ?? null,
         personalEmail: ci.personalEmail ?? null,
@@ -307,12 +329,13 @@ export async function processBatchDetailWithBuffer(
     const valueInCents = toCents(row.valueForPeriodSelected);
 
     if (profile && valueMissingOrZero) {
+      const piEx = profile.personalInfo || {};
       batchExceptions.push({
         profileId: profile._id,
         membershipNumber: row.membershipNumber,
         lastName: row.lastName,
         firstName: row.firstName,
-        fullName: row.fullName,
+        fullName: fullNameFromFileOrProfile(row, piEx),
         valueForPeriodSelected: null,
         rowIndex: row.rowIndex,
       });
@@ -331,7 +354,7 @@ export async function processBatchDetailWithBuffer(
         rowIndex: row.rowIndex,
         forename: pi.forename ?? null,
         surname: pi.surname ?? null,
-        fullName: memberFullNameFromPersonalInfo(pi),
+        fullName: fullNameFromFileOrProfile(row, pi),
         dateOfBirth: pi.dateOfBirth ?? null,
         gender: pi.gender ?? null,
         personalEmail: ci.personalEmail ?? null,
@@ -405,7 +428,7 @@ export function buildBatchPaymentEntryFromProfile(profile, fileRow) {
     rowIndex: fileRow.rowIndex ?? null,
     forename: pi.forename ?? null,
     surname: pi.surname ?? null,
-    fullName: memberFullNameFromPersonalInfo(pi),
+    fullName: fullNameFromFileOrProfile(fileRow, pi),
     dateOfBirth: pi.dateOfBirth ?? null,
     gender: pi.gender ?? null,
     personalEmail: ci.personalEmail ?? null,
