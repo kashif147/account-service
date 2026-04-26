@@ -2,7 +2,6 @@ import dotenvFlow from "dotenv-flow";
 dotenvFlow.config();
 import { connectDB, disconnectDB } from "../src/config/db.js";
 import { connectProfileDB } from "../src/config/profileDb.js";
-import { connectSubscriptionDB } from "../src/config/subscriptionDb.js";
 import { connectRabbit, closeRabbit } from "../src/config/rabbit.js";
 import logger from "../src/config/logger.js";
 import app from "../src/app.js";
@@ -32,13 +31,6 @@ async function start() {
     logger.warn(
       { err: err.message },
       "Profile Mongo connect failed at boot; batch profile matching unavailable"
-    )
-  );
-
-  connectSubscriptionDB().catch((err) =>
-    logger.warn(
-      { err: err.message },
-      "Subscription Mongo connect failed at boot; batch membership status enrichment unavailable"
     )
   );
 

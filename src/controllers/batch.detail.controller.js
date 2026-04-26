@@ -385,7 +385,7 @@ export async function getBatchDetailById(req, res) {
     }
     const tenantId = req.user?.tenantId || null;
     const createdByName = await resolveCreatedByName(batch.createdBy, tenantId);
-    const withStatus = await enrichBatchDetailWithMembershipStatus(batch);
+    const withStatus = await enrichBatchDetailWithMembershipStatus(batch, req);
     const data = enrichBatchWithDownloadUrl({
       ...withStatus,
       createdBy: createdByName,

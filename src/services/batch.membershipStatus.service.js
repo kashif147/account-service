@@ -1,10 +1,26 @@
 import mongoose from "mongoose";
-import {
-  connectSubscriptionDB,
-  getSubscriptionConnection,
-} from "../config/subscriptionDb.js";
-import { getSubscriptionReadModel } from "../models/subscriptionRead.model.js";
 import logger from "../config/logger.js";
+
+/** One HTTP POST can include up to this many profileIds (must stay ≤ subscription-service max, default 2000). */
+const SERVER_MAX_PROFILE_IDS = 2000;
+const DEFAULT_CHUNK_SIZE = 500;
+
+function chunkSize() {
+  const n = parseInt(
+    process.env.BATCH_SUBSCRIPTION_STATUS_CHUNK_SIZE || String(DEFAULT_CHUNK_SIZE),
+    10,
+  );
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_CHUNK_SIZE;
+  return Math.min(n, SERVER_MAX_PROFILE_IDS);
+}
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
+  }
+  return out;
+}
 
 function profileIdString(row) {
   const p = row.profileId;
@@ -22,99 +38,153 @@ function profileIdString(row) {
 }
 
 /**
- * Picks the subscription document that best represents "current" membership
- * (isCurrent, else latest by startDate) — see subscription-service subscription.model.
+ * Forwards the same trust bundle as other account-service → subscription-service calls
+ * (see stripe.payment.enrichment.service buildForwardHeaders).
  */
-function pickSubscriptionForProfile(rows) {
-  if (!rows?.length) return null;
-  const current = rows.find((r) => r.isCurrent === true);
-  if (current) return current;
-  const sorted = [...rows].sort((a, b) => {
-    const ad = new Date(a.startDate || a.createdAt || 0).getTime();
-    const bd = new Date(b.startDate || b.createdAt || 0).getTime();
-    return bd - ad;
-  });
-  return sorted[0] || null;
-}
-
-/**
- * Builds a map profileId -> subscriptionStatus (subscription collection field).
- */
-async function loadSubscriptionStatusByProfileId(batch) {
-  const map = new Map();
-  const profileIds = new Set();
-  for (const row of batch.batchPayments || []) {
-    const id = profileIdString(row);
-    if (id && mongoose.Types.ObjectId.isValid(id)) profileIds.add(id);
+function buildForwardHeaders(req) {
+  if (!req?.headers) {
+    return { Accept: "application/json", "Content-Type": "application/json" };
   }
-  for (const row of batch.batchExceptions || []) {
-    const id = profileIdString(row);
-    if (id && mongoose.Types.ObjectId.isValid(id)) profileIds.add(id);
-  }
-  if (profileIds.size === 0) {
-    return map;
-  }
-
-  const oids = [...profileIds].map((id) => new mongoose.Types.ObjectId(id));
-  const baseQuery = {
-    profileId: { $in: oids },
-    deleted: { $ne: true },
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
   };
-
-  let Sub;
-  try {
-    Sub = getSubscriptionReadModel();
-  } catch (e) {
-    logger.debug(
-      { err: e.message },
-      "[BatchDetail] subscription read model unavailable",
+  const auth = req.headers.authorization || req.headers.Authorization;
+  if (auth) {
+    headers.Authorization = auth;
+  } else {
+    const aad = req.headers["x-ms-token-aad-access-token"];
+    if (aad) headers.Authorization = `Bearer ${aad}`;
+  }
+  const tenantId =
+    req.tenantId || req.ctx?.tenantId || req.headers["x-tenant-id"];
+  if (tenantId) {
+    headers["x-tenant-id"] = String(
+      Array.isArray(tenantId) ? tenantId[0] : tenantId,
     );
-    return map;
   }
-
-  const runFind = (query) =>
-    Sub.find(query)
-      .select("profileId isCurrent subscriptionStatus startDate createdAt")
-      .lean();
-
-  let query = { ...baseQuery };
-  if (batch.tenantId) {
-    query.tenantId = batch.tenantId;
-  }
-  let subs = await runFind(query);
-
-  if (subs.length === 0 && batch.tenantId) {
-    logger.warn(
-      { batchId: String(batch._id), tenantId: batch.tenantId },
-      "[BatchDetail] 0 subscription rows for batch tenant; retrying without tenant filter",
-    );
-    subs = await runFind(baseQuery);
-  }
-
-  const byProfile = new Map();
-  for (const s of subs) {
-    const k = s.profileId?.toString();
-    if (!k) continue;
-    if (!byProfile.has(k)) byProfile.set(k, []);
-    byProfile.get(k).push(s);
-  }
-
-  for (const [pid, rows] of byProfile) {
-    const sub = pickSubscriptionForProfile(rows);
-    const st = sub?.subscriptionStatus ?? null;
-    if (st != null) {
-      map.set(pid, st);
+  for (const key of [
+    "x-jwt-verified",
+    "x-auth-source",
+    "x-user-id",
+    "x-user-email",
+    "x-user-type",
+    "x-user-roles",
+    "x-user-permissions",
+    "x-token-expires-at",
+  ]) {
+    const v = req.headers[key];
+    if (v != null && v !== "") {
+      headers[key] = Array.isArray(v) ? v[0] : v;
     }
   }
-  return map;
+  return headers;
+}
+
+function parseBatchStatusPayload(json) {
+  if (!json || typeof json !== "object") return [];
+  const inner = json.data;
+  if (inner && Array.isArray(inner.data)) {
+    return inner.data;
+  }
+  if (Array.isArray(inner)) {
+    return inner;
+  }
+  return [];
 }
 
 /**
- * Adds per-row:
- * - `subscriptionStatus` — copied from subscription-service `subscription` documents'
- *   `subscriptionStatus` (see subscription.model.js).
- * - `membershipStatus` — same value (alias for UIs that already use this name).
- * Always sets these keys (null when unknown or DB unavailable).
+ * One bulk POST to subscription-service (never one request per member row).
+ */
+async function postBatchSubscriptionStatusChunk(profileIds, req, baseUrl) {
+  const map = new Map();
+  if (!profileIds.length) {
+    return map;
+  }
+  const url = `${baseUrl}/api/v1/subscriptions/batch-subscription-status`;
+  const controller = new AbortController();
+  const timeoutMs = Math.min(
+    120000,
+    Math.max(15000, profileIds.length * 40 + 10000),
+  );
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: buildForwardHeaders(req),
+      body: JSON.stringify({ profileIds }),
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let body;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = null;
+    }
+    if (!res.ok) {
+      logger.warn(
+        { status: res.status, detail: String(text).slice(0, 500), n: profileIds.length },
+        "[BatchDetail] batch-subscription-status chunk failed",
+      );
+      return map;
+    }
+    for (const row of parseBatchStatusPayload(body)) {
+      if (row?.profileId != null) {
+        map.set(
+          String(row.profileId),
+          row.subscriptionStatus ?? null,
+        );
+      }
+    }
+    return map;
+  } catch (e) {
+    logger.warn(
+      { err: e.message, n: profileIds.length },
+      "[BatchDetail] batch-subscription-status chunk request error",
+    );
+    return map;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * All unique profileIds in a small number of bulk POSTs (chunked), merged into one map.
+ * Chunks run sequentially to limit concurrent calls and reduce 429 risk.
+ */
+async function fetchSubscriptionStatusByProfileId(profileIds, req) {
+  const merged = new Map();
+  if (!profileIds.length) {
+    return merged;
+  }
+  const base = (process.env.SUBSCRIPTION_SERVICE_URL || "").replace(/\/$/, "");
+  if (!base) {
+    logger.warn(
+      "[BatchDetail] SUBSCRIPTION_SERVICE_URL not set; subscriptionStatus will be null",
+    );
+    return merged;
+  }
+
+  const size = chunkSize();
+  const chunks = chunkArray(profileIds, size);
+  for (let i = 0; i < chunks.length; i += 1) {
+    const part = await postBatchSubscriptionStatusChunk(
+      chunks[i],
+      req,
+      base,
+    );
+    for (const [k, v] of part) {
+      merged.set(k, v);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Sets per row:
+ * - `subscriptionStatus` from subscription-service `POST .../batch-subscription-status` (subscription model field)
+ * - `membershipStatus` same value
  */
 function attachStatusFields(batch, statusByProfile) {
   const attach = (row) => {
@@ -135,36 +205,34 @@ function attachStatusFields(batch, statusByProfile) {
   };
 }
 
-export async function enrichBatchDetailWithMembershipStatus(batch) {
+/**
+ * @param {object} batch - batch detail document (lean)
+ * @param {import("express").Request|null} req - needed to forward auth to subscription-service
+ */
+export async function enrichBatchDetailWithMembershipStatus(batch, req) {
   if (!batch) {
     return batch;
   }
-
-  await connectSubscriptionDB().catch((e) => {
+  if (!req) {
     logger.warn(
-      { err: e.message },
-      "[BatchDetail] subscription Mongo connect failed; subscriptionStatus will be null. Set SUBSCRIPTION_MONGODB_URI to the same URI as subscription-service MONGO_URI.",
-    );
-  });
-
-  const conn = getSubscriptionConnection();
-  if (!conn || conn.readyState !== 1) {
-    logger.warn(
-      "[BatchDetail] subscription DB not connected; batch rows will have subscriptionStatus: null. Configure SUBSCRIPTION_MONGODB_URI on account-service.",
+      "[BatchDetail] enrichBatchDetailWithMembershipStatus called without req",
     );
     return attachStatusFields(batch, new Map());
   }
 
-  let statusByProfile;
-  try {
-    statusByProfile = await loadSubscriptionStatusByProfileId(batch);
-  } catch (err) {
-    logger.warn(
-      { err: err.message, batchId: batch._id },
-      "[BatchDetail] subscription lookup failed",
-    );
-    statusByProfile = new Map();
+  const idSet = new Set();
+  for (const row of batch.batchPayments || []) {
+    const id = profileIdString(row);
+    if (id && mongoose.Types.ObjectId.isValid(id)) idSet.add(id);
   }
-
+  for (const row of batch.batchExceptions || []) {
+    const id = profileIdString(row);
+    if (id && mongoose.Types.ObjectId.isValid(id)) idSet.add(id);
+  }
+  const profileIds = [...idSet];
+  const statusByProfile = await fetchSubscriptionStatusByProfileId(
+    profileIds,
+    req,
+  );
   return attachStatusFields(batch, statusByProfile);
 }
