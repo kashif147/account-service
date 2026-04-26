@@ -1,5 +1,8 @@
 import mongoose from "mongoose";
-import { getSubscriptionConnection } from "../config/subscriptionDb.js";
+import {
+  connectSubscriptionDB,
+  getSubscriptionConnection,
+} from "../config/subscriptionDb.js";
 import { getSubscriptionReadModel } from "../models/subscriptionRead.model.js";
 import logger from "../config/logger.js";
 
@@ -20,7 +23,7 @@ function profileIdString(row) {
 
 /**
  * Picks the subscription document that best represents "current" membership
- * (same idea as profile-service subscription client: isCurrent, else latest by date).
+ * (isCurrent, else latest by startDate) — see subscription-service subscription.model.
  */
 function pickSubscriptionForProfile(rows) {
   if (!rows?.length) return null;
@@ -35,29 +38,10 @@ function pickSubscriptionForProfile(rows) {
 }
 
 /**
- * Adds `membershipStatus` (subscription subscriptionStatus value, e.g. Active, Resigned)
- * to each batchPayments / batchExceptions row with a resolvable profileId.
+ * Builds a map profileId -> subscriptionStatus (subscription collection field).
  */
-export async function enrichBatchDetailWithMembershipStatus(batch) {
-  if (!batch) {
-    return batch;
-  }
-  const conn = getSubscriptionConnection();
-  if (!conn || conn.readyState !== 1) {
-    return batch;
-  }
-
-  let Sub;
-  try {
-    Sub = getSubscriptionReadModel();
-  } catch (e) {
-    logger.debug(
-      { err: e.message },
-      "[BatchDetail] subscription model unavailable",
-    );
-    return batch;
-  }
-
+async function loadSubscriptionStatusByProfileId(batch) {
+  const map = new Map();
   const profileIds = new Set();
   for (const row of batch.batchPayments || []) {
     const id = profileIdString(row);
@@ -67,31 +51,44 @@ export async function enrichBatchDetailWithMembershipStatus(batch) {
     const id = profileIdString(row);
     if (id && mongoose.Types.ObjectId.isValid(id)) profileIds.add(id);
   }
-
   if (profileIds.size === 0) {
-    return batch;
+    return map;
   }
 
   const oids = [...profileIds].map((id) => new mongoose.Types.ObjectId(id));
-  const query = {
+  const baseQuery = {
     profileId: { $in: oids },
     deleted: { $ne: true },
   };
+
+  let Sub;
+  try {
+    Sub = getSubscriptionReadModel();
+  } catch (e) {
+    logger.debug(
+      { err: e.message },
+      "[BatchDetail] subscription read model unavailable",
+    );
+    return map;
+  }
+
+  const runFind = (query) =>
+    Sub.find(query)
+      .select("profileId isCurrent subscriptionStatus startDate createdAt")
+      .lean();
+
+  let query = { ...baseQuery };
   if (batch.tenantId) {
     query.tenantId = batch.tenantId;
   }
+  let subs = await runFind(query);
 
-  let subs = [];
-  try {
-    subs = await Sub.find(query)
-      .select("profileId isCurrent subscriptionStatus startDate createdAt")
-      .lean();
-  } catch (err) {
+  if (subs.length === 0 && batch.tenantId) {
     logger.warn(
-      { err: err.message, batchId: batch._id },
-      "[BatchDetail] subscription lookup failed",
+      { batchId: String(batch._id), tenantId: batch.tenantId },
+      "[BatchDetail] 0 subscription rows for batch tenant; retrying without tenant filter",
     );
-    return batch;
+    subs = await runFind(baseQuery);
   }
 
   const byProfile = new Map();
@@ -102,24 +99,72 @@ export async function enrichBatchDetailWithMembershipStatus(batch) {
     byProfile.get(k).push(s);
   }
 
-  const statusByProfile = new Map();
   for (const [pid, rows] of byProfile) {
     const sub = pickSubscriptionForProfile(rows);
     const st = sub?.subscriptionStatus ?? null;
-    if (st != null) statusByProfile.set(pid, st);
+    if (st != null) {
+      map.set(pid, st);
+    }
   }
+  return map;
+}
 
+/**
+ * Adds per-row:
+ * - `subscriptionStatus` — copied from subscription-service `subscription` documents'
+ *   `subscriptionStatus` (see subscription.model.js).
+ * - `membershipStatus` — same value (alias for UIs that already use this name).
+ * Always sets these keys (null when unknown or DB unavailable).
+ */
+function attachStatusFields(batch, statusByProfile) {
   const attach = (row) => {
     const pid = profileIdString(row);
-    const membershipStatus = pid
+    const subscriptionStatus = pid
       ? statusByProfile.get(pid) ?? null
       : null;
-    return { ...row, membershipStatus };
+    return {
+      ...row,
+      subscriptionStatus,
+      membershipStatus: subscriptionStatus,
+    };
   };
-
   return {
     ...batch,
     batchPayments: (batch.batchPayments || []).map(attach),
     batchExceptions: (batch.batchExceptions || []).map(attach),
   };
+}
+
+export async function enrichBatchDetailWithMembershipStatus(batch) {
+  if (!batch) {
+    return batch;
+  }
+
+  await connectSubscriptionDB().catch((e) => {
+    logger.warn(
+      { err: e.message },
+      "[BatchDetail] subscription Mongo connect failed; subscriptionStatus will be null. Set SUBSCRIPTION_MONGODB_URI to the same URI as subscription-service MONGO_URI.",
+    );
+  });
+
+  const conn = getSubscriptionConnection();
+  if (!conn || conn.readyState !== 1) {
+    logger.warn(
+      "[BatchDetail] subscription DB not connected; batch rows will have subscriptionStatus: null. Configure SUBSCRIPTION_MONGODB_URI on account-service.",
+    );
+    return attachStatusFields(batch, new Map());
+  }
+
+  let statusByProfile;
+  try {
+    statusByProfile = await loadSubscriptionStatusByProfileId(batch);
+  } catch (err) {
+    logger.warn(
+      { err: err.message, batchId: batch._id },
+      "[BatchDetail] subscription lookup failed",
+    );
+    statusByProfile = new Map();
+  }
+
+  return attachStatusFields(batch, statusByProfile);
 }
