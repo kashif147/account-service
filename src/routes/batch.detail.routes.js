@@ -9,6 +9,7 @@ import {
   getAllBatchDetails,
   resolveBatchException,
   addPaymentToBatch,
+  excludeBatchPaymentsToExceptions,
   processBatchDetail,
   getBatchQueueStats,
 } from "../controllers/batch.detail.controller.js";
@@ -52,6 +53,13 @@ router.post(
   requireCrm,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   addPaymentToBatch
+);
+
+router.post(
+  "/exclude-payments/:batchDetailId",
+  requireCrm,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  excludeBatchPaymentsToExceptions
 );
 
 router.post(

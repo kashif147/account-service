@@ -592,6 +592,124 @@ export async function resolveBatchException(req, res) {
   }
 }
 
+/**
+ * Move selected batch payment rows into batch exceptions (e.g. manual exclude from payment file).
+ * POST /api/batch-details/exclude-payments/:batchDetailId
+ * Body: { paymentEntryIds: string[] } — Mongo _id of each batchPayments subdocument
+ */
+export async function excludeBatchPaymentsToExceptions(req, res) {
+  try {
+    if (req.user?.userType !== "CRM") {
+      return res.status(403).json({
+        success: false,
+        message: "Only CRM users can exclude batch payment rows",
+      });
+    }
+
+    const { batchDetailId } = req.params;
+    const raw = req.body?.paymentEntryIds;
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "paymentEntryIds must be a non-empty array of batch payment subdocument _id values",
+      });
+    }
+    const uniqueIds = [...new Set(raw.map((id) => String(id).trim()).filter(Boolean))];
+    if (uniqueIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid payment entry ids provided",
+      });
+    }
+
+    const batch = await BatchDetail.findOne({
+      _id: batchDetailId,
+      isDeleted: false,
+    });
+    if (!batch) {
+      return res.status(404).json({
+        success: false,
+        message: "Batch not found. Please check the batch ID.",
+      });
+    }
+
+    const st = String(batch.batchStatus || "").trim().toLowerCase();
+    if (st !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Batch can only be edited while status is pending",
+        batchStatus: batch.batchStatus,
+      });
+    }
+
+    const payments = Array.isArray(batch.batchPayments) ? batch.batchPayments : [];
+    const idWanted = new Set(uniqueIds);
+    const toMove = payments.filter(
+      (p) => p._id && idWanted.has(String(p._id)),
+    );
+    if (toMove.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "No matching batch payment rows for the given ids. Select rows on Batch Payments and try again.",
+      });
+    }
+    if (toMove.length !== uniqueIds.length) {
+      return res.status(400).json({
+        success: false,
+        message: `Only ${toMove.length} of ${uniqueIds.length} id(s) matched rows in this batch. None were moved.`,
+        matched: toMove.length,
+        requested: uniqueIds.length,
+      });
+    }
+
+    const removeSet = new Set(toMove.map((p) => String(p._id)));
+    batch.batchPayments = payments.filter((p) => !removeSet.has(String(p._id)));
+    batch.batchExceptions = batch.batchExceptions || [];
+    for (const p of toMove) {
+      const ex = batchPaymentProcess.batchPaymentEntryToException(p);
+      if (ex) {
+        batch.batchExceptions.push(ex);
+      }
+    }
+    await batch.save();
+
+    const updated = await BatchDetail.findById(batch._id)
+      .populate(batchPaymentsProfilePopulate())
+      .lean();
+    const tenantId = req.user?.tenantId || null;
+    const createdByName = await resolveCreatedByName(
+      updated.createdBy,
+      tenantId,
+    );
+    const withStatus = await enrichBatchDetailWithMembershipStatus(
+      updated,
+      req,
+    );
+    const data = enrichBatchWithDownloadUrl({
+      ...withStatus,
+      createdBy: createdByName,
+    });
+    const n = toMove.length;
+    return res.status(200).json({
+      message:
+        n === 1
+          ? "1 member moved to exceptions"
+          : `${n} members moved to exceptions`,
+      data,
+    });
+  } catch (error) {
+    logger.error(
+      { err: error.message },
+      "[BatchDetail] excludeBatchPaymentsToExceptions",
+    );
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to exclude batch payment rows",
+    });
+  }
+}
+
 export async function addPaymentToBatch(req, res) {
   try {
     if (req.user?.userType !== "CRM") {

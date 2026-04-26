@@ -376,6 +376,23 @@ export async function processBatchDetailWithBuffer(
   };
 }
 
+/**
+ * Maps a batch payment subdocument into a batch exception row (manual exclude from payments).
+ */
+export function batchPaymentEntryToException(payment) {
+  if (!payment) return null;
+  const fr = payment.fileRow || {};
+  return {
+    profileId: payment.profileId || null,
+    membershipNumber: payment.membershipNumber,
+    lastName: fr.lastName ?? payment.surname ?? null,
+    firstName: fr.firstName ?? payment.forename ?? null,
+    fullName: fr.fullName ?? payment.fullName ?? null,
+    valueForPeriodSelected: fr.valueForPeriodSelected ?? null,
+    rowIndex: fr.rowIndex ?? null,
+  };
+}
+
 export function buildBatchPaymentEntryFromProfile(profile, fileRow) {
   const pi = profile.personalInfo || {};
   const ci = profile.contactInfo || {};
