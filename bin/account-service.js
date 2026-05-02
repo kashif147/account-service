@@ -4,12 +4,13 @@ import { connectDB, disconnectDB } from "../src/config/db.js";
 import { connectProfileDB } from "../src/config/profileDb.js";
 import { connectRabbit, closeRabbit } from "../src/config/rabbit.js";
 import logger from "../src/config/logger.js";
-import app from "../src/app.js";
+import app, { initializeMessagingMiddleware } from "../src/app.js";
 
 let server;
 
 async function start() {
-  // start HTTP immediately
+  await initializeMessagingMiddleware();
+
   const port = Number(process.env.PORT || 4000);
   server = app.listen(port, () => {
     logger.info({ port }, "API listening");

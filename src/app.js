@@ -93,7 +93,7 @@ app.set("etag", false);
 // Initialize event system - Now using middleware
 let eventSystemInitialized = false;
 
-async function initializeEventSystem() {
+export async function initializeMessagingMiddleware() {
   const rabbitUrl = process.env.RABBIT_URL || process.env.RABBITMQ_URL;
   if (!rabbitUrl) {
     logger.warn(
@@ -119,8 +119,6 @@ async function initializeEventSystem() {
   }
 }
 
-// Initialize event system on startup
-initializeEventSystem();
 startBatchProcessingCron();
 
 // Graceful shutdown
