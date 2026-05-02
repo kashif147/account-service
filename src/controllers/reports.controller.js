@@ -52,7 +52,7 @@ export async function memberStatement(req, res, next) {
       .sort({ date: 1, createdAt: 1 })
       .lean();
 
-    // Filter member-facing GL; category-change rows stay as stored (Invoice + Adjustment)
+    // Filter member-facing GL; category-change rows stay as stored (-CATNET or legacy INVNEW+CADJ)
     const txns = consolidateCategoryChanges(allTxns);
     const tenantId = req.tenantId || req.ctx?.tenantId;
     const withPi = tenantId
@@ -837,7 +837,8 @@ export async function memberSummaryBatch(req, res, next) {
   }
 }
 
-const CATEGORY_CHANGE_DOCNO_RE = /^(.+?)-(INVNEW|CADJ|COLD|CNEW)$/;
+const CATEGORY_CHANGE_DOCNO_RE =
+  /^(.+?)-(INVNEW|CADJ|COLD|CNEW|CATNET)$/;
 
 /** Human-readable reference for ledger (membership category, not docNo IDs). */
 function buildMemberLedgerReference(txn) {
@@ -851,6 +852,25 @@ function buildMemberLedgerReference(txn) {
       txn.entries?.find((e) => e.categoryName)?.categoryName ||
       txn.memo?.match(/Subscription\s+\d{4}\s*–\s*(.+)$/)?.[1]?.trim();
     if (cat) return cat;
+  }
+
+  if (docNo.endsWith("-CATNET")) {
+    const oldLine = txn.entries?.find(
+      (e) => e.adjSubType === "category-change-old-tier-release",
+    );
+    const newLine = txn.entries?.find(
+      (e) =>
+        e.dc === "C" &&
+        e.categoryName &&
+        (e.revenueSubType === "fee" ||
+          e.revenueSubType === "Fee Increase" ||
+          e.revenueSubType === "Fee Decrease"),
+    );
+    const oldCat = oldLine?.categoryName;
+    const newCat = newLine?.categoryName;
+    if (oldCat && newCat) return `${oldCat} → ${newCat}`;
+    if (newCat) return newCat;
+    if (oldCat) return oldCat;
   }
 
   if (/(?:-CADJ|-COLD|-CNEW)$/.test(docNo)) {
@@ -911,8 +931,8 @@ function normalizeLedgerGlTxn(txn) {
 }
 
 /**
- * Member-facing GL list: pass through category-change journals as stored (Invoice -INVNEW,
- * Adjustment -CADJ / legacy -COLD -CNEW) so each item matches other GL documents.
+ * Member-facing GL list: pass through category-change journals as stored (Adjustment -CATNET,
+ * legacy Invoice -INVNEW + Adjustment -CADJ / -COLD -CNEW) so each item matches other GL documents.
  * Drops internal-only category-change adjustments and settlements. Pro-rata fee
  * adjustments are member-visible (they explain AR after the full-year invoice).
  */

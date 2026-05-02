@@ -12,8 +12,8 @@ import {
   prorataFromJoinToYearEnd,
   yearBoundsFrom,
   prorataForPeriod,
-  laterIsoDate,
 } from "../helpers/prorata.js";
+import { buildCategoryChangeJournalPayload } from "../helpers/categoryChangeJournal.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
@@ -504,12 +504,17 @@ export async function invoice(req, res, next) {
 }
 
 /**
- * Post prorated category-change journals (fee increase/decrease via unused old + pre-period new credits).
- * Shared by HTTP changeCategory and subscription-service RabbitMQ consumer.
+ * Category change: single balanced adjustment — member pays only prorated amounts for the calendar year.
  *
- * @param {string} previousSubscriptionStartDate - First day on the **old** tier (YYYY-MM-DD).
- *   Same source everywhere: subscription document **startDate before category update** (Rabbit event
- *   `previousStartDate`, or required field `previousStartDate` on POST change-category).
+ * - Recognises **new** tier revenue for **changeDate → year-end** only (not full annual).
+ * - Releases **old** tier revenue for the same tail (**unused** portion after switch), matching prior
+ *   full-year-old-tier billing convention.
+ * - Net AR = new-tier slice − old-tier slice = prorated (newAnnual − oldAnnual) over those days.
+ *
+ * Fee Increase / Fee Increase lines reflect the **incremental** new-tier credit when upgrading;
+ * Fee Decrease when downgrading. Assumes prior membership invoices followed the same annual basis.
+ *
+ * @param {string} previousSubscriptionStartDate - Subscription **startDate before category update** (YYYY-MM-DD).
  */
 export async function postCategoryChangeJournals({
   date,
@@ -521,148 +526,35 @@ export async function postCategoryChangeJournals({
   newIncomeCode,
   newCategoryName,
   newAnnualFee,
-  changeDate, // ISO (within target year)
+  changeDate,
   previousSubscriptionStartDate,
   periodBucket = "current",
   userId,
 }) {
-  if (!Number.isInteger(oldAnnualFee) || oldAnnualFee < 0) {
-    throw AppError.badRequest(
-      "oldAnnualFee must be a non-negative integer (minor units)"
-    );
-  }
-  if (!Number.isInteger(newAnnualFee) || newAnnualFee <= 0) {
-    throw AppError.badRequest(
-      "newAnnualFee must be a positive integer (minor units)"
-    );
-  }
+  const { lines, memo } = buildCategoryChangeJournalPayload({
+    memberId,
+    oldIncomeCode,
+    oldCategoryName,
+    oldAnnualFee,
+    newIncomeCode,
+    newCategoryName,
+    newAnnualFee,
+    changeDate,
+    previousSubscriptionStartDate,
+    periodBucket,
+  });
 
-  const { startISO, endISO, year } = yearBoundsFrom(changeDate);
-  const changeMinusISO = new Date(
-    new Date(changeDate).getTime() - 24 * 3600 * 1000
-  )
-    .toISOString()
-    .slice(0, 10);
+  const txn = await postBalancedJournal({
+    date,
+    userId,
+    docType: "Adjustment",
+    docNo: `${docNoBase}-CATNET`,
+    memo,
+    settlement: { status: "PENDING" },
+    lines,
+  });
 
-  const prevStartYmd = String(previousSubscriptionStartDate ?? "")
-    .trim()
-    .split("T")[0];
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(prevStartYmd)) {
-    throw AppError.badRequest(
-      "previousSubscriptionStartDate is required (YYYY-MM-DD): same as subscription startDate before category change"
-    );
-  }
-
-  let preNewFromISO = startISO;
-  let creditNewPre;
-  if (prevStartYmd <= changeMinusISO) {
-    preNewFromISO = laterIsoDate(startISO, prevStartYmd);
-    creditNewPre =
-      preNewFromISO <= changeMinusISO
-        ? prorataForPeriod(newAnnualFee, preNewFromISO, changeMinusISO)
-        : 0;
-  } else {
-    creditNewPre = 0;
-    preNewFromISO = laterIsoDate(startISO, prevStartYmd);
-  }
-
-  const isUpgrade = newAnnualFee > oldAnnualFee;
-  const isDowngrade = newAnnualFee < oldAnnualFee;
-  const categoryChangeRevenueSubType = isUpgrade
-    ? "Fee Increase"
-    : isDowngrade
-      ? "Fee Decrease"
-      : "fee";
-
-  const results = [];
-
-  results.push(
-    await postBalancedJournal({
-      date,
-      userId,
-      docType: "Invoice",
-      docNo: `${docNoBase}-INVNEW`,
-      memo: `Subscription ${year} – ${newCategoryName}`,
-      settlement: { status: "PENDING" },
-      lines: [
-        {
-          accountCode: "1400",
-          dc: "D",
-          amount: newAnnualFee,
-          memberId,
-          periodBucket,
-        },
-        {
-          accountCode: newIncomeCode,
-          dc: "C",
-          amount: newAnnualFee,
-          revenueSubType: categoryChangeRevenueSubType,
-          categoryName: newCategoryName,
-        },
-      ],
-    })
-  );
-
-  const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, endISO);
-  const totalFeeAdjustmentCredit = creditOldUnused + creditNewPre;
-
-  if (totalFeeAdjustmentCredit > 0) {
-    const memoParts = [];
-    if (creditOldUnused > 0) {
-      memoParts.push(
-        `unused (${oldCategoryName}) ${changeDate} → ${endISO}`
-      );
-    }
-    if (creditNewPre > 0) {
-      memoParts.push(
-        `pre-change (${newCategoryName}) ${preNewFromISO} → ${changeMinusISO}`
-      );
-    }
-
-    const lines = [];
-    // 4900 lines omit memberId so member ledger shows only the AR leg (like invoice revenue lines).
-    if (creditOldUnused > 0) {
-      lines.push({
-        accountCode: "4900",
-        dc: "D",
-        amount: creditOldUnused,
-        adjSubType: isUpgrade
-          ? "category-upgrade-unused-credit"
-          : "category-downgrade-unused-credit",
-        categoryName: oldCategoryName,
-      });
-    }
-    if (creditNewPre > 0) {
-      lines.push({
-        accountCode: "4900",
-        dc: "D",
-        amount: creditNewPre,
-        adjSubType: "category-change-prorata-credit",
-        categoryName: newCategoryName,
-      });
-    }
-    lines.push({
-      accountCode: "1400",
-      dc: "C",
-      amount: totalFeeAdjustmentCredit,
-      memberId,
-      periodBucket,
-    });
-
-    results.push(
-      await postBalancedJournal({
-        date,
-        userId,
-        docType: "Adjustment",
-        docNo: `${docNoBase}-CADJ`,
-        memo: `Adjustment – Category change proration (${memoParts.join("; ")})`,
-        settlement: { status: "PENDING" },
-        lines,
-      })
-    );
-  }
-
-  return results;
+  return [txn];
 }
 
 export async function changeCategory(req, res, next) {

@@ -5,6 +5,7 @@
  */
 
 const PRORATA_SUFFIX = "-PRORATA";
+const CATNET_SUFFIX = "-CATNET";
 const INVNEW_SUFFIX = "-INVNEW";
 const CADJ_SUFFIX = "-CADJ";
 
@@ -81,6 +82,34 @@ function normalizeGroupedRow(txn) {
   return base;
 }
 
+/** Doc column label for single CATNET adjustment (Fee Increase / Fee Decrease / neutral). */
+function feeChangeLedgerDisplayDocTypeCatNet(txn) {
+  const entries = txn.entries || [];
+  if (entries.some((e) => e.revenueSubType === "Fee Increase"))
+    return "Fee Increase";
+  if (entries.some((e) => e.revenueSubType === "Fee Decrease"))
+    return "Fee Decrease";
+  return "Fee Adjustment";
+}
+
+function pickCatNetCategories(txn) {
+  const oldLine = txn.entries?.find(
+    (e) => e.adjSubType === "category-change-old-tier-release",
+  );
+  const newLine = txn.entries?.find(
+    (e) =>
+      e.dc === "C" &&
+      e.categoryName &&
+      (e.revenueSubType === "fee" ||
+        e.revenueSubType === "Fee Increase" ||
+        e.revenueSubType === "Fee Decrease"),
+  );
+  return {
+    oldCat: oldLine?.categoryName ?? null,
+    newCat: newLine?.categoryName ?? null,
+  };
+}
+
 /** Doc column label for category-change bundle (from INVNEW revenue line). */
 function feeChangeLedgerDisplayDocType(invNew) {
   const feeLine = invNew.entries?.find(
@@ -148,6 +177,49 @@ function buildFeeChangeSimpleRow(invNew, cadj, memberId) {
   });
 }
 
+/** Single-row simple view for CATNET category-change adjustment (one GL doc). */
+function buildFeeChangeCatNetRow(txn, memberId) {
+  const norm = memberNormId(memberId);
+  const netDr = netMemberArCents(txn, norm);
+  const { oldCat, newCat } = pickCatNetCategories(txn);
+  const memoParts = [];
+  if (oldCat && newCat) memoParts.push(`${oldCat} → ${newCat}`);
+  else if (newCat) memoParts.push(newCat);
+  const memo =
+    memoParts.length > 0
+      ? `Membership category change — ${memoParts[0]}`
+      : txn.memo || "Membership category change (fee adjusted for the year)";
+  const line = syntheticArLine({
+    memberId,
+    netDrCents: netDr,
+    periodBucket:
+      txn.entries?.find((e) => e.memberId)?.periodBucket || "current",
+  });
+  const entries = line ? [line] : [];
+  const ledgerDisplayDocType = feeChangeLedgerDisplayDocTypeCatNet(txn);
+
+  return normalizeGroupedRow({
+    _id: `simple-fee-change-${String(txn._id)}`,
+    date: txn.date,
+    createdAt: txn.createdAt || txn.date,
+    docType: "Adjustment",
+    docNo: String(txn.docNo || ""),
+    memo,
+    displayLabel: ledgerDisplayDocType,
+    ledgerDisplayDocType,
+    ledgerPresentation: "fee_change_simple",
+    groupKind: "category_change",
+    sourceDocNos: [String(txn.docNo || "")].filter(Boolean),
+    entries,
+    reference:
+      oldCat && newCat
+        ? `Category change — ${oldCat} → ${newCat}`
+        : "Category change",
+    paymentIntentId: null,
+    txType: null,
+  });
+}
+
 /** Initial subscription prorata row: show as Fee Adjustment in simple view. */
 function withProrataSimpleLabels(txn) {
   return {
@@ -171,6 +243,11 @@ export function simplifyMemberLedgerPresentations(items, memberId) {
     if (id && consumed.has(id)) continue;
 
     const docNo = String(txn.docNo || "");
+
+    if (docNo.endsWith(CATNET_SUFFIX)) {
+      out.push(buildFeeChangeCatNetRow(txn, memberId));
+      continue;
+    }
 
     if (docNo.endsWith(INVNEW_SUFFIX)) {
       const base = docNo.slice(0, -INVNEW_SUFFIX.length);
