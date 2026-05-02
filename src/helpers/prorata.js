@@ -31,6 +31,15 @@ export function yearBoundsFrom(dateISO) {
   };
 }
 
+/** Latest calendar day (YYYY-MM-DD); invalid inputs fall back to the other. */
+export function laterIsoDate(isoA, isoB) {
+  const a = dayjs(String(isoA ?? "").split("T")[0]);
+  const b = dayjs(String(isoB ?? "").split("T")[0]);
+  if (!a.isValid()) return b.format("YYYY-MM-DD");
+  if (!b.isValid()) return a.format("YYYY-MM-DD");
+  return a.isAfter(b) ? a.format("YYYY-MM-DD") : b.format("YYYY-MM-DD");
+}
+
 // export function daysInclusive(aISO, bISO) {
 //   const a = dayjs(aISO).startOf("day");
 //   const b = dayjs(bISO).endOf("day");

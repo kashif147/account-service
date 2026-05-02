@@ -706,8 +706,13 @@ export async function handleMemberCreated(payload) {
       : dateJoined;
     const prorationStartDate = invoiceDate;
 
-    const retrospectiveReferenceIso =
-      processingDateOnly ?? new Date().toISOString().split("T")[0];
+    // Retrospective pricing (inactive rows / cross-year / 90-day) must reflect when billing actually runs,
+    // not only bulk processingDate. If processingDate equals dateJoined (e.g. 20/01/2025) but this handler
+    // runs later (e.g. 2026), we still need reference ≥ today so prior-year membership picks inactive bands.
+    const todayIso = new Date().toISOString().split("T")[0];
+    const retrospectiveReferenceIso = processingDateOnly
+      ? laterIsoDate(processingDateOnly, todayIso)
+      : todayIso;
 
     // Get income code and annual fee (from pricing if available)
     // Wrap in global limiter to prevent connection pool exhaustion

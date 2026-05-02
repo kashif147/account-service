@@ -12,6 +12,7 @@ import {
   prorataFromJoinToYearEnd,
   yearBoundsFrom,
   prorataForPeriod,
+  laterIsoDate,
 } from "../helpers/prorata.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
@@ -505,6 +506,10 @@ export async function invoice(req, res, next) {
 /**
  * Post prorated category-change journals (fee increase/decrease via unused old + pre-period new credits).
  * Shared by HTTP changeCategory and subscription-service RabbitMQ consumer.
+ *
+ * @param {string} previousSubscriptionStartDate - First day on the **old** tier (YYYY-MM-DD).
+ *   Same source everywhere: subscription document **startDate before category update** (Rabbit event
+ *   `previousStartDate`, or required field `previousStartDate` on POST change-category).
  */
 export async function postCategoryChangeJournals({
   date,
@@ -517,6 +522,7 @@ export async function postCategoryChangeJournals({
   newCategoryName,
   newAnnualFee,
   changeDate, // ISO (within target year)
+  previousSubscriptionStartDate,
   periodBucket = "current",
   userId,
 }) {
@@ -537,6 +543,28 @@ export async function postCategoryChangeJournals({
   )
     .toISOString()
     .slice(0, 10);
+
+  const prevStartYmd = String(previousSubscriptionStartDate ?? "")
+    .trim()
+    .split("T")[0];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(prevStartYmd)) {
+    throw AppError.badRequest(
+      "previousSubscriptionStartDate is required (YYYY-MM-DD): same as subscription startDate before category change"
+    );
+  }
+
+  let preNewFromISO = startISO;
+  let creditNewPre;
+  if (prevStartYmd <= changeMinusISO) {
+    preNewFromISO = laterIsoDate(startISO, prevStartYmd);
+    creditNewPre =
+      preNewFromISO <= changeMinusISO
+        ? prorataForPeriod(newAnnualFee, preNewFromISO, changeMinusISO)
+        : 0;
+  } else {
+    creditNewPre = 0;
+    preNewFromISO = laterIsoDate(startISO, prevStartYmd);
+  }
 
   const isUpgrade = newAnnualFee > oldAnnualFee;
   const isDowngrade = newAnnualFee < oldAnnualFee;
@@ -576,11 +604,6 @@ export async function postCategoryChangeJournals({
   );
 
   const creditOldUnused = prorataForPeriod(oldAnnualFee, changeDate, endISO);
-  const creditNewPre = prorataForPeriod(
-    newAnnualFee,
-    startISO,
-    changeMinusISO
-  );
   const totalFeeAdjustmentCredit = creditOldUnused + creditNewPre;
 
   if (totalFeeAdjustmentCredit > 0) {
@@ -592,7 +615,7 @@ export async function postCategoryChangeJournals({
     }
     if (creditNewPre > 0) {
       memoParts.push(
-        `pre-change (${newCategoryName}) ${startISO} → ${changeMinusISO}`
+        `pre-change (${newCategoryName}) ${preNewFromISO} → ${changeMinusISO}`
       );
     }
 
@@ -644,6 +667,7 @@ export async function postCategoryChangeJournals({
 
 export async function changeCategory(req, res, next) {
   try {
+    // previousStartDate = subscription startDate before category change (same snapshot PUT uses for Rabbit).
     const {
       date,
       docNoBase,
@@ -655,6 +679,7 @@ export async function changeCategory(req, res, next) {
       newCategoryName,
       newAnnualFee,
       changeDate,
+      previousStartDate,
       periodBucket = "current",
     } = req.body;
 
@@ -669,6 +694,7 @@ export async function changeCategory(req, res, next) {
       newCategoryName,
       newAnnualFee,
       changeDate,
+      previousSubscriptionStartDate: previousStartDate,
       periodBucket,
       userId: req.ctx?.userId,
     });

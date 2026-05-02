@@ -110,6 +110,7 @@ export async function handleSubscriptionCategoryChanged(payload) {
     newCategoryName: newCat,
     newAnnualFee,
     changeDate: newStart,
+    previousSubscriptionStartDate: prevStart,
     periodBucket: "current",
   });
 

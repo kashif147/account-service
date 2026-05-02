@@ -77,7 +77,15 @@ export const changeCategoryRules = [
   body("newCategoryName").isString().notEmpty(),
   body("newAnnualFee").isFloat({ gt: 0 }),
 
-  body("changeDate").isISO8601().withMessage("changeDate must be ISO (YYYY-MM-DD)")
+  body("changeDate").isISO8601().withMessage("changeDate must be ISO (YYYY-MM-DD)"),
+
+  body("previousStartDate")
+    .notEmpty()
+    .withMessage(
+      "previousStartDate is required — subscription startDate before category change (same as PUT /subscriptions/:id snapshot)"
+    )
+    .isISO8601()
+    .withMessage("previousStartDate must be ISO (YYYY-MM-DD)")
 ];
 
 export const listJournalsRules = [
