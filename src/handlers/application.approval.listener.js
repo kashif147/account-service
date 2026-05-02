@@ -88,6 +88,93 @@ function laterIsoDate(isoA, isoB) {
   return a > b ? a : b;
 }
 
+/** Calendar days from anchor (UTC date-only) to reference (inclusive span); null if invalid. */
+function utcCalendarDaysFromAnchorToReference(anchorDate, referenceDate) {
+  if (
+    !anchorDate ||
+    !referenceDate ||
+    Number.isNaN(anchorDate.getTime()) ||
+    Number.isNaN(referenceDate.getTime())
+  ) {
+    return null;
+  }
+  const msPerDay = 86400000;
+  return Math.floor(
+    (referenceDate.getTime() - anchorDate.getTime()) / msPerDay
+  );
+}
+
+function utcTodayDateOnly() {
+  const n = new Date();
+  return new Date(
+    Date.UTC(
+      n.getUTCFullYear(),
+      n.getUTCMonth(),
+      n.getUTCDate(),
+      12,
+      0,
+      0,
+      0
+    )
+  );
+}
+
+/**
+ * Retrospective pricing when either:
+ * - Any anchor (membership start / dateJoined, submissionDate, applicationDate) is strictly more than
+ *   RETROSPECTIVE_PRICING_LAG_DAYS before the approval/processing day (bulk processingDate, else today UTC), or
+ * - Any anchor falls in a calendar year before the reference year (e.g. joined late December, approved January —
+ *   allows inactive catalogue rows for the membership-start year such as 2025 fees).
+ * When true, fee lookup omits pricing isActive so inactive bands matching the subscription start may apply.
+ */
+const RETROSPECTIVE_PRICING_LAG_DAYS = 90;
+
+function collectRetrospectiveAnchorDates(subscriptionDetails, membershipStartIso) {
+  const anchors = [];
+  const push = (value) => {
+    const p = parseDate(value);
+    if (p && !Number.isNaN(p.getTime())) anchors.push(p);
+  };
+  push(membershipStartIso);
+  if (subscriptionDetails && typeof subscriptionDetails === "object") {
+    push(subscriptionDetails.dateJoined);
+    push(subscriptionDetails.submissionDate);
+    push(subscriptionDetails.applicationDate);
+  }
+  const seen = new Set();
+  const unique = [];
+  for (const d of anchors) {
+    const key = d.toISOString().split("T")[0];
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(d);
+    }
+  }
+  return unique;
+}
+
+function isRetrospectivePricingCase({
+  subscriptionDetails,
+  membershipStartIso,
+  referenceIsoDate,
+}) {
+  const refParsed = parseDate(referenceIsoDate) || utcTodayDateOnly();
+  if (!refParsed || Number.isNaN(refParsed.getTime())) return false;
+  const anchors = collectRetrospectiveAnchorDates(
+    subscriptionDetails,
+    membershipStartIso
+  );
+  const refYear = refParsed.getUTCFullYear();
+  for (const anchor of anchors) {
+    if (anchor.getUTCFullYear() < refYear) return true;
+  }
+  for (const anchor of anchors) {
+    const days = utcCalendarDaysFromAnchorToReference(anchor, refParsed);
+    if (days != null && days > RETROSPECTIVE_PRICING_LAG_DAYS) return true;
+  }
+  return false;
+}
+
 /**
  * Backfill refunds created against application credit so they follow the approved member.
  * This mirrors CLAIM transfer semantics for downstream reporting.
@@ -207,7 +294,8 @@ async function getIncomeCodeForCategory(categoryName) {
 /**
  * Gets annual fee for membership category
  * Matches products by code OR name against membershipCategory
- * Always looks up pricing from pricing table based on effective dates
+ * Looks up pricing by effective dates. If retrospective (prior calendar year on any anchor, or >90 day lag),
+ * inactive catalogue rows may match (isActive filter omitted); otherwise only active rows match.
  */
 export async function getMembershipPricing({
   categoryName,
@@ -216,6 +304,7 @@ export async function getMembershipPricing({
   tenantId,
   profileId,
   applicationId,
+  referenceIsoDate,
 }) {
   let annualFee = null; // Always start with null - ignore subscriptionDetails.annualFee
   let incomeCode = null;
@@ -291,17 +380,32 @@ export async function getMembershipPricing({
           const pricingDateEndUtc = new Date(subscriptionStartDate);
           pricingDateEndUtc.setUTCHours(23, 59, 59, 999);
 
-          const pricing = await Pricing.findOne({
+          const membershipStartIso = subscriptionStartDate
+            .toISOString()
+            .split("T")[0];
+          const retrospective = isRetrospectivePricingCase({
+            subscriptionDetails,
+            membershipStartIso,
+            referenceIsoDate:
+              referenceIsoDate ||
+              new Date().toISOString().split("T")[0],
+          });
+
+          const pricingQuery = {
             tenantId,
             productId: product._id,
             isDeleted: false,
-            isActive: true,
             effectiveFrom: { $lte: pricingDateEndUtc },
             $or: [
               { effectiveTo: { $gte: pricingDateStartUtc } },
               { effectiveTo: null },
             ],
-          })
+          };
+          if (!retrospective) {
+            pricingQuery.isActive = true;
+          }
+
+          const pricing = await Pricing.findOne(pricingQuery)
             .sort({ effectiveFrom: -1 })
             .lean();
 
@@ -322,6 +426,8 @@ export async function getMembershipPricing({
                   annualFee,
                   annualFeeInEuros: (annualFee / 100).toFixed(2), // For logging clarity
                   subscriptionStartDate: subscriptionStartDate.toISOString(),
+                  retrospectiveMembershipPricing: retrospective,
+                  pricingIsActive: pricing.isActive,
                   pricingEffectiveFrom: pricing.effectiveFrom
                     ? new Date(pricing.effectiveFrom).toISOString()
                     : null,
@@ -331,7 +437,9 @@ export async function getMembershipPricing({
                   profileId,
                   applicationId,
                 },
-                "Found pricing for product matching subscription start date"
+                retrospective
+                  ? "Found pricing for delayed approval window (isActive not required)"
+                  : "Found pricing for product matching subscription start date"
               );
             } else {
               logger.warn(
@@ -346,12 +454,15 @@ export async function getMembershipPricing({
             }
           } else {
             // Log all available pricings for debugging
-            const allPricings = await Pricing.find({
+            const listQuery = {
               tenantId,
               productId: product._id,
               isDeleted: false,
-              isActive: true,
-            })
+            };
+            if (!retrospective) {
+              listQuery.isActive = true;
+            }
+            const allPricings = await Pricing.find(listQuery)
               .sort({ effectiveFrom: -1 })
               .lean();
 
@@ -359,6 +470,7 @@ export async function getMembershipPricing({
               {
                 productId: product._id,
                 subscriptionStartDate: subscriptionStartDate.toISOString(),
+                retrospectiveMembershipPricing: retrospective,
                 categoryName,
                 availablePricings: allPricings.map((p) => ({
                   pricingId: p._id,
@@ -380,7 +492,9 @@ export async function getMembershipPricing({
                 profileId,
                 applicationId,
               },
-              "No active pricing found for product matching subscription start date range"
+              retrospective
+                ? "No pricing found for product in delayed-approval / retrospective window"
+                : "No active pricing found for product matching subscription start date range"
             );
           }
         }
@@ -592,6 +706,9 @@ export async function handleMemberCreated(payload) {
       : dateJoined;
     const prorationStartDate = invoiceDate;
 
+    const retrospectiveReferenceIso =
+      processingDateOnly ?? new Date().toISOString().split("T")[0];
+
     // Get income code and annual fee (from pricing if available)
     // Wrap in global limiter to prevent connection pool exhaustion
     const { incomeCode, annualFee } = await globalDBLimiter(async () => {
@@ -602,6 +719,7 @@ export async function handleMemberCreated(payload) {
         tenantId,
         profileId,
         applicationId,
+        referenceIsoDate: retrospectiveReferenceIso,
       });
     });
 

@@ -71,6 +71,8 @@ export async function handleSubscriptionCategoryChanged(payload) {
 
   const docNoBase = `CAT-${subscriptionId}-${adjustmentKey}`;
 
+  const journalDate = new Date().toISOString().split("T")[0];
+
   const { incomeCode: oldIncomeCode, annualFee: oldAnnualFee } =
     await globalDBLimiter(async () =>
       getMembershipPricing({
@@ -80,6 +82,7 @@ export async function handleSubscriptionCategoryChanged(payload) {
         tenantId,
         profileId,
         applicationId,
+        referenceIsoDate: journalDate,
       })
     );
 
@@ -92,10 +95,9 @@ export async function handleSubscriptionCategoryChanged(payload) {
         tenantId,
         profileId,
         applicationId,
+        referenceIsoDate: journalDate,
       })
     );
-
-  const journalDate = new Date().toISOString().split("T")[0];
 
   await postCategoryChangeJournals({
     date: journalDate,
