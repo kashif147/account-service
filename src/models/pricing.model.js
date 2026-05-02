@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 
+// Mirrors user-service pricing identities: same Mongo ObjectId hex strings as strings here
+// because Product._id in this service is String; queries use productId === product._id.
 const pricingSchema = new mongoose.Schema(
   {
     _id: {

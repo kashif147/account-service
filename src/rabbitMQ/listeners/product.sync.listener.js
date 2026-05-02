@@ -3,6 +3,32 @@ import ProductType from "../../models/productType.model.js";
 import Product from "../../models/product.model.js";
 import Pricing from "../../models/pricing.model.js";
 
+const HEX_OBJECT_ID = /^[a-fA-F0-9]{24}$/;
+
+/** Collapse populated / malformed refs to the same 24-char hex string user-service uses logically (BSON ObjectId). */
+function normalizeRefId(value, label = "ref") {
+  if (value == null || value === "") return null;
+  if (typeof value === "string") {
+    const t = value.trim();
+    if (HEX_OBJECT_ID.test(t)) return t;
+    logger.warn(
+      { label, sample: t.slice(0, 160) },
+      "Pricing/product sync: invalid id string (expected 24 hex chars)"
+    );
+    return null;
+  }
+  if (typeof value === "object") {
+    const nested = value._id ?? value.id;
+    if (nested != null) return normalizeRefId(nested, label);
+  }
+  if (typeof value?.toString === "function") {
+    const s = value.toString().trim();
+    if (HEX_OBJECT_ID.test(s)) return s;
+  }
+  logger.warn({ label }, "Pricing/product sync: could not normalize ref id");
+  return null;
+}
+
 function parseDate(value) {
   if (!value) return null;
   const date = new Date(value);
@@ -25,7 +51,8 @@ async function upsertProductType(data) {
     updatedAt,
   } = data;
 
-  if (!productTypeId || !tenantId) {
+  const typeId = normalizeRefId(productTypeId, "productTypeId");
+  if (!typeId || !tenantId) {
     logger.warn(
       { data },
       "Invalid product type payload: missing productTypeId or tenantId"
@@ -34,7 +61,7 @@ async function upsertProductType(data) {
   }
 
   await ProductType.updateOne(
-    { _id: productTypeId, tenantId },
+    { _id: typeId, tenantId },
     {
       $set: {
         name: name || null,
@@ -44,8 +71,8 @@ async function upsertProductType(data) {
         isActive: isActive ?? true,
         isDeleted: isDeleted ?? false,
         tenantId,
-        createdBy: createdBy || null,
-        updatedBy: updatedBy || null,
+        createdBy: normalizeRefId(createdBy, "createdBy"),
+        updatedBy: normalizeRefId(updatedBy, "updatedBy"),
         createdAt: parseDate(createdAt),
         updatedAt: parseDate(updatedAt),
       },
@@ -71,28 +98,37 @@ async function upsertProduct(data) {
     updatedAt,
   } = data;
 
-  if (!productId || !tenantId) {
+  const pid = normalizeRefId(productId, "productId");
+  const ptid = normalizeRefId(productTypeId, "productTypeId");
+  if (!pid || !tenantId) {
     logger.warn(
       { data },
       "Invalid product payload: missing productId or tenantId"
     );
     return;
   }
+  if (!ptid) {
+    logger.warn(
+      { data },
+      "Invalid product payload: productTypeId missing or invalid — skip upsert"
+    );
+    return;
+  }
 
   await Product.updateOne(
-    { _id: productId, tenantId },
+    { _id: pid, tenantId },
     {
       $set: {
         name: name || null,
         code: code ? String(code).toUpperCase() : null,
         description: description || null,
-        productTypeId: productTypeId || null,
+        productTypeId: ptid,
         status: status || null,
         isActive: isActive ?? true,
         isDeleted: isDeleted ?? false,
         tenantId,
-        createdBy: createdBy || null,
-        updatedBy: updatedBy || null,
+        createdBy: normalizeRefId(createdBy, "createdBy"),
+        updatedBy: normalizeRefId(updatedBy, "updatedBy"),
         createdAt: parseDate(createdAt),
         updatedAt: parseDate(updatedAt),
       },
@@ -121,19 +157,28 @@ async function upsertPricing(data) {
     updatedAt,
   } = data;
 
-  if (!pricingId || !tenantId) {
+  const rid = normalizeRefId(pricingId, "pricingId");
+  const pid = normalizeRefId(productId, "productId");
+  if (!rid || !tenantId) {
     logger.warn(
       { data },
       "Invalid pricing payload: missing pricingId or tenantId"
     );
     return;
   }
+  if (!pid) {
+    logger.warn(
+      { data },
+      "Invalid pricing payload: productId missing or not a 24-char hex id — skip upsert"
+    );
+    return;
+  }
 
   await Pricing.updateOne(
-    { _id: pricingId, tenantId },
+    { _id: rid, tenantId },
     {
       $set: {
-        productId: productId || null,
+        productId: pid,
         currency: currency ? String(currency).toUpperCase() : null,
         price: price ?? null,
         memberPrice: memberPrice ?? null,
@@ -144,8 +189,8 @@ async function upsertPricing(data) {
         isActive: isActive ?? true,
         isDeleted: isDeleted ?? false,
         tenantId,
-        createdBy: createdBy || null,
-        updatedBy: updatedBy || null,
+        createdBy: normalizeRefId(createdBy, "createdBy"),
+        updatedBy: normalizeRefId(updatedBy, "updatedBy"),
         createdAt: parseDate(createdAt),
         updatedAt: parseDate(updatedAt),
       },
