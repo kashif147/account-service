@@ -33,6 +33,34 @@ function isApplicationCreditClaimReceipt(txn) {
   return isLegacyClaimTransferReceipt(txn);
 }
 
+/** Portal members (gateway x-user-type MEMBER / PORTAL) — not CRM. */
+function isPortalMemberStatementCaller(req) {
+  const t = String(req.user?.userType ?? "").trim().toUpperCase();
+  return t === "MEMBER" || t === "PORTAL";
+}
+
+const PORTAL_MEMBER_STATEMENT_DOC_TYPES = new Set([
+  "Receipt",
+  "Claim",
+  "Refund",
+]);
+
+function applyPortalMemberStatementLabels(txns) {
+  if (!Array.isArray(txns)) return txns;
+  return txns.map((txn) => {
+    const onlinePayment =
+      txn.docType === "Claim" || isLegacyClaimTransferReceipt(txn);
+    if (onlinePayment) {
+      return {
+        ...txn,
+        displayLabel: "Online payment",
+        displayType: "online_payment",
+      };
+    }
+    return txn;
+  });
+}
+
 /**
  * Latest Receipt (cash/clearing) or Claim (online app credit → member) that credits 2020 for the member.
  * Receipts allocated only to AR (1400) are skipped; legacy claim-styled Receipts are skipped (Claim doc covers them).
@@ -99,6 +127,15 @@ export async function memberStatement(req, res, next) {
     const withClaimRef = attachClaimLedgerReference(withPi);
     const txnsWithTypes = await attachTxTypesToLedgerItems(withClaimRef);
 
+    const portalStatement = isPortalMemberStatementCaller(req);
+    let txnsOut = txnsWithTypes;
+    if (portalStatement) {
+      txnsOut = txnsWithTypes.filter((t) =>
+        PORTAL_MEMBER_STATEMENT_DOC_TYPES.has(t.docType),
+      );
+      txnsOut = applyPortalMemberStatementLabels(txnsOut);
+    }
+
     // Publish report generated event
     await publishDomainEvent(
       EVENT_TYPES.REPORT_GENERATED,
@@ -107,7 +144,7 @@ export async function memberStatement(req, res, next) {
         memberId,
         from,
         to,
-        transactionCount: txnsWithTypes.length,
+        transactionCount: txnsOut.length,
         generatedAt: new Date().toISOString(),
       },
       {
@@ -116,10 +153,11 @@ export async function memberStatement(req, res, next) {
       },
     );
 
-    res.success({ memberId, txns: txnsWithTypes });
+    res.success({ memberId, txns: txnsOut });
     logInfo("Member statement generated", {
       memberId,
-      transactionCount: txnsWithTypes.length,
+      transactionCount: txnsOut.length,
+      portalSubset: portalStatement,
     });
   } catch (e) {
     logError("Failed to generate member statement", {
