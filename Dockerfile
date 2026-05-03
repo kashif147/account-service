@@ -1,7 +1,7 @@
 FROM node:22-alpine
 
 # Install curl for health checks
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl git
 
 WORKDIR /app
 
