@@ -59,6 +59,12 @@ import { securityHeaders } from "./config/security.js";
 import { limiterGeneral } from "./config/rateLimiters.js";
 import { swaggerServe, swaggerSetup } from "./config/swagger.js";
 import requestId from "./middlewares/requestId.js";
+import {
+  correlationIdMiddleware,
+  logErrorMiddleware,
+  createSystemLogsRouter,
+} from "@projectShell/logging-lib";
+import bizLogger from "./config/bizLogger.js";
 import loggerMiddleware from "./middlewares/logger.mw.js";
 import responseMiddleware from "./middlewares/response.mw.js";
 import notFound from "./middlewares/notFound.js";
@@ -155,6 +161,8 @@ app.use(
 app.use(securityHeaders);
 app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
 
+app.use(correlationIdMiddleware);
+
 // Capture raw body for Stripe webhook BEFORE compression and JSON parsing
 // Stripe requires raw body buffer for signature verification
 app.use("/api/webhook/stripe", express.raw({ type: "application/json" }));
@@ -173,6 +181,8 @@ app.use("/api/webhook", webhookRoutes);
 
 // JSON body parser for all other routes
 app.use(bodyParser.json({ limit: "1mb" }));
+
+app.use("/api", createSystemLogsRouter(bizLogger));
 
 // request id for correlation
 app.use(requestId);
@@ -351,6 +361,7 @@ app.use("/api", routes);
 
 // 404 + errors
 app.use(notFound);
+app.use(logErrorMiddleware(bizLogger));
 app.use(errorHandler);
 
 // Graceful shutdown

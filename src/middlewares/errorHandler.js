@@ -43,8 +43,11 @@ export default function errorHandler(err, req, res, next) {
   }
 
   // Default error handling
-  const status = err.status || 500;
   const message = err.message || "Internal server error";
+  const isDevelopment = process.env.NODE_ENV !== "production";
 
-  res.serverError(message, { originalError: err });
+  res.serverError(
+    isDevelopment ? message : "Internal server error",
+    isDevelopment ? { originalError: err.message, stack: err.stack } : {},
+  );
 }

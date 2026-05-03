@@ -78,6 +78,10 @@ function buildForwardHeaders(req) {
       headers[key] = Array.isArray(v) ? v[0] : v;
     }
   }
+  const cid = req.correlationId || req.headers["x-correlation-id"];
+  if (cid) {
+    headers["x-correlation-id"] = String(Array.isArray(cid) ? cid[0] : cid);
+  }
   return headers;
 }
 

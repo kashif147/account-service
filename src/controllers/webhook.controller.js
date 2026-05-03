@@ -3,6 +3,7 @@ import stripe from "../lib/stripe.js";
 import { reconcileStripeEvent } from "../services/payments.service.js";
 import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
+import bizLogger from "../config/bizLogger.js";
 
 export async function handleStripeWebhook(req, res) {
   const sig = req.headers["stripe-signature"];
@@ -82,6 +83,14 @@ async function processStripeEvent(event) {
       // Only publish if there's an applicationId and no memberId in metadata
       const applicationId = metadata.applicationId || metadata.application_id;
       const memberId = metadata.memberId || metadata.member_id;
+
+      bizLogger.business("Stripe payment succeeded received", {
+        eventType: "PaymentReceived",
+        tenantId: tenantId || null,
+        applicationId: applicationId || null,
+        membershipId: memberId || metadata.membershipId || null,
+        correlationId: metadata.correlationId || event.id,
+      });
 
       if (applicationId && !memberId) {
         try {
@@ -194,6 +203,15 @@ async function processStripeEvent(event) {
     }
     case "payment_intent.payment_failed": {
       const pi = obj;
+      const pmd = pi.metadata || {};
+      bizLogger.error("Stripe payment failed", {
+        eventType: "PaymentFailed",
+        tenantId:
+          pmd.tenantId || pmd.tenant_id || pmd.tenant || tenantId || null,
+        applicationId: pmd.applicationId || pmd.application_id || null,
+        membershipId: pmd.memberId || pmd.member_id || null,
+        correlationId: pmd.correlationId || event.id,
+      });
       paymentData = {
         paymentIntentId: pi.id,
         amount: pi.amount,

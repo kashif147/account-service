@@ -122,6 +122,10 @@ function buildForwardHeaders(req, includeInternal = false) {
     if (v !== null) headers[key] = v;
   }
 
+  const cid =
+    req.correlationId || incomingHeader(req, "x-correlation-id");
+  if (cid) headers["x-correlation-id"] = cid;
+
   return headers;
 }
 

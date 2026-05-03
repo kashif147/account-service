@@ -9,6 +9,8 @@ import {
 } from "@projectShell/rabbitmq-middleware";
 
 import logger from "../config/logger.js";
+import bizLogger from "../config/bizLogger.js";
+import { createRabbitStructuredLogHandlers } from "@projectShell/logging-lib";
 
 // Import local event definitions
 import {
@@ -47,6 +49,7 @@ export async function initEventSystem() {
     await init({
       url: process.env.RABBIT_URL,
       logger: logger,
+      structuredLog: createRabbitStructuredLogHandlers(bizLogger),
       prefetch: 10,
       connectionName: "account-service",
       serviceName: "account-service",
