@@ -9,21 +9,59 @@ import {
   simplifyMemberLedgerPresentations,
 } from "../helpers/memberLedgerPresentation.js";
 import { attachPaymentIntentIdsToLedgerItems } from "../helpers/memberLedgerPaymentIntent.js";
-import { attachTxTypesToLedgerItems } from "../helpers/glTransactionTxType.js";
+import {
+  attachTxTypesToLedgerItems,
+  resolveTxTypeAccountCode,
+} from "../helpers/glTransactionTxType.js";
 import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
-/** Application credit moved to member (internal 2020 transfer); not a cash receipt. */
-function isApplicationCreditClaimReceipt(txn) {
-  if (!txn) return false;
-  if (txn.docType === "Claim") return true;
-  // Legacy rows were posted as Receipt with CLAIM docNo / memo
-  if (txn.docType !== "Receipt") return false;
+/** Legacy Receipt rows that mirror app-credit → member (same shape as Claim); not a card/batch receipt. */
+function isLegacyClaimTransferReceipt(txn) {
+  if (!txn || txn.docType !== "Receipt") return false;
   const memo = String(txn.memo || "");
   const docNo = String(txn.docNo || "");
   return memo.startsWith("Claim app credit") || /^CLAIM-/i.test(docNo);
+}
+
+/** Claim journal or legacy claim-styled receipt (for labels / statement refs). */
+function isApplicationCreditClaimReceipt(txn) {
+  if (!txn) return false;
+  if (txn.docType === "Claim") return true;
+  return isLegacyClaimTransferReceipt(txn);
+}
+
+/**
+ * Latest Receipt (cash/clearing) or Claim (online app credit → member) that credits 2020 for the member.
+ * Receipts allocated only to AR (1400) are skipped; legacy claim-styled Receipts are skipped (Claim doc covers them).
+ */
+function pickLastMember2020AdvanceReceipt(memberId, txns) {
+  const mid = String(memberId || "").trim();
+  if (!mid || !Array.isArray(txns)) return null;
+  for (const txn of txns) {
+    if (!txn) continue;
+    const dt = txn.docType;
+    if (dt !== "Receipt" && dt !== "Claim") continue;
+
+    const memberEntry = txn.entries.find(
+      (e) =>
+        String(e.memberId || "").trim() === mid &&
+        e.accountCode === "2020" &&
+        e.dc === "C" &&
+        (Number(e.amount) || 0) > 0,
+    );
+    if (!memberEntry) continue;
+
+    if (dt === "Receipt") {
+      if (isLegacyClaimTransferReceipt(txn)) continue;
+      if (!resolveTxTypeAccountCode(txn)) continue;
+    }
+
+    return txn;
+  }
+  return null;
 }
 
 /** After `paymentIntentId` is resolved, use it as `reference` so the row is not labeled only as CLAIM-{uuid}. */
@@ -136,7 +174,7 @@ async function getMemberTrackedAccountCodes() {
 export async function refundsList(req, res, next) {
   try {
     const tenantId = req.tenantId || req.ctx?.tenantId;
-    const limit = Math.min(Math.max(parseInt(req.query.limit ?? "20", 10) || 20, 1), 100);
+    const limit = Math.min(Math.max(parseInt(req.query.limit ?? "500", 10) || 500, 1), 1000);
     const skip = Math.max(parseInt(req.query.skip ?? "0", 10) || 0, 0);
     const mode = req.query.mode;
     const memberId = req.query.memberId;
@@ -523,9 +561,9 @@ export async function memberNetBalance(req, res, next) {
 }
 
 /**
- * Member summary: net balance + most recent payment (Receipt, including app-credit claim receipts)
+ * Member summary: net balance + most recent payment crediting 2020 — cash Receipt (clearing leg) or
+ * Claim (online app credit to member). Receipts allocated only to AR (1400) are ignored.
  * + most recent Invoice (AR on 1400 for the member, same basis as simple ledger).
- * Uses parallel indexed queries for performance.
  */
 export async function memberSummary(req, res, next) {
   try {
@@ -552,13 +590,14 @@ export async function memberSummary(req, res, next) {
       query.year = effectiveYear;
     }
 
-    const [matBalRows, lastPaymentTxn, latestInvoiceTxn] = await Promise.all([
+    const [matBalRows, receiptCandidates, latestInvoiceTxn] = await Promise.all([
       MatBal.find(query).lean(),
-      GL.findOne({
+      GL.find({
         "entries.memberId": memberId,
         docType: { $in: ["Receipt", "Claim"] },
       })
         .sort({ date: -1, createdAt: -1 })
+        .limit(80)
         .lean(),
       GL.findOne({
         "entries.memberId": memberId,
@@ -578,12 +617,17 @@ export async function memberSummary(req, res, next) {
       byBucket[key] = (byBucket[key] || 0) + r.amount;
     }
 
+    const lastPaymentTxn = pickLastMember2020AdvanceReceipt(memberId, receiptCandidates);
+
     let lastPayment = null;
     if (lastPaymentTxn) {
       const memberEntry = lastPaymentTxn.entries.find(
-        (e) => e.memberId === memberId && e.accountCode === "2020",
+        (e) =>
+          String(e.memberId || "").trim() === String(memberId || "").trim() &&
+          e.accountCode === "2020" &&
+          e.dc === "C",
       );
-      const amount = memberEntry ? memberEntry.amount : 0;
+      const amount = memberEntry ? Number(memberEntry.amount) || 0 : 0;
       lastPayment = {
         docNo: lastPaymentTxn.docNo,
         docType: lastPaymentTxn.docType,
@@ -688,8 +732,17 @@ export async function memberSummaryBatch(req, res, next) {
         {
           $match: {
             tenantId,
-            docType: { $in: ["Receipt", "Claim"] },
             "entries.memberId": { $in: normalizedMemberIds },
+            $or: [
+              { docType: "Claim" },
+              {
+                docType: "Receipt",
+                $nor: [
+                  { memo: { $regex: "^Claim app credit", $options: "i" } },
+                  { docNo: { $regex: "^CLAIM-", $options: "i" } },
+                ],
+              },
+            ],
           },
         },
         { $sort: { date: -1, createdAt: -1 } },
@@ -698,6 +751,8 @@ export async function memberSummaryBatch(req, res, next) {
           $match: {
             "entries.memberId": { $in: normalizedMemberIds },
             "entries.accountCode": "2020",
+            "entries.dc": "C",
+            "entries.amount": { $gt: 0 },
           },
         },
         {

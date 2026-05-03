@@ -4,6 +4,7 @@ import CoA from "../models/coa.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
 import MaterializedBalance from "../models/materializedBalance.model.js";
 import Refund from "../models/refund.model.js";
+import Payment from "../models/payment.model.js";
 import dayjs from "dayjs";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
@@ -954,6 +955,60 @@ export async function processDeductionBatch(req, res, next) {
   }
 }
 
+/** YYYY-MM-DD for journal header date, or null if invalid. */
+function journalIsoDateFromValue(value) {
+  if (value == null || value === "") return null;
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().split("T")[0];
+}
+
+/**
+ * Claim document date should reflect when application payment was processed:
+ * Payment.updatedAt if receipt is RCP-{paymentId}, else source receipt GL date, else tenant latest succeeded payment, else caller body date.
+ */
+async function resolveClaimJournalDate({
+  parentCreditTxn,
+  applicationId,
+  tenantId,
+  bodyDateIso,
+}) {
+  const docNoStr = parentCreditTxn?.docNo && String(parentCreditTxn.docNo);
+  const rcpMatch = docNoStr?.match(/^RCP-([a-fA-F0-9]{24})$/);
+  if (rcpMatch && mongoose.Types.ObjectId.isValid(rcpMatch[1])) {
+    const payment = await Payment.findById(rcpMatch[1])
+      .select({ status: 1, updatedAt: 1 })
+      .lean();
+    if (payment?.status === "succeeded" && payment.updatedAt) {
+      const iso = journalIsoDateFromValue(payment.updatedAt);
+      if (iso) return iso;
+    }
+  }
+
+  const fromReceiptJournal = journalIsoDateFromValue(parentCreditTxn?.date);
+  if (fromReceiptJournal) return fromReceiptJournal;
+
+  if (tenantId) {
+    const payment = await Payment.findOne({
+      tenantId,
+      applicationId,
+      status: "succeeded",
+    })
+      .sort({ updatedAt: -1 })
+      .select({ updatedAt: 1 })
+      .lean();
+    if (payment?.updatedAt) {
+      const iso = journalIsoDateFromValue(payment.updatedAt);
+      if (iso) return iso;
+    }
+  }
+
+  return (
+    journalIsoDateFromValue(bodyDateIso) ||
+    new Date().toISOString().split("T")[0]
+  );
+}
+
 // Claim credit: transfer 2020 Payment on Account from app to member
 export async function claimApplicationCredit(req, res, next) {
   try {
@@ -970,6 +1025,8 @@ export async function claimApplicationCredit(req, res, next) {
         memberId,
       });
     }
+
+    const tenantId = req.tenantId ?? req.ctx?.tenantId;
 
     // Find the credit entry for this application
     // Check both new format (applicationId) and old format (memberId: "app:...")
@@ -995,6 +1052,13 @@ export async function claimApplicationCredit(req, res, next) {
         { applicationId }
       );
     }
+
+    const resolvedClaimDate = await resolveClaimJournalDate({
+      parentCreditTxn: creditEntry[0],
+      applicationId,
+      tenantId,
+      bodyDateIso: date,
+    });
 
     const amount = creditEntry[0].entries.amount;
     if (!amount || amount <= 0) {
@@ -1032,7 +1096,7 @@ export async function claimApplicationCredit(req, res, next) {
     ];
 
     const out = await postBalancedJournal({
-      date,
+      date: resolvedClaimDate,
       userId: req.ctx?.userId,
       docType: "Claim",
       docNo,
@@ -1087,11 +1151,11 @@ export async function writeOff(req, res, next) {
  *  - from, to: ISO dates
  *  - docType: e.g. Invoice, Adjustment, Receipt, Claim, Refund, Settlement
  *  - memberId: exact match on entries.memberId
- *  - skip, limit: pagination (defaults: 0, 50; max limit 200)
+ *  - skip, limit: pagination (defaults: 0, 500; max limit 1000)
  */
 export async function listJournals(req, res, next) {
   try {
-    const { from, to, docType, memberId, limit = 50, skip = 0 } = req.query;
+    const { from, to, docType, memberId, limit = 500, skip = 0 } = req.query;
 
     const query = {};
     if (from || to) {
@@ -1118,7 +1182,7 @@ export async function listJournals(req, res, next) {
       params: { from, to, docType, memberId },
     });
 
-    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 1000);
     const offset = Math.max(parseInt(skip, 10) || 0, 0);
 
     const [items, total] = await Promise.all([
@@ -1151,11 +1215,11 @@ export async function listJournals(req, res, next) {
  * Query params:
  *  - from, to: ISO dates
  *  - status: PENDING | SETTLED | ALL (default: PENDING)
- *  - skip, limit: pagination (defaults: 0, 50; max limit 200)
+ *  - skip, limit: pagination (defaults: 0, 500; max limit 1000)
  */
 export async function listStripePayments(req, res, next) {
   try {
-    const { from, to, status = "PENDING", limit = 50, skip = 0 } = req.query;
+    const { from, to, status = "PENDING", limit = 500, skip = 0 } = req.query;
 
     const query = {
       docType: "Receipt",
@@ -1185,7 +1249,7 @@ export async function listStripePayments(req, res, next) {
       params: { from, to, status },
     });
 
-    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const pageSize = Math.min(Math.max(parseInt(limit, 10) || 500, 1), 1000);
     const offset = Math.max(parseInt(skip, 10) || 0, 0);
 
     const [rawItems, total] = await Promise.all([

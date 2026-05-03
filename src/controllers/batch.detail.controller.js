@@ -407,7 +407,7 @@ export async function getAllBatchDetails(req, res) {
 
     const tenantId = req.user?.tenantId || null;
     const page = parseInt(req.query.page, 10) || 1;
-    const limit = parseInt(req.query.limit, 10) || 50;
+    const limit = parseInt(req.query.limit, 10) || 500;
     const skip = (page - 1) * limit;
 
     const query = { isDeleted: false };

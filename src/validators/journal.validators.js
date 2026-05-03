@@ -93,7 +93,7 @@ export const listJournalsRules = [
   query("to").optional().isISO8601(),
   query("docType").optional().isString(),
   query("memberId").optional().isString(),
-  query("limit").optional().isInt({ min: 1, max: 500 }),
+  query("limit").optional().isInt({ min: 1, max: 1000 }),
   query("skip").optional().isInt({ min: 0 })
 ];
 
@@ -101,7 +101,7 @@ export const listStripePaymentsRules = [
   query("from").optional().isISO8601(),
   query("to").optional().isISO8601(),
   query("status").optional().isIn(isSettlementStatus),
-  query("limit").optional().isInt({ min: 1, max: 500 }),
+  query("limit").optional().isInt({ min: 1, max: 1000 }),
   query("skip").optional().isInt({ min: 0 })
 ];
 

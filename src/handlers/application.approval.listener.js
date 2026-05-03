@@ -81,13 +81,6 @@ function toIsoDateOnly(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
 }
 
-/** Lexicographic max works for ISO calendar dates (YYYY-MM-DD). */
-function laterIsoDate(isoA, isoB) {
-  const a = toIsoDateOnly(isoA) || "";
-  const b = toIsoDateOnly(isoB) || "";
-  return a > b ? a : b;
-}
-
 /** Calendar days from anchor (UTC date-only) to reference (inclusive span); null if invalid. */
 function utcCalendarDaysFromAnchorToReference(anchorDate, referenceDate) {
   if (
@@ -122,7 +115,7 @@ function utcTodayDateOnly() {
 /**
  * Retrospective pricing when either:
  * - Any anchor (membership start / dateJoined, submissionDate, applicationDate) is strictly more than
- *   RETROSPECTIVE_PRICING_LAG_DAYS before the approval/processing day (bulk processingDate, else today UTC), or
+ *   RETROSPECTIVE_PRICING_LAG_DAYS before today UTC (when this handler runs), or
  * - Any anchor falls in a calendar year before the reference year (e.g. joined late December, approved January —
  *   allows inactive catalogue rows for the membership-start year such as 2025 fees).
  * When true, fee lookup omits pricing isActive so inactive bands matching the subscription start may apply.
@@ -696,23 +689,14 @@ export async function handleMemberCreated(payload) {
 
     const dateJoined = subscriptionStartDate;
 
-    // Bulk: subscriptionAttributes.processingDate = batch processing day; invoice = max(join, processing).
-    // Single: no processingDate → invoice = dateJoined (membership start).
     const processingDateOnly = toIsoDateOnly(
       subscriptionAttributes?.processingDate
     );
-    const invoiceDate = processingDateOnly
-      ? laterIsoDate(dateJoined, processingDateOnly)
-      : dateJoined;
-    const prorationStartDate = invoiceDate;
 
-    // Retrospective pricing (inactive rows / cross-year / 90-day) must reflect when billing actually runs,
-    // not only bulk processingDate. If processingDate equals dateJoined (e.g. 20/01/2025) but this handler
-    // runs later (e.g. 2026), we still need reference ≥ today so prior-year membership picks inactive bands.
-    const todayIso = new Date().toISOString().split("T")[0];
-    const retrospectiveReferenceIso = processingDateOnly
-      ? laterIsoDate(processingDateOnly, todayIso)
-      : todayIso;
+    // GL invoice posting date = when this handler generates the journal (UTC calendar date).
+    // Membership fee and pro-rata always use dateJoined via joinDate on the invoice API.
+    const invoicePostingDate = new Date().toISOString().split("T")[0];
+    const retrospectiveReferenceIso = invoicePostingDate;
 
     // Get income code and annual fee (from pricing if available)
     // Wrap in global limiter to prevent connection pool exhaustion
@@ -728,8 +712,8 @@ export async function handleMemberCreated(payload) {
       });
     });
 
-    // Invoice doc number: year from GL invoice (billing) date
-    const invYear = parseInt(invoiceDate.slice(0, 4), 10);
+    // Invoice doc number: year from posting (generation) date
+    const invYear = parseInt(invoicePostingDate.slice(0, 4), 10);
     const year = Number.isFinite(invYear) ? invYear : new Date().getFullYear();
     const docNo = applicationId
       ? `INV-${year}-${applicationId}`
@@ -764,8 +748,7 @@ export async function handleMemberCreated(payload) {
           docNo,
           dateJoined,
           processingDate: processingDateOnly ?? null,
-          invoiceDate,
-          prorationStartDate,
+          invoicePostingDate,
         },
         "Creating invoice for newly created member"
       );
@@ -776,14 +759,14 @@ export async function handleMemberCreated(payload) {
 
       const invoiceReq = {
         body: {
-          date: invoiceDate,
+          date: invoicePostingDate,
           docNo,
           memberId,
           annualFee: annualFee, // Integer in cents
           incomeCode,
           categoryName,
           periodBucket: "current",
-          joinDate: prorationStartDate,
+          joinDate: dateJoined,
         },
       };
 
@@ -899,8 +882,10 @@ export async function handleMemberCreated(payload) {
         );
 
         const claimReq = {
+          tenantId,
+          ctx: tenantId ? { tenantId } : {},
           body: {
-            date: invoiceDate,
+            date: invoicePostingDate,
             docNo: claimDocNo,
             applicationId,
             memberId,

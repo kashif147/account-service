@@ -317,7 +317,7 @@ async function loadApprovedMemberMap(memberIds, req) {
     try {
       const searchUrl = `${profileBase}/api/profile/search?q=${encodeURIComponent(
         memberId
-      )}&limit=25`;
+      )}&limit=500`;
       const searchPayload = await fetchJson(searchUrl, req, { cache: fetchCache });
       const searchData = resolveApiPayload(searchPayload);
       const results = Array.isArray(searchData?.results) ? searchData.results : [];

@@ -174,8 +174,8 @@ export const zCreateRefund = z
 
 export const zListRefundsQuery = z.object({
   limit: z.preprocess(
-    (v) => (v === undefined || v === "" ? 20 : v),
-    z.coerce.number().int().min(1).max(100)
+    (v) => (v === undefined || v === "" ? 500 : v),
+    z.coerce.number().int().min(1).max(1000)
   ),
   skip: z.preprocess(
     (v) => (v === undefined || v === "" ? 0 : v),
