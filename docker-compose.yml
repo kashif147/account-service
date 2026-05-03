@@ -10,8 +10,6 @@ services:
     env_file:
       - ${ENV_COMMON_PATH:-../../config/.env.common}
       - .env.staging
-    environment:
-      LOG_ROOT: /var/log/projectshell
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 10s
