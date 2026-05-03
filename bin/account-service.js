@@ -1,5 +1,5 @@
-import dotenvFlow from "dotenv-flow";
-dotenvFlow.config();
+// Side-effect import must be first: ESM hoists imports, so dotenvFlow.config() below ran too late.
+import "dotenv-flow/config";
 import { connectDB, disconnectDB } from "../src/config/db.js";
 import { connectProfileDB } from "../src/config/profileDb.js";
 import { connectRabbit, closeRabbit } from "../src/config/rabbit.js";
