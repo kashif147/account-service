@@ -18,8 +18,11 @@ jobs:
 
       - name: Sync code
         run: |
+          set -euo pipefail
           # Never use rsync --delete-excluded: excluded env files must remain on the VM.
-          rsync -avz --delete \
+          rsync -rlvz --delete \
+          --mkpath \
+          --no-owner --no-group --no-perms --no-times --omit-dir-times \
           --include '.env.example' \
           --include '.env.sample' \
           --exclude '.env' \
@@ -27,6 +30,12 @@ jobs:
           --exclude '.env_*' \
           --exclude '*.env' \
           --exclude '.envrc' \
+          --exclude '.git/' \
+          --exclude '.github/' \
+          --exclude 'node_modules/' \
+          --exclude '*.log' \
+          --itemize-changes \
+          --stats \
           -e "ssh -o StrictHostKeyChecking=no" ./ \
           ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/home/deploy/membership-platform/account-service/
 
