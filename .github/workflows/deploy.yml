@@ -18,8 +18,15 @@ jobs:
 
       - name: Sync code
         run: |
+          # Never use rsync --delete-excluded: excluded env files must remain on the VM.
           rsync -avz --delete \
-          --exclude '.env*' \
+          --include '.env.example' \
+          --include '.env.sample' \
+          --exclude '.env' \
+          --exclude '.env.*' \
+          --exclude '.env_*' \
+          --exclude '*.env' \
+          --exclude '.envrc' \
           -e "ssh -o StrictHostKeyChecking=no" ./ \
           ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}:/home/deploy/membership-platform/account-service/
 
