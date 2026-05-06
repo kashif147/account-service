@@ -19,10 +19,14 @@ jobs:
       - name: Sync code
         run: |
           set -euo pipefail
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} "chmod -R u+w /home/deploy/membership-platform/account-service/ 2>/dev/null || true"
           # Never use rsync --delete-excluded: excluded env files must remain on the VM.
           rsync -rlvz --delete \
           --mkpath \
           --no-owner --no-group --no-perms --no-times --omit-dir-times \
+          --no-xattrs \
+          --safe-links \
+          -M--no-owner -M--no-group -M--no-perms -M--omit-dir-times \
           --include '.env.example' \
           --include '.env.sample' \
           --exclude '.env' \
