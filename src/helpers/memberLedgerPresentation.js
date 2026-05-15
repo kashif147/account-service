@@ -76,7 +76,8 @@ function syntheticArLine({ memberId, netDrCents, periodBucket = "current" }) {
 
 function normalizeGroupedRow(txn) {
   const base = { ...txn };
-  if (base.settlement == null) {
+  const clearingDocTypes = new Set(["Receipt", "Claim", "Refund"]);
+  if (base.settlement == null && clearingDocTypes.has(base.docType)) {
     base.settlement = { status: "PENDING" };
   }
   return base;

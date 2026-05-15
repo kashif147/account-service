@@ -551,7 +551,6 @@ export async function postCategoryChangeJournals({
     docType: "Adjustment",
     docNo: `${docNoBase}-CATNET`,
     memo,
-    settlement: { status: "PENDING" },
     lines,
   });
 

@@ -18,6 +18,7 @@ import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { computeMemberFinanceSummary } from "../services/memberFinanceSummary.service.js";
+import { listCreditNotes } from "../services/creditNote.service.js";
 import pLimit from "p-limit";
 import {
   buildMemberLastPayment,
@@ -1004,8 +1005,15 @@ function normalizeLedgerGlTxn(txn) {
           displayLabel: "Pro-rata fee adjustment",
           displayType: "prorata_fee_adjustment",
         }
-      : { ...txn };
-  if (base.settlement == null) {
+      : txn.docType === "CreditNote"
+        ? {
+            ...txn,
+            displayLabel: "Credit Note",
+            ledgerDisplayDocType: "Credit Note",
+          }
+        : { ...txn };
+  const clearingDocTypes = new Set(["Receipt", "Claim", "Refund"]);
+  if (base.settlement == null && clearingDocTypes.has(base.docType)) {
     base.settlement = { status: "PENDING" };
   }
   base.reference = buildMemberLedgerReference(base);
@@ -1048,6 +1056,20 @@ function consolidateCategoryChanges(transactions) {
   }
 
   return consolidated;
+}
+
+/** Draft/approved credit notes for member finance UI (same permission as ledger). */
+export async function memberCreditNotes(req, res, next) {
+  try {
+    const { memberId } = req.params;
+    const status = req.query.status || "Draft";
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : 50;
+    const skip = req.query.skip ? parseInt(req.query.skip, 10) : 0;
+    const result = await listCreditNotes({ memberId, status, limit, skip });
+    res.success({ memberId, status, ...result });
+  } catch (e) {
+    next(e);
+  }
 }
 
 export async function memberLedger(req, res, next) {

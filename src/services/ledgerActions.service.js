@@ -83,7 +83,9 @@ export async function getLedgerActionsForDocument(ctx) {
   if (dt === "creditnote" || dt === "credit_note") {
     const cnStatus = status || "Draft";
     if (docNo) {
-      const cn = await CreditNote.findOne({ docNo }).lean();
+      const cn = await CreditNote.findOne({
+        $or: [{ docNo }, { glDocNo: docNo }],
+      }).lean();
       const st = cn?.status || cnStatus;
       if (st === "Draft") {
         add("approve", "Approve", {
@@ -139,7 +141,10 @@ function buildLedgerBadges(summary, status, docType) {
   if (summary.availableCredit > 0) badges.push("CREDIT AVAILABLE");
   if (summary.refundableBalance > 0) badges.push("REFUNDABLE");
   if (String(docType).toLowerCase() === "writeoff") badges.push("WRITTEN OFF");
-  if (status === "Reconciled" || status === "SETTLED") badges.push("RECONCILED");
+  if (status === "Settled" || status === "Reconciled" || status === "SETTLED") {
+    badges.push("RECONCILED");
+  }
+  if (status === "Unsettled") badges.push("UNSETTLED");
   if (status === "Draft" || status === "PENDING APPROVAL") {
     badges.push("PENDING APPROVAL");
   }

@@ -9,6 +9,7 @@ import {
   memberSummary,
   memberSummaryBatch,
   memberLedger,
+  memberCreditNotes,
   refundsList,
 } from "../controllers/reports.controller.js";
 import { memberLedgerActions } from "../controllers/ledgerActions.controller.js";
@@ -18,6 +19,7 @@ import {
   balancesAsOfRules,
   memberNetBalanceRules,
   memberLedgerRules,
+  memberCreditNotesRules,
   refundsListRules,
 } from "../validators/reports.validators.js";
 import validate from "../middlewares/validate.js";
@@ -75,6 +77,15 @@ router.get(
   memberLedgerRules,
   validate,
   memberLedger
+);
+
+router.get(
+  "/member/:memberId/credit-notes",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  memberCreditNotesRules,
+  validate,
+  memberCreditNotes
 );
 
 router.get(

@@ -31,6 +31,21 @@ export const memberLedgerRules = [
     .withMessage("view must be simple or full"),
 ];
 
+export const memberCreditNotesRules = [
+  query("status")
+    .optional()
+    .isIn(["Draft", "Approved", "Cancelled"])
+    .withMessage("status must be Draft, Approved, or Cancelled"),
+  query("limit")
+    .optional()
+    .isInt({ min: 1, max: 200 })
+    .withMessage("limit must be between 1 and 200"),
+  query("skip")
+    .optional()
+    .isInt({ min: 0 })
+    .withMessage("skip must be a non-negative integer"),
+];
+
 export const refundsListRules = [
   query("limit")
     .optional()
