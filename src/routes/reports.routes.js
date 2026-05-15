@@ -11,6 +11,7 @@ import {
   memberLedger,
   refundsList,
 } from "../controllers/reports.controller.js";
+import { memberLedgerActions } from "../controllers/ledgerActions.controller.js";
 import {
   monthEndRules,
   yearEndRules,
@@ -74,6 +75,13 @@ router.get(
   memberLedgerRules,
   validate,
   memberLedger
+);
+
+router.get(
+  "/member/:memberId/ledger-actions",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  memberLedgerActions,
 );
 
 // Balances snapshot - consolidated single route

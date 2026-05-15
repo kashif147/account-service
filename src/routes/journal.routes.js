@@ -3,17 +3,21 @@ import express from "express";
 import {
   invoiceRules,
   receiptRules,
-  creditNoteRules,
   writeOffRules,
   changeCategoryRules,
   listJournalsRules,
   listStripePaymentsRules,
   claimApplicationCreditRules,
   processDeductionBatchRules,
+  applyMemberCreditRules,
+  reverseReceiptRules,
 } from "../validators/journal.validators.js";
 import {
+  applyMemberCreditHandler,
+  reverseReceiptHandler,
+} from "../controllers/memberCreditOperations.controller.js";
+import {
   invoice,
-  creditNote,
   receipt,
   listJournals,
   listStripePayments,
@@ -22,6 +26,18 @@ import {
   writeOff,
   changeCategory,
 } from "../controllers/journal.controller.js";
+import {
+  createCreditNoteRules,
+  creditNoteDocNoParam,
+  listCreditNotesRules,
+} from "../validators/creditNote.validators.js";
+import {
+  createCreditNote,
+  approveCreditNoteHandler,
+  cancelCreditNoteHandler,
+  getCreditNoteHandler,
+  listCreditNotesHandler,
+} from "../controllers/creditNote.controller.js";
 import validate from "../middlewares/validate.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
@@ -70,15 +86,63 @@ router.post(
   receipt
 );
 
-// Credit note creation - requires minimum Accounts Assistant level
+// Credit notes — Draft on create; GL posts on approve
+router.post(
+  "/credit-notes",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  idempotency(),
+  createCreditNoteRules,
+  validate,
+  createCreditNote,
+);
+
+router.get(
+  "/credit-notes",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
+  listCreditNotesRules,
+  validate,
+  listCreditNotesHandler,
+);
+
+router.get(
+  "/credit-notes/:docNo",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
+  creditNoteDocNoParam,
+  validate,
+  getCreditNoteHandler,
+);
+
+router.post(
+  "/credit-notes/:docNo/approve",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  idempotency(),
+  creditNoteDocNoParam,
+  validate,
+  approveCreditNoteHandler,
+);
+
+router.post(
+  "/credit-notes/:docNo/cancel",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  creditNoteDocNoParam,
+  validate,
+  cancelCreditNoteHandler,
+);
+
+/** @deprecated Use POST /credit-notes (draft) + POST /credit-notes/:docNo/approve */
 router.post(
   "/credit-note",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
-  creditNoteRules,
+  createCreditNoteRules,
   validate,
-  creditNote
+  createCreditNote,
 );
 
 // Write-off operations - requires minimum Accounts Manager level (sensitive operation)
@@ -112,6 +176,26 @@ router.post(
   processDeductionBatchRules,
   validate,
   processDeductionBatch
+);
+
+router.post(
+  "/apply-member-credit",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  idempotency(),
+  applyMemberCreditRules,
+  validate,
+  applyMemberCreditHandler,
+);
+
+router.post(
+  "/reverse-receipt",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  idempotency(),
+  reverseReceiptRules,
+  validate,
+  reverseReceiptHandler,
 );
 
 // Claim application credit - requires minimum Membership Officer level

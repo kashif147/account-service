@@ -17,21 +17,14 @@ import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
-
-/** Legacy Receipt rows that mirror app-credit → member (same shape as Claim); not a card/batch receipt. */
-function isLegacyClaimTransferReceipt(txn) {
-  if (!txn || txn.docType !== "Receipt") return false;
-  const memo = String(txn.memo || "");
-  const docNo = String(txn.docNo || "");
-  return memo.startsWith("Claim app credit") || /^CLAIM-/i.test(docNo);
-}
-
-/** Claim journal or legacy claim-styled receipt (for labels / statement refs). */
-function isApplicationCreditClaimReceipt(txn) {
-  if (!txn) return false;
-  if (txn.docType === "Claim") return true;
-  return isLegacyClaimTransferReceipt(txn);
-}
+import { computeMemberFinanceSummary } from "../services/memberFinanceSummary.service.js";
+import pLimit from "p-limit";
+import {
+  buildMemberLastPayment,
+  isApplicationCreditClaimReceipt,
+  isLegacyClaimTransferReceipt,
+  pickLastMemberPayment,
+} from "../helpers/memberLastPayment.js";
 
 /** Portal members (gateway x-user-type MEMBER / PORTAL) — not CRM. */
 function isPortalMemberStatementCaller(req) {
@@ -59,37 +52,6 @@ function applyPortalMemberStatementLabels(txns) {
     }
     return txn;
   });
-}
-
-/**
- * Latest Receipt (cash/clearing) or Claim (online app credit → member) that credits 2020 for the member.
- * Receipts allocated only to AR (1400) are skipped; legacy claim-styled Receipts are skipped (Claim doc covers them).
- */
-function pickLastMember2020AdvanceReceipt(memberId, txns) {
-  const mid = String(memberId || "").trim();
-  if (!mid || !Array.isArray(txns)) return null;
-  for (const txn of txns) {
-    if (!txn) continue;
-    const dt = txn.docType;
-    if (dt !== "Receipt" && dt !== "Claim") continue;
-
-    const memberEntry = txn.entries.find(
-      (e) =>
-        String(e.memberId || "").trim() === mid &&
-        e.accountCode === "2020" &&
-        e.dc === "C" &&
-        (Number(e.amount) || 0) > 0,
-    );
-    if (!memberEntry) continue;
-
-    if (dt === "Receipt") {
-      if (isLegacyClaimTransferReceipt(txn)) continue;
-      if (!resolveTxTypeAccountCode(txn)) continue;
-    }
-
-    return txn;
-  }
-  return null;
 }
 
 /** After `paymentIntentId` is resolved, use it as `reference` so the row is not labeled only as CLAIM-{uuid}. */
@@ -599,8 +561,8 @@ export async function memberNetBalance(req, res, next) {
 }
 
 /**
- * Member summary: net balance + most recent payment crediting 2020 — cash Receipt (clearing leg) or
- * Claim (online app credit to member). Receipts allocated only to AR (1400) are ignored.
+ * Member summary: net balance + most recent payment (Receipt with clearing leg or Claim),
+ * including allocations to AR (1400) and/or member advance (2020).
  * + most recent Invoice (AR on 1400 for the member, same basis as simple ledger).
  */
 export async function memberSummary(req, res, next) {
@@ -635,7 +597,7 @@ export async function memberSummary(req, res, next) {
         docType: { $in: ["Receipt", "Claim"] },
       })
         .sort({ date: -1, createdAt: -1 })
-        .limit(80)
+        .limit(150)
         .lean(),
       GL.findOne({
         "entries.memberId": memberId,
@@ -655,27 +617,8 @@ export async function memberSummary(req, res, next) {
       byBucket[key] = (byBucket[key] || 0) + r.amount;
     }
 
-    const lastPaymentTxn = pickLastMember2020AdvanceReceipt(memberId, receiptCandidates);
-
-    let lastPayment = null;
-    if (lastPaymentTxn) {
-      const memberEntry = lastPaymentTxn.entries.find(
-        (e) =>
-          String(e.memberId || "").trim() === String(memberId || "").trim() &&
-          e.accountCode === "2020" &&
-          e.dc === "C",
-      );
-      const amount = memberEntry ? Number(memberEntry.amount) || 0 : 0;
-      lastPayment = {
-        docNo: lastPaymentTxn.docNo,
-        docType: lastPaymentTxn.docType,
-        date: lastPaymentTxn.date,
-        amount,
-        displayLabel: isApplicationCreditClaimReceipt(lastPaymentTxn)
-          ? "Claim"
-          : lastPaymentTxn.memo || "Payment",
-      };
-    }
+    const lastPaymentTxn = pickLastMemberPayment(memberId, receiptCandidates);
+    const lastPayment = buildMemberLastPayment(memberId, lastPaymentTxn);
 
     let latestInvoice = null;
     if (latestInvoiceTxn) {
@@ -688,6 +631,11 @@ export async function memberSummary(req, res, next) {
         reference: buildMemberLedgerReference(latestInvoiceTxn),
       };
     }
+
+    const financeSummary = await computeMemberFinanceSummary(
+      memberId,
+      effectiveYear ?? new Date().getFullYear(),
+    );
 
     res.success({
       memberId,
@@ -705,6 +653,12 @@ export async function memberSummary(req, res, next) {
       }),
       lastPayment,
       latestInvoice,
+      outstandingBalance: financeSummary.outstandingBalance,
+      availableCredit: financeSummary.availableCredit,
+      refundableBalance: financeSummary.refundableBalance,
+      deferredIncomeBalance: financeSummary.deferredIncomeBalance,
+      writtenOffBalance: financeSummary.writtenOffBalance,
+      unreconciledClearingBalance: financeSummary.unreconciledClearingBalance,
     });
   } catch (e) {
     next(e);
@@ -788,18 +742,30 @@ export async function memberSummaryBatch(req, res, next) {
         {
           $match: {
             "entries.memberId": { $in: normalizedMemberIds },
-            "entries.accountCode": "2020",
+            "entries.accountCode": { $in: ["1400", "2020"] },
             "entries.dc": "C",
             "entries.amount": { $gt: 0 },
           },
         },
         {
           $group: {
-            _id: "$entries.memberId",
+            _id: { memberId: "$entries.memberId", txnId: "$_id" },
             docNo: { $first: "$docNo" },
             docType: { $first: "$docType" },
             date: { $first: "$date" },
-            amount: { $first: "$entries.amount" },
+            createdAt: { $first: "$createdAt" },
+            amount: { $sum: "$entries.amount" },
+            memo: { $first: "$memo" },
+          },
+        },
+        { $sort: { date: -1, createdAt: -1 } },
+        {
+          $group: {
+            _id: "$_id.memberId",
+            docNo: { $first: "$docNo" },
+            docType: { $first: "$docType" },
+            date: { $first: "$date" },
+            amount: { $first: "$amount" },
             memo: { $first: "$memo" },
           },
         },
@@ -924,7 +890,30 @@ export async function memberSummaryBatch(req, res, next) {
       };
     });
 
-    res.success({ count: items.length, items });
+    const financeYear = effectiveYear ?? new Date().getFullYear();
+    const financeLimit = pLimit(10);
+    const enrichedItems = await Promise.all(
+      items.map((row) =>
+        financeLimit(async () => {
+          try {
+            const fs = await computeMemberFinanceSummary(row.memberId, financeYear);
+            return {
+              ...row,
+              outstandingBalance: fs.outstandingBalance,
+              availableCredit: fs.availableCredit,
+              refundableBalance: fs.refundableBalance,
+              deferredIncomeBalance: fs.deferredIncomeBalance,
+              writtenOffBalance: fs.writtenOffBalance,
+              unreconciledClearingBalance: fs.unreconciledClearingBalance,
+            };
+          } catch {
+            return row;
+          }
+        }),
+      ),
+    );
+
+    res.success({ count: enrichedItems.length, items: enrichedItems });
   } catch (e) {
     next(e);
   }

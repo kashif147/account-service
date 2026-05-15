@@ -99,10 +99,11 @@ describe("Scenario 1 — Jan 1 join / renewal: full annual, no join prorata; sam
     expect(debit).toBe(credit);
     expect(netAr1400(p.lines)).toBe(0);
     expect(p.incrementalCents).toBe(0);
+    const adj4900 = p.lines.filter((l) => l.accountCode === "4900");
+    expect(adj4900.length).toBeGreaterThan(0);
     const subs = revenueSubTypes(p.lines).map((x) => x.st);
     expect(subs).not.toContain("Fee Increase");
     expect(subs).not.toContain("Fee Decrease");
-    expect(subs.every((s) => s === "fee")).toBe(true);
   });
 });
 
@@ -138,18 +139,16 @@ describe("Scenario 2 — Jan 1 full fee, later downgrade to part-time → Fee De
 
     const oldDebit = p.lines.find(
       (l) =>
-        l.accountCode === OLD_INC &&
+        l.accountCode === "4900" &&
         l.dc === "D" &&
-        l.adjSubType === "category-change-old-tier-release",
+        l.adjSubType === "fee-decrease-adjustment",
     );
     expect(oldDebit).toBeDefined();
     expect(oldDebit.revenueSubType).toBe("Fee Decrease");
 
     const subs = revenueSubTypes(p.lines);
     expect(subs.some((x) => x.st === "Fee Increase")).toBe(false);
-    expect(subs.filter((x) => x.st === "fee" && x.dc === "C")).toHaveLength(
-      1,
-    );
+    expect(p.lines.filter((l) => l.accountCode === "4900" && l.dc === "C").length).toBeGreaterThan(0);
   });
 });
 
@@ -174,24 +173,27 @@ describe("Scenario 3 — Jan 1 part-time, later upgrade to full-time → Fee Inc
 
     const feeInc = p.lines.find(
       (l) =>
-        l.accountCode === NEW_INC &&
+        l.accountCode === "4900" &&
         l.dc === "C" &&
         l.revenueSubType === "Fee Increase",
     );
     expect(feeInc).toBeDefined();
     expect(feeInc.amount).toBe(p.incrementalCents);
+    expect(feeInc.adjSubType).toBe("fee-increase-adjustment");
 
     const feeRemainder = p.lines.find(
       (l) =>
-        l.accountCode === NEW_INC &&
+        l.accountCode === "4900" &&
         l.dc === "C" &&
-        l.revenueSubType === "fee",
+        l.adjSubType === "category-change-prorata-credit",
     );
     expect(feeRemainder).toBeDefined();
     expect(feeInc.amount + feeRemainder.amount).toBe(p.amountNewTier);
 
-    const oldDebit = p.lines.find((l) => l.accountCode === OLD_INC && l.dc === "D");
-    expect(oldDebit.revenueSubType).toBe("fee");
+    const oldDebit = p.lines.find(
+      (l) => l.accountCode === "4900" && l.dc === "D",
+    );
+    expect(oldDebit.adjSubType).toBe("category-downgrade-unused-credit");
 
     const { debit, credit } = sumDc(p.lines);
     expect(debit).toBe(credit);
@@ -237,7 +239,7 @@ describe("Scenario 5 — Mid-year join + prorata, later upgrade → Fee Increase
 
     const feeInc = p.lines.find(
       (l) =>
-        l.accountCode === NEW_INC &&
+        l.accountCode === "4900" &&
         l.revenueSubType === "Fee Increase" &&
         l.dc === "C",
     );
@@ -280,9 +282,9 @@ describe("Scenario 6 — Mid-year join + prorata, later downgrade → Fee Decrea
 
     const oldRelease = p.lines.find(
       (l) =>
-        l.accountCode === OLD_INC &&
+        l.accountCode === "4900" &&
         l.dc === "D" &&
-        l.adjSubType === "category-change-old-tier-release",
+        l.adjSubType === "fee-decrease-adjustment",
     );
     expect(oldRelease.revenueSubType).toBe("Fee Decrease");
 

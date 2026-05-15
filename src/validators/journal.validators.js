@@ -114,6 +114,21 @@ export const processDeductionBatchRules = [
     .withMessage("batchPayments must be a non-empty array"),
 ];
 
+export const applyMemberCreditRules = [
+  body("date").isISO8601().withMessage("date must be ISO (YYYY-MM-DD)"),
+  body("docNo").isString().notEmpty(),
+  body("memberId").isString().notEmpty(),
+  body("amount").isInt({ gt: 0 }).withMessage("amount must be positive integer cents"),
+  body("memo").optional().isString(),
+];
+
+export const reverseReceiptRules = [
+  body("receiptDocNo").isString().notEmpty(),
+  body("reversalDocNo").isString().notEmpty(),
+  body("memberId").isString().notEmpty(),
+  body("memo").optional().isString(),
+];
+
 export const claimApplicationCreditRules = [
   body("date")
     .isISO8601()

@@ -3,7 +3,7 @@ import { yearBoundsFrom, prorataForPeriod } from "./prorata.js";
 
 /**
  * Builds balanced GL lines + memo for a mid-year membership category change (CATNET).
- * Pure function — no DB. Used by postCategoryChangeJournals and unit tests.
+ * Category adjustments post to 4900; standard subscription invoices use 4xxx separately.
  *
  * @returns {{
  *   lines: object[],
@@ -26,6 +26,9 @@ export function buildCategoryChangeJournalPayload({
   previousSubscriptionStartDate,
   periodBucket = "current",
 }) {
+  void oldIncomeCode;
+  void newIncomeCode;
+
   if (!Number.isInteger(oldAnnualFee) || oldAnnualFee < 0) {
     throw AppError.badRequest(
       "oldAnnualFee must be a non-negative integer (minor units)",
@@ -91,28 +94,29 @@ export function buildCategoryChangeJournalPayload({
   if (amountNewTier > 0) {
     if (isUpgrade && incrementalCents > 0) {
       lines.push({
-        accountCode: newIncomeCode,
+        accountCode: "4900",
         dc: "C",
         amount: incrementalCents,
-        revenueSubType: "Fee Increase",
+        adjSubType: "fee-increase-adjustment",
         categoryName: newCategoryName,
+        revenueSubType: "Fee Increase",
       });
       const remainder = amountNewTier - incrementalCents;
       if (remainder > 0) {
         lines.push({
-          accountCode: newIncomeCode,
+          accountCode: "4900",
           dc: "C",
           amount: remainder,
-          revenueSubType: "fee",
+          adjSubType: "category-change-prorata-credit",
           categoryName: newCategoryName,
         });
       }
     } else {
       lines.push({
-        accountCode: newIncomeCode,
+        accountCode: "4900",
         dc: "C",
         amount: amountNewTier,
-        revenueSubType: "fee",
+        adjSubType: "category-change-prorata-credit",
         categoryName: newCategoryName,
       });
     }
@@ -120,13 +124,15 @@ export function buildCategoryChangeJournalPayload({
 
   if (amountOldUnused > 0) {
     lines.push({
-      accountCode: oldIncomeCode,
+      accountCode: "4900",
       dc: "D",
       amount: amountOldUnused,
-      revenueSubType:
-        isDowngrade && incrementalCents < 0 ? "Fee Decrease" : "fee",
+      adjSubType: isDowngrade && incrementalCents < 0
+        ? "fee-decrease-adjustment"
+        : "category-downgrade-unused-credit",
       categoryName: oldCategoryName,
-      adjSubType: "category-change-old-tier-release",
+      revenueSubType:
+        isDowngrade && incrementalCents < 0 ? "Fee Decrease" : undefined,
     });
   }
 

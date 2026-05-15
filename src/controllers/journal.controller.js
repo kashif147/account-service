@@ -598,36 +598,51 @@ export async function changeCategory(req, res, next) {
   }
 }
 
+/** @deprecated Use creditNote.controller create + approve flow */
 export async function creditNote(req, res, next) {
   try {
+    const { createCreditNoteDraft } = await import(
+      "../services/creditNote.service.js"
+    );
     const {
       date,
       docNo,
       memberId,
+      invoiceDocNo,
       amount,
       periodBucket = "current",
-      adjSubType = "manual-discount",
-      categoryName,
+      reason,
+      notes,
     } = req.body;
 
-    // Validate amount is integer (cents)
-    if (!Number.isInteger(amount) || amount <= 0) {
+    if (!invoiceDocNo) {
       throw AppError.badRequest(
-        "amount must be a positive integer (minor units, e.g., 32600 for €326.00)"
+        "invoiceDocNo is required; credit notes reverse a specific invoice",
       );
     }
-    const out = await postBalancedJournal({
-      date,
-      userId: req.ctx?.userId,
-      docType: "Adjustment",
+
+    const cents = Math.round(Number(amount));
+    if (!Number.isInteger(cents) || cents <= 0) {
+      throw AppError.badRequest(
+        "amount must be a positive integer (minor units)",
+      );
+    }
+
+    const { creditNote: cn } = await createCreditNoteDraft({
       docNo,
-      memo: `Adjustment – ${categoryName || adjSubType}`,
-      lines: [
-        { accountCode: "4900", dc: "D", amount, adjSubType, categoryName },
-        { accountCode: "1400", dc: "C", amount, memberId, periodBucket },
-      ],
+      memberId,
+      invoiceDocNo,
+      amount: cents,
+      periodBucket,
+      reason: reason || "Legacy credit-note endpoint",
+      notes,
+      effectiveDate: date,
+      createdBy: req.ctx?.userId,
     });
-    res.status(201).json(out);
+    res.status(201).json({
+      ...cn,
+      message: "Credit note saved as Draft; POST /credit-notes/:docNo/approve to post GL",
+    });
   } catch (e) {
     next(e);
   }

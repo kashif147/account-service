@@ -5,6 +5,7 @@ import reportsRoutes from "./reports.routes.js";
 import paymentsRoutes from "./payment.routes.js";
 import batchDetailRoutes from "./batch.detail.routes.js";
 import internalRoutes from "./internal.routes.js";
+import financeRoutes from "./finance.routes.js";
 
 const router = express.Router();
 
@@ -34,5 +35,6 @@ router.use("/reports", reportsRoutes);
 router.use("/payments", paymentsRoutes);
 router.use("/batch-details", batchDetailRoutes);
 router.use("/internal", internalRoutes);
+router.use("/finance", financeRoutes);
 
 export default router;

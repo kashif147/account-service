@@ -118,7 +118,7 @@ Response (example):
 }
 ```
 
-`lastPayment` is null if no Receipt/Claim exists for the member.
+`lastPayment` is the most recent Receipt (cash/clearing) or Claim for the member; amount is total credited to AR (1400) and/or advance (2020). Null if none exists.
 
 ### Member Ledger
 GET `{{baseUrl}}/reports/member/:memberId/ledger`

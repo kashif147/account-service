@@ -110,6 +110,66 @@ export async function buildMemberReceiptCreditEntries(
 }
 
 /**
+ * Apply member credit (2020) to outstanding AR (1400) — no cash clearing leg.
+ */
+export async function buildMemberApplyCreditEntries(
+  memberId,
+  amountCents,
+  dateInput,
+) {
+  const mid = String(memberId || "").trim();
+  const requested = Math.max(0, Math.round(Number(amountCents) || 0));
+  if (!mid || requested <= 0) return [];
+
+  const year = new Date(dateInput).getFullYear();
+  const available = await member2020AdvanceCreditCents(mid, year);
+  const apply = Math.min(requested, available);
+  if (apply <= 0) return [];
+
+  const { arrears, current } = await memberOwed1400ByBucket(mid, year);
+  const owed = Math.max(0, arrears) + Math.max(0, current);
+  if (owed <= 0) return [];
+
+  const capped = Math.min(apply, owed);
+  const { toArrears1400, toCurrent1400 } = allocateMemberReceiptAmounts(
+    capped,
+    arrears,
+    current,
+  );
+  const to1400 = toArrears1400 + toCurrent1400;
+  if (to1400 <= 0) return [];
+
+  const lines = [
+    {
+      accountCode: "2020",
+      dc: "D",
+      amount: to1400,
+      memberId: mid,
+      periodBucket: "advance",
+    },
+  ];
+  if (toArrears1400 > 0) {
+    lines.push({
+      accountCode: "1400",
+      dc: "C",
+      amount: toArrears1400,
+      memberId: mid,
+      periodBucket: "arrears",
+    });
+  }
+  if (toCurrent1400 > 0) {
+    lines.push({
+      accountCode: "1400",
+      dc: "C",
+      amount: toCurrent1400,
+      memberId: mid,
+      periodBucket: "current",
+    });
+  }
+  return lines;
+}
+
+/**
  * Credit balance on 2020 advance (cents). MatBal amount < 0 means credit.
  * @param {string} memberId
  * @param {number} year
