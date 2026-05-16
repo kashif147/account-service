@@ -26,6 +26,7 @@ import {
   isLegacyClaimTransferReceipt,
   pickLastMemberPayment,
 } from "../helpers/memberLastPayment.js";
+import { buildGeneralLedgerList } from "../helpers/generalLedgerList.helper.js";
 
 /** Portal members (gateway x-user-type MEMBER / PORTAL) — not CRM. */
 function isPortalMemberStatementCaller(req) {
@@ -1058,122 +1059,33 @@ function consolidateCategoryChanges(transactions) {
   return consolidated;
 }
 
-/** Draft/approved credit notes for member finance UI (same permission as ledger). */
-function pickPrimaryMemberId(txn, trackedCodes = []) {
-  const entries = txn.entries || [];
-  const tracked = new Set(
-    trackedCodes.length ? trackedCodes : ["1400", "2020"],
-  );
-  const primary = entries.find((e) => e.memberId && tracked.has(e.accountCode));
-  if (primary?.memberId) return String(primary.memberId).trim();
-  const any = entries.find((e) => e.memberId);
-  return any?.memberId ? String(any.memberId).trim() : null;
-}
-
-function flattenAllMembersLedgerRow(txn, memberId) {
-  const mid = String(memberId).trim();
-  let debit = 0;
-  let credit = 0;
-  for (const e of txn.entries || []) {
-    if (String(e.memberId || "").trim() !== mid) continue;
-    const amt = Number(e.amount) || 0;
-    if (e.dc === "D") debit += amt;
-    if (e.dc === "C") credit += amt;
-  }
-  return {
-    _id: txn._id,
-    memberId: mid,
-    docType: txn.docType,
-    docTypeLabel:
-      txn.ledgerDisplayDocType ||
-      txn.displayLabel ||
-      txn.docType ||
-      "",
-    docNo: txn.docNo || "",
-    date: txn.date,
-    memo: txn.memo || "",
-    reference: txn.reference || txn.docNo || "",
-    debit,
-    credit,
-    createdAt: txn.createdAt,
-    updatedAt: txn.updatedAt,
-    ledgerPresentation: txn.ledgerPresentation || null,
-    displayType: txn.displayType || null,
-  };
-}
-
-/**
- * Organisation-wide general ledger (member-facing GL): invoices, receipts,
- * claims, fee adjustments, write-offs, refunds, etc. Paginated newest first.
- */
+/** Organisation-wide general ledger (member-facing GL). */
 export async function generalLedgerTransactions(req, res, next) {
   try {
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit ?? "200", 10) || 200, 1),
-      500,
-    );
-    const skip = Math.max(parseInt(req.query.skip ?? "0", 10) || 0, 0);
     const memberId = req.query.memberId
       ? String(req.query.memberId).trim()
       : "";
     const docType = req.query.docType ? String(req.query.docType).trim() : "";
     const { from, to } = req.query;
+    const maxDocuments = parseInt(req.query.maxDocuments ?? "15000", 10);
+    const includeDrafts =
+      String(req.query.includeDrafts ?? "true").toLowerCase() !== "false";
 
-    const q = { "entries.memberId": { $exists: true, $ne: null } };
-    if (memberId) q["entries.memberId"] = memberId;
-    if (docType) q.docType = docType;
-    const dateRange = normalizeDateRange(from, to);
-    if (dateRange) q.date = dateRange;
+    const result = await buildGeneralLedgerList({
+      memberId,
+      docType,
+      from,
+      to,
+      tenantId: req.tenantId || req.ctx?.tenantId,
+      maxDocuments,
+      includeDrafts,
+    });
 
-    const [rawItems, total] = await Promise.all([
-      GL.find(q)
-        .sort({ createdAt: -1, date: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      GL.countDocuments(q),
-    ]);
-
-    const consolidated = consolidateCategoryChanges(rawItems);
-    const tenantId = req.tenantId || req.ctx?.tenantId;
-    const trackedCodes = await getMemberTrackedAccountCodes();
-
-    const byMember = new Map();
-    for (const txn of consolidated) {
-      const mid = pickPrimaryMemberId(txn, trackedCodes);
-      if (!mid) continue;
-      if (!byMember.has(mid)) byMember.set(mid, []);
-      byMember.get(mid).push(txn);
-    }
-
-    const rowGroups = await Promise.all(
-      [...byMember.entries()].map(async ([mid, items]) => {
-        let withPi = items;
-        if (tenantId) {
-          withPi = await attachPaymentIntentIdsToLedgerItems(items, tenantId);
-        }
-        const withClaim = attachClaimLedgerReference(withPi);
-        const withTx = await attachTxTypesToLedgerItems(withClaim);
-        const simplified = simplifyMemberLedgerPresentations(withTx, mid);
-        return simplified.map((txn) => flattenAllMembersLedgerRow(txn, mid));
-      }),
-    );
-
-    const items = rowGroups
-      .flat()
-      .filter((row) => Math.abs(row.debit) > 0 || Math.abs(row.credit) > 0)
-      .sort((a, b) => {
-        const ta = new Date(a.createdAt || a.date || 0).getTime();
-        const tb = new Date(b.createdAt || b.date || 0).getTime();
-        return tb - ta;
-      });
-
-    res.success({ items, total, skip, limit });
+    res.success(result);
     logInfo("General ledger listed", {
-      count: items.length,
-      total,
-      skip,
-      limit,
+      totalRows: result.totalRows,
+      totalGlDocuments: result.totalGlDocuments,
+      truncated: result.truncated,
     });
   } catch (e) {
     logError("General ledger list failed", { error: e.message });

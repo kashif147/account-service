@@ -47,14 +47,11 @@ export const memberCreditNotesRules = [
 ];
 
 export const generalLedgerRules = [
-  query("limit")
+  query("maxDocuments")
     .optional()
-    .isInt({ min: 1, max: 500 })
-    .withMessage("limit must be between 1 and 500"),
-  query("skip")
-    .optional()
-    .isInt({ min: 0 })
-    .withMessage("skip must be a non-negative integer"),
+    .isInt({ min: 1, max: 15000 })
+    .withMessage("maxDocuments must be between 1 and 15000"),
+  query("includeDrafts").optional().isString(),
   query("memberId").optional().isString().notEmpty(),
   query("docType").optional().isString().notEmpty(),
   query("from")
