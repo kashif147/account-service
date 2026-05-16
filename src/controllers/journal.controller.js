@@ -28,6 +28,30 @@ function sumArray(arr, sel) {
   return arr.reduce((s, x) => s + sel(x), 0);
 }
 
+function resolveMemberIdForJournalEvent({
+  claimMemberId,
+  entries = [],
+  memo,
+  lines = [],
+}) {
+  if (claimMemberId != null && String(claimMemberId).trim()) {
+    return String(claimMemberId).trim();
+  }
+  const fromEntries = [...entries, ...lines];
+  for (const entry of fromEntries) {
+    const mid = entry?.memberId;
+    if (mid != null && String(mid).trim() && !String(mid).startsWith("app:")) {
+      return String(mid).trim();
+    }
+  }
+  const memoStr = String(memo || "");
+  const memberMatch = memoStr.match(/\(member\s+([^)]+)\)/i);
+  if (memberMatch?.[1]) return memberMatch[1].trim();
+  const batchMemberMatch = memoStr.match(/\bMember:\s*([^\s|]+)/i);
+  if (batchMemberMatch?.[1]) return batchMemberMatch[1].trim();
+  return null;
+}
+
 // Load CoA rows for the accounts referenced in the journal,
 // and attach 'accountName' by mapping CoA.description → accountName.
 // We leave your GL model untouched (it still expects accountName).
@@ -262,6 +286,7 @@ export async function postBalancedJournal({
   sourceApplicationId,
   claimMemberId,
   userId,
+  tenantId,
 }) {
   // Wrap entire function in global DB limiter
   // This ensures all journal operations share the same resource pool
@@ -345,6 +370,13 @@ export async function postBalancedJournal({
     const { year, totals } = rollupMemberBalances({ date, entries });
     await bulkWriteMaterializedRollup(year, totals, 1);
 
+    const memberId = resolveMemberIdForJournalEvent({
+      claimMemberId: txn.claimMemberId,
+      entries: txn.entries,
+      memo: txn.memo,
+      lines,
+    });
+
     // Publish journal created event
     await publishDomainEvent(
       EVENT_TYPES.JOURNAL_CREATED,
@@ -357,6 +389,7 @@ export async function postBalancedJournal({
         memo: txn.memo,
         sourceApplicationId: txn.sourceApplicationId,
         claimMemberId: txn.claimMemberId,
+        memberId: memberId || undefined,
         entries: txn.entries,
         totalDebit: deb,
         totalCredit: cre,
@@ -364,6 +397,9 @@ export async function postBalancedJournal({
       {
         source: "journal.controller",
         operation: "postBalancedJournal",
+        ...(tenantId != null && String(tenantId).trim()
+          ? { tenantId: String(tenantId).trim() }
+          : {}),
       }
     );
 
@@ -718,6 +754,7 @@ export async function receipt(req, res, next) {
     const out = await postBalancedJournal({
       date,
       userId: req.ctx?.userId,
+      tenantId: req.ctx?.tenantId ?? req.tenantId,
       docType: "Receipt",
       docNo,
       memo,
@@ -861,6 +898,10 @@ export async function runProcessBatchPayments(
     typeof options.referenceNumber === "string"
       ? options.referenceNumber.trim()
       : "";
+  const tenantId =
+    options?.tenantId != null && String(options.tenantId).trim() !== ""
+      ? String(options.tenantId).trim()
+      : undefined;
 
   if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
     throw AppError.badRequest("batchPayments array is required and must not be empty", {
@@ -917,6 +958,7 @@ export async function runProcessBatchPayments(
       const txn = await postBalancedJournal({
         date,
         userId,
+        tenantId,
         docType: "Receipt",
         docNo: `batch-${randomUUID()}`,
         memo: memoParts.join(" | "),
@@ -1112,6 +1154,7 @@ export async function claimApplicationCredit(req, res, next) {
     const out = await postBalancedJournal({
       date: resolvedClaimDate,
       userId: req.ctx?.userId,
+      tenantId: req.ctx?.tenantId ?? req.tenantId,
       docType: "Claim",
       docNo,
       memo: `Claim app credit ${applicationId} → ${memberId}`,
@@ -1144,6 +1187,7 @@ export async function writeOff(req, res, next) {
     const out = await postBalancedJournal({
       date,
       userId: req.ctx?.userId,
+      tenantId: req.ctx?.tenantId ?? req.tenantId,
       docType: "WriteOff",
       docNo,
       memo,

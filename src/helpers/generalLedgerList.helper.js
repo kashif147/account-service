@@ -5,6 +5,12 @@ import { attachPaymentIntentIdsToLedgerItems } from "./memberLedgerPaymentIntent
 import { attachTxTypesToLedgerItems } from "./glTransactionTxType.js";
 import { listCreditNotes } from "../services/creditNote.service.js";
 import { isApplicationCreditClaimReceipt } from "./memberLastPayment.js";
+import {
+  buildMemberFacingGlQuery,
+  createMemberIdentityResolver,
+  entryBelongsToMember,
+  normMemberKey,
+} from "./memberIdentityResolver.js";
 
 function attachClaimLedgerReference(items) {
   if (!Array.isArray(items)) return items;
@@ -75,50 +81,85 @@ async function getMemberTrackedAccountCodes() {
   return rows.map((r) => r.code).filter(Boolean);
 }
 
-function normMemberKey(value) {
-  return String(value || "").trim().toLowerCase();
-}
-
-/** Member this GL row belongs to (claims use document-level claimMemberId). */
-export function resolveGlTxnMemberId(txn, trackedCodes = []) {
+/** Member this GL row belongs to (claims, profile:/app: keys, applicationId). */
+export function resolveGlTxnMemberId(txn, trackedCodes = [], resolver = null) {
   const docType = String(txn.docType || "").trim().toLowerCase();
   if (docType === "claim") {
-    const claimMid = String(txn.claimMemberId || "").trim();
+    const raw = String(txn.claimMemberId || "").trim();
+    const claimMid = resolver ? resolver.resolveMemberId(raw) : raw;
     if (claimMid) return claimMid;
   }
+
   const entries = txn.entries || [];
   const tracked = new Set(
     trackedCodes.length ? trackedCodes : ["1400", "2020"],
   );
-  const primary = entries.find((e) => e.memberId && tracked.has(e.accountCode));
-  if (primary?.memberId) return String(primary.memberId).trim();
-  const any = entries.find((e) => e.memberId);
-  return any?.memberId ? String(any.memberId).trim() : "";
+
+  const resolveRaw = (raw) => {
+    if (!raw) return "";
+    return resolver ? resolver.resolveMemberId(raw) : String(raw).trim();
+  };
+
+  for (const e of entries) {
+    if (e.memberId && tracked.has(e.accountCode)) {
+      const mid = resolveRaw(e.memberId);
+      if (mid) return mid;
+    }
+  }
+
+  if (resolver) {
+    for (const e of entries) {
+      if (e.applicationId) {
+        const mid = resolver.resolveApplicationId(e.applicationId);
+        if (mid) return mid;
+      }
+    }
+    if (txn.sourceApplicationId) {
+      const mid = resolver.resolveApplicationId(txn.sourceApplicationId);
+      if (mid) return mid;
+    }
+  }
+
+  for (const e of entries) {
+    if (e.memberId) {
+      const mid = resolveRaw(e.memberId);
+      if (mid) return mid;
+    }
+  }
+
+  return "";
 }
 
-function entriesForMemberAmounts(txn, memberId) {
+function entriesForMemberAmounts(txn, memberId, resolver) {
   const tid = normMemberKey(memberId);
   const docType = String(txn.docType || "").trim().toLowerCase();
   const list = txn.entries || [];
 
   if (docType === "claim") {
-    const claimMid = String(txn.claimMemberId || "").trim();
+    const rawClaim = String(txn.claimMemberId || "").trim();
+    const claimMid = resolver
+      ? resolver.resolveMemberId(rawClaim)
+      : rawClaim;
     if (claimMid && normMemberKey(claimMid) === tid) {
-      const byClaim = list.filter(
-        (e) => normMemberKey(e.memberId) === normMemberKey(claimMid),
+      const byClaim = list.filter((e) =>
+        entryBelongsToMember(e, memberId, resolver),
       );
       return byClaim.length > 0 ? byClaim : list;
     }
   }
 
+  if (resolver) {
+    return list.filter((e) => entryBelongsToMember(e, memberId, resolver));
+  }
+
   return list.filter((e) => normMemberKey(e.memberId) === tid);
 }
 
-function flattenGlRow(txn, memberId) {
+function flattenGlRow(txn, memberId, resolver) {
   const mid = String(memberId).trim();
   let debit = 0;
   let credit = 0;
-  for (const e of entriesForMemberAmounts(txn, mid)) {
+  for (const e of entriesForMemberAmounts(txn, mid, resolver)) {
     const amt = Number(e.amount) || 0;
     if (e.dc === "D") debit += amt;
     if (e.dc === "C") credit += amt;
@@ -150,33 +191,6 @@ function flattenGlRow(txn, memberId) {
     displayType: txn.displayType || null,
     approvalStatus: txn.approvalStatus || "Posted",
   };
-}
-
-function buildMemberFacingGlQuery({ memberId, docType, from, to }) {
-  const q = { docType: { $ne: "Settlement" } };
-  const date = {};
-  if (from) {
-    const fromDate = new Date(from);
-    if (!Number.isNaN(fromDate.getTime())) date.$gte = fromDate;
-  }
-  if (to) {
-    const toDate = new Date(to);
-    if (!Number.isNaN(toDate.getTime())) date.$lte = toDate;
-  }
-  if (Object.keys(date).length) q.date = date;
-
-  if (memberId) {
-    const mid = String(memberId).trim();
-    q.$or = [{ "entries.memberId": mid }, { claimMemberId: mid }];
-  } else {
-    q.$or = [
-      { "entries.memberId": { $exists: true, $nin: [null, ""] } },
-      { claimMemberId: { $exists: true, $nin: [null, ""] } },
-    ];
-  }
-
-  if (docType) q.docType = docType;
-  return q;
 }
 
 async function fetchAllMemberFacingGl(q, maxDocuments) {
@@ -246,7 +260,8 @@ export async function buildGeneralLedgerList({
   maxDocuments = DEFAULT_MAX_GL_DOCUMENTS,
   includeDrafts = true,
 }) {
-  const q = buildMemberFacingGlQuery({ memberId, docType, from, to });
+  const filterMember = String(memberId || "").trim();
+  const q = await buildMemberFacingGlQuery({ memberId: filterMember, docType, from, to });
   const { rawItems, totalGlDocuments, truncated } = await fetchAllMemberFacingGl(
     q,
     maxDocuments,
@@ -254,11 +269,20 @@ export async function buildGeneralLedgerList({
 
   const consolidated = consolidateCategoryChanges(rawItems);
   const trackedCodes = await getMemberTrackedAccountCodes();
+  const resolver = await createMemberIdentityResolver(consolidated, {
+    seedMemberId: filterMember || undefined,
+  });
 
   const byMember = new Map();
   for (const txn of consolidated) {
-    const mid = resolveGlTxnMemberId(txn, trackedCodes);
+    const mid = resolveGlTxnMemberId(txn, trackedCodes, resolver);
     if (!mid) continue;
+    if (
+      filterMember &&
+      normMemberKey(mid) !== normMemberKey(filterMember)
+    ) {
+      continue;
+    }
     if (!byMember.has(mid)) byMember.set(mid, []);
     byMember.get(mid).push(txn);
   }
@@ -272,7 +296,7 @@ export async function buildGeneralLedgerList({
       const withClaim = attachClaimLedgerReference(withPi);
       const withTx = await attachTxTypesToLedgerItems(withClaim);
       const simplified = simplifyMemberLedgerPresentations(withTx, mid);
-      return simplified.map((txn) => flattenGlRow(txn, mid));
+      return simplified.map((txn) => flattenGlRow(txn, mid, resolver));
     }),
   );
 
@@ -281,7 +305,7 @@ export async function buildGeneralLedgerList({
     .filter((row) => Math.abs(row.debit) > 0 || Math.abs(row.credit) > 0);
 
   items = await appendDraftCreditNoteRows(items, {
-    memberId,
+    memberId: filterMember,
     includeDrafts,
   });
 

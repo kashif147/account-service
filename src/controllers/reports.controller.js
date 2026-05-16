@@ -27,6 +27,7 @@ import {
   pickLastMemberPayment,
 } from "../helpers/memberLastPayment.js";
 import { buildGeneralLedgerList } from "../helpers/generalLedgerList.helper.js";
+import { buildMemberFacingGlQuery } from "../helpers/memberIdentityResolver.js";
 
 /** Portal members (gateway x-user-type MEMBER / PORTAL) — not CRM. */
 function isPortalMemberStatementCaller(req) {
@@ -1111,7 +1112,7 @@ export async function memberLedger(req, res, next) {
     const { memberId } = req.params;
     const { accountCode } = req.query;
 
-    const q = { "entries.memberId": memberId };
+    const q = await buildMemberFacingGlQuery({ memberId });
     if (accountCode) q["entries.accountCode"] = accountCode;
 
     const allItems = await GL.find(q)

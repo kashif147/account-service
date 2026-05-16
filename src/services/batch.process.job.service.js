@@ -184,6 +184,7 @@ export async function runBatchProcessing(
           {
             batchName: batch.description || "",
             referenceNumber: batch.referenceNumber || "",
+            tenantId: tenantId || batch.tenantId || undefined,
           }
         );
       } catch (err) {

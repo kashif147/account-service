@@ -1631,6 +1631,7 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
   return postBalancedJournal({
     date: journalDate,
     userId: ctx?.userId,
+    tenantId: ctx?.tenantId,
     docType: "Refund",
     docNo,
     reference,
@@ -1774,6 +1775,7 @@ export async function postJournalForPayment(payment, ctx) {
   const journal = await postBalancedJournal({
     date,
     userId: ctx?.userId,
+    tenantId: ctx?.tenantId ?? payment.tenantId,
     docType: "Receipt",
     docNo,
     memo,
