@@ -9,6 +9,9 @@ const JournalAdjustmentSchema = new mongoose.Schema(
     creditAccount: { type: String, required: true },
     amount: { type: Number, required: true },
     memberId: { type: String, index: true, sparse: true },
+    /** Display name and CRM profile id when member was chosen from search (optional). */
+    memberName: { type: String },
+    memberProfileId: { type: String, index: true, sparse: true },
     financialPeriod: { type: String, required: true },
     reason: { type: String, required: true },
     notes: { type: String },

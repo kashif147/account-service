@@ -80,6 +80,86 @@ async function postPaidInvoiceCreditTransfer({
 }
 
 /**
+ * Maximum total credit-note amount (cents) still allowed against an invoice.
+ * @param {string} invoiceDocNo
+ * @param {string} memberId
+ * @param {string} [excludeDocNo] — draft being created/approved (omit from committed sum)
+ */
+export async function getRemainingCreditableCents(
+  invoiceDocNo,
+  memberId,
+  excludeDocNo,
+) {
+  const inv = await GL.findOne({
+    docNo: invoiceDocNo,
+    docType: "Invoice",
+  }).lean();
+  if (!inv) {
+    throw AppError.notFound(`Invoice ${invoiceDocNo} not found`);
+  }
+
+  const mid = String(memberId || "").trim();
+  let memberArDebit = 0;
+  let revenueCredit = 0;
+
+  for (const e of inv.entries || []) {
+    const amt = Number(e.amount) || 0;
+    if (
+      e.accountCode === "1400" &&
+      e.dc === "D" &&
+      String(e.memberId || "").trim() === mid
+    ) {
+      memberArDebit += amt;
+    }
+    if (INCOME_CODE_RE.test(String(e.accountCode || "")) && e.dc === "C") {
+      revenueCredit += amt;
+    }
+    if (e.accountCode === "4900" && e.dc === "D") {
+      revenueCredit += amt;
+    }
+  }
+
+  const invoiceCap = Math.max(memberArDebit, revenueCredit);
+  if (invoiceCap <= 0) {
+    throw AppError.badRequest(
+      `Invoice ${invoiceDocNo} has no creditable amount for this member`,
+    );
+  }
+
+  const q = {
+    invoiceDocNo,
+    memberId: mid,
+    status: { $in: ["Draft", "Approved"] },
+  };
+  if (excludeDocNo) q.docNo = { $ne: excludeDocNo };
+
+  const existing = await CreditNote.find(q).select("amount").lean();
+  const committed = existing.reduce((s, cn) => s + (Number(cn.amount) || 0), 0);
+  return Math.max(0, invoiceCap - committed);
+}
+
+async function assertCreditNoteWithinInvoiceLimit({
+  invoiceDocNo,
+  memberId,
+  amount,
+  excludeDocNo,
+}) {
+  const remaining = await getRemainingCreditableCents(
+    invoiceDocNo,
+    memberId,
+    excludeDocNo,
+  );
+  if (amount > remaining) {
+    const euros = (remaining / 100).toFixed(2);
+    throw AppError.badRequest(
+      remaining <= 0
+        ? `Invoice ${invoiceDocNo} is already fully credited`
+        : `Credit note amount exceeds remaining creditable balance (€${euros} left on this invoice)`,
+    );
+  }
+}
+
+/**
  * AR credit balance on 1400 after CN (cents): payments exceeded remaining AR.
  */
 async function memberArCreditAfterCn(memberId, periodBucket, year) {
@@ -114,6 +194,12 @@ export async function createCreditNoteDraft({
   const { incomeCode, categoryName, isAdjustmentLine } =
     await resolveInvoiceIncomeCode(invoiceDocNo, memberId);
 
+  await assertCreditNoteWithinInvoiceLimit({
+    invoiceDocNo,
+    memberId,
+    amount,
+  });
+
   const cn = await CreditNote.create({
     docNo,
     memberId,
@@ -144,6 +230,13 @@ export async function approveCreditNote({ docNo, approvedBy, userId }) {
   if (cn.status !== "Draft") {
     throw AppError.badRequest(`Credit note status is ${cn.status}`);
   }
+
+  await assertCreditNoteWithinInvoiceLimit({
+    invoiceDocNo: cn.invoiceDocNo,
+    memberId: cn.memberId,
+    amount: cn.amount,
+    excludeDocNo: cn.docNo,
+  });
 
   const revenueCode = cn.incomeCode || "4900";
   const glDocNo = cn.glDocNo || `CN-${docNo}`;

@@ -136,18 +136,19 @@ export async function getLedgerActionsForDocument(ctx) {
   };
 }
 
-function buildLedgerBadges(summary, status, docType) {
+/** Row-specific badges only (member-level credit lives on summary cards). */
+function buildLedgerBadges(_summary, status, docType) {
   const badges = [];
-  if (summary.availableCredit > 0) badges.push("CREDIT AVAILABLE");
-  if (summary.refundableBalance > 0) badges.push("REFUNDABLE");
-  if (String(docType).toLowerCase() === "writeoff") badges.push("WRITTEN OFF");
-  if (status === "Settled" || status === "Reconciled" || status === "SETTLED") {
-    badges.push("RECONCILED");
-  }
-  if (status === "Unsettled") badges.push("UNSETTLED");
-  if (status === "Draft" || status === "PENDING APPROVAL") {
+  const st = String(status || "");
+  const dt = String(docType || "").toLowerCase();
+
+  if (st === "Draft" || st === "PENDING APPROVAL") {
     badges.push("PENDING APPROVAL");
   }
-  if (status === "Refunded") badges.push("REFUNDED");
+  if (st === "Refunded" || dt === "refund") badges.push("REFUNDED");
+  if (st === "Written Off" || dt === "writeoff") badges.push("WRITTEN OFF");
+  if (st === "Clearing Pending" || st === "Unsettled") {
+    badges.push("CLEARING PENDING");
+  }
   return badges;
 }

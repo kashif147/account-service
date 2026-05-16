@@ -7,6 +7,8 @@ export const createJournalAdjustmentRules = [
   body("creditAccount").isString().notEmpty(),
   body("amount").isFloat({ gt: 0 }),
   body("memberId").optional().isString(),
+  body("memberName").optional().isString(),
+  body("memberProfileId").optional().isString(),
   body("reason").isString().notEmpty(),
   body("notes").optional().isString(),
   body("financialPeriod").isString().notEmpty(),

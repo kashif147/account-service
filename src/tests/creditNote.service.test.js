@@ -67,7 +67,9 @@ describe("creditNote.service", () => {
     await GL.deleteMany({
       docNo: { $in: [INV_DOC, `CN-${CN_DOC}`, `${CN_DOC}-2020`] },
     });
-    await CreditNote.deleteMany({ docNo: CN_DOC });
+    await CreditNote.deleteMany({
+      docNo: { $in: [CN_DOC, "CN-002", "CN-003"] },
+    });
     await MaterializedBalance.deleteMany({ memberId: MEMBER });
     await seedCoa();
     await seedInvoice();
@@ -105,6 +107,52 @@ describe("creditNote.service", () => {
     const dr = gl.entries.find((e) => e.dc === "D");
     expect(dr.accountCode).toBe("4000");
     expect(gl.entries.some((e) => e.accountCode === "4900")).toBe(false);
+  });
+
+  test("rejects credit note when invoice is already fully credited", async () => {
+    await createCreditNoteDraft({
+      docNo: CN_DOC,
+      memberId: MEMBER,
+      invoiceDocNo: INV_DOC,
+      amount: 30_000,
+      effectiveDate: "2025-06-15",
+    });
+    await expect(
+      createCreditNoteDraft({
+        docNo: "CN-002",
+        memberId: MEMBER,
+        invoiceDocNo: INV_DOC,
+        amount: 1,
+        effectiveDate: "2025-06-15",
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  test("allows partial credit notes up to invoice total", async () => {
+    await createCreditNoteDraft({
+      docNo: CN_DOC,
+      memberId: MEMBER,
+      invoiceDocNo: INV_DOC,
+      amount: 10_000,
+      effectiveDate: "2025-06-15",
+    });
+    const { creditNote } = await createCreditNoteDraft({
+      docNo: "CN-002",
+      memberId: MEMBER,
+      invoiceDocNo: INV_DOC,
+      amount: 20_000,
+      effectiveDate: "2025-06-15",
+    });
+    expect(creditNote.amount).toBe(20_000);
+    await expect(
+      createCreditNoteDraft({
+        docNo: "CN-003",
+        memberId: MEMBER,
+        invoiceDocNo: INV_DOC,
+        amount: 1,
+        effectiveDate: "2025-06-15",
+      }),
+    ).rejects.toMatchObject({ statusCode: 400 });
   });
 
   test("cancelled draft does not post", async () => {

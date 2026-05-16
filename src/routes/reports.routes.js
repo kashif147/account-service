@@ -11,6 +11,7 @@ import {
   memberLedger,
   memberCreditNotes,
   refundsList,
+  generalLedgerTransactions,
 } from "../controllers/reports.controller.js";
 import { memberLedgerActions } from "../controllers/ledgerActions.controller.js";
 import {
@@ -21,6 +22,7 @@ import {
   memberLedgerRules,
   memberCreditNotesRules,
   refundsListRules,
+  generalLedgerRules,
 } from "../validators/reports.validators.js";
 import validate from "../middlewares/validate.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
@@ -36,6 +38,15 @@ router.get(
   refundsListRules,
   validate,
   refundsList
+);
+
+router.get(
+  "/general-ledger",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  generalLedgerRules,
+  validate,
+  generalLedgerTransactions
 );
 
 router.get(
