@@ -17,6 +17,7 @@ import {
 import { buildCategoryChangeJournalPayload } from "../helpers/categoryChangeJournal.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
+import { notifyMemberFinanceUpdated } from "../services/memberFinanceRealtimeNotify.service.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 import { randomUUID } from "crypto";
 import { enrichStripePaymentItems } from "../services/stripe.payment.enrichment.service.js";
@@ -377,6 +378,11 @@ export async function postBalancedJournal({
       lines,
     });
 
+    const resolvedTenantId =
+      tenantId != null && String(tenantId).trim()
+        ? String(tenantId).trim()
+        : undefined;
+
     // Publish journal created event
     await publishDomainEvent(
       EVENT_TYPES.JOURNAL_CREATED,
@@ -390,6 +396,7 @@ export async function postBalancedJournal({
         sourceApplicationId: txn.sourceApplicationId,
         claimMemberId: txn.claimMemberId,
         memberId: memberId || undefined,
+        tenantId: resolvedTenantId,
         entries: txn.entries,
         totalDebit: deb,
         totalCredit: cre,
@@ -397,11 +404,19 @@ export async function postBalancedJournal({
       {
         source: "journal.controller",
         operation: "postBalancedJournal",
-        ...(tenantId != null && String(tenantId).trim()
-          ? { tenantId: String(tenantId).trim() }
-          : {}),
+        ...(resolvedTenantId ? { tenantId: resolvedTenantId } : {}),
       }
     );
+
+    const financeDocTypes = new Set(["Receipt", "Claim", "Refund", "WriteOff"]);
+    if (resolvedTenantId && memberId && financeDocTypes.has(txn.docType)) {
+      notifyMemberFinanceUpdated({
+        tenantId: resolvedTenantId,
+        memberId,
+        docType: txn.docType,
+        docNo: txn.docNo,
+      }).catch(() => {});
+    }
 
     // add a friendly label in the response
     const obj = txn.toObject();

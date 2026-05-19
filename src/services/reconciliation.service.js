@@ -107,4 +107,74 @@ export async function markReconciliationSettled({ recordId }) {
   return rec.toObject();
 }
 
+/**
+ * Clearing account dashboard: unreconciled counts and open amounts per rail.
+ */
+export async function getReconciliationDashboard() {
+  const accounts = await Promise.all(
+    CLEARING_CODES.map(async (clearingAccountCode) => {
+      const [unmatched, manual_matched, suspense, settled, pendingGl] =
+        await Promise.all([
+          ReconciliationRecord.countDocuments({
+            clearingAccountCode,
+            reconciliationStatus: "unmatched",
+          }),
+          ReconciliationRecord.countDocuments({
+            clearingAccountCode,
+            reconciliationStatus: "manual_matched",
+          }),
+          ReconciliationRecord.countDocuments({
+            clearingAccountCode,
+            reconciliationStatus: "suspense",
+          }),
+          ReconciliationRecord.countDocuments({
+            clearingAccountCode,
+            reconciliationStatus: "settled",
+          }),
+          GL.countDocuments({
+            "settlement.status": "PENDING",
+            "entries.accountCode": clearingAccountCode,
+          }),
+        ]);
+
+      const openRecords = await ReconciliationRecord.find({
+        clearingAccountCode,
+        reconciliationStatus: { $in: ["unmatched", "manual_matched", "suspense"] },
+      })
+        .select({ amount: 1 })
+        .lean();
+
+      const openAmount = openRecords.reduce(
+        (s, r) => s + (Number(r.amount) || 0),
+        0,
+      );
+
+      const lastSettled = await ReconciliationRecord.findOne({
+        clearingAccountCode,
+        reconciliationStatus: "settled",
+      })
+        .sort({ settledAt: -1, updatedAt: -1 })
+        .select({ settledAt: 1, updatedAt: 1 })
+        .lean();
+
+      const lastReconciledAt =
+        lastSettled?.settledAt || lastSettled?.updatedAt || null;
+
+      return {
+        clearingAccountCode,
+        unmatched,
+        manual_matched,
+        suspense,
+        settled,
+        unreconciledCount: unmatched + manual_matched + suspense,
+        openAmount,
+        pendingGlCount: pendingGl,
+        lastReconciledAt,
+      };
+    }),
+  );
+
+  return { accounts, supportedClearingAccounts: CLEARING_CODES };
+}
+
 export { RECON_STATUSES, CLEARING_CODES };

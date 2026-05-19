@@ -1,4 +1,5 @@
 import CreditNote from "../models/creditNote.model.js";
+import { hasFinancePermission } from "../helpers/financePermissions.js";
 import { computeMemberFinanceSummary } from "./memberFinanceSummary.service.js";
 
 /**
@@ -23,9 +24,7 @@ export async function getLedgerActionsForDocument(ctx) {
   } = ctx;
 
   const can = (resource, action) =>
-    permissions.includes(`${resource}:${action}`) ||
-    permissions.includes("admin") ||
-    permissions.includes("*");
+    hasFinancePermission(permissions, resource, action);
 
   const summary = await computeMemberFinanceSummary(memberId, year);
   const actions = [];
@@ -108,13 +107,6 @@ export async function getLedgerActionsForDocument(ctx) {
   }
 
   if (dt === "writeoff") {
-    const st = status || "Approved";
-    if (st === "Draft" || st === "PENDING") {
-      add("approve", "Approve", {
-        resource: "accounts.journals",
-        action: "write",
-      });
-    }
     add("reverse", "Reverse", {
       resource: "accounts.journals",
       action: "write",

@@ -3,6 +3,7 @@ import GL from "../models/glTransaction.model.js";
 import {
   getAvailableCredit2020ForKey,
   getMemberStoredCreditCents,
+  getRefundableBalanceForMember,
 } from "./refundCredit.service.js";
 import { memberOwed1400ByBucket } from "../helpers/paymentReceiptAllocation.js";
 
@@ -33,7 +34,10 @@ export async function computeMemberFinanceSummary(memberId, year) {
   const available2020 = await getAvailableCredit2020ForKey(mid, effectiveYear);
   const storedCredit = await getMemberStoredCreditCents(mid, effectiveYear);
   const availableCredit = Math.max(available2020, storedCredit);
-  const refundableBalance = availableCredit;
+  const refundableBalance = await getRefundableBalanceForMember(
+    mid,
+    effectiveYear,
+  );
 
   let deferredIncomeBalance = 0;
   for (const r of matRows) {

@@ -129,6 +129,19 @@ export const reverseReceiptRules = [
   body("memo").optional().isString(),
 ];
 
+export const reverseWriteOffRules = [
+  body("writeOffDocNo").isString().notEmpty(),
+  body("reversalDocNo").isString().notEmpty(),
+  body("memberId").isString().notEmpty(),
+  body("memo").optional().isString(),
+];
+
+export const writeOffRecoveryNoteRules = [
+  body("writeOffDocNo").isString().notEmpty(),
+  body("note").isString().notEmpty(),
+  body("memberId").optional().isString(),
+];
+
 export const claimApplicationCreditRules = [
   body("date")
     .isISO8601()

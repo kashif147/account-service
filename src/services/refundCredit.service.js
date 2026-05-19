@@ -132,6 +132,25 @@ export async function getMemberStoredCreditCents(memberKey, year) {
 }
 
 /**
+ * Operational refundable balance for a member (cents) — same cap as refund validation.
+ * @param {string} memberId
+ * @param {number} [year]
+ */
+export async function getRefundableBalanceForMember(memberId, year) {
+  const mid = String(memberId || "").trim();
+  if (!mid || mid.toLowerCase().startsWith("app:")) return 0;
+  const effectiveYear =
+    Number.isFinite(year) && year > 0 ? year : new Date().getFullYear();
+
+  let available = await getAvailableCredit2020ForKey(mid, effectiveYear);
+  available = Math.max(
+    available,
+    await getMemberStoredCreditCents(mid, effectiveYear),
+  );
+  return Math.max(0, available);
+}
+
+/**
  * @param {number} refundCents
  * @param {import("mongoose").Document|object} payment
  * @param {number} journalYear

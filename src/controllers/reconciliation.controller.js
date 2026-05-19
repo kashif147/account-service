@@ -5,7 +5,13 @@ import {
   manualMatchReconciliation,
   moveToSuspense,
   markReconciliationSettled,
+  getReconciliationDashboard,
 } from "../services/reconciliation.service.js";
+
+export const reconciliationDashboardHandler = asyncHandler(async (req, res) => {
+  const dashboard = await getReconciliationDashboard();
+  res.success(dashboard);
+});
 
 export const listReconciliationHandler = asyncHandler(async (req, res) => {
   const { clearingAccountCode, reconciliationStatus, limit, skip } = req.query;

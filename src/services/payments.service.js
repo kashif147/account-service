@@ -320,6 +320,13 @@ export async function createIntent(input, ctx) {
   let mode = "stripe";
   let stripeIds = {};
 
+  const stripeMetadata = {
+    ...(metadata || {}),
+    ...(ctx.tenantId ? { tenantId: String(ctx.tenantId) } : {}),
+    ...(memberId ? { memberId: String(memberId) } : {}),
+    ...(applicationId ? { applicationId: String(applicationId) } : {}),
+  };
+
   if (parsed.useCheckout) {
     const session = await stripe.checkout.sessions.create(
       {
@@ -336,6 +343,9 @@ export async function createIntent(input, ctx) {
             quantity: 1,
           },
         ],
+        payment_intent_data: {
+          metadata: stripeMetadata,
+        },
         success_url: `${
           process.env.PORTAL_BASE_URL || "https://example.com"
         }/payments/success`,
@@ -434,7 +444,7 @@ export async function createIntent(input, ctx) {
           amount: parsed.amount,
           currency: normalizedCurrency,
           payment_method_types: ["card"],
-          metadata: parsed.metadata || {},
+          metadata: stripeMetadata,
         },
         { idempotencyKey: stripeIdempotencyKey },
       );
@@ -458,7 +468,7 @@ export async function createIntent(input, ctx) {
           amount: parsed.amount,
           currency: normalizedCurrency,
           payment_method_types: ["card"],
-          metadata: parsed.metadata || {},
+          metadata: stripeMetadata,
         });
       } else {
         throw stripeError;
@@ -583,7 +593,7 @@ export async function createIntent(input, ctx) {
       source: "portal",
       mode,
       stripe: stripeIds,
-      metadata: metadata,
+      metadata: stripeMetadata,
       audit: {
         createdBy: ctx.userId || ctx.memberId || "system",
         updatedBy: ctx.userId || ctx.memberId || "system",
@@ -837,7 +847,10 @@ export async function reconcileStripeEvent(input, ctx) {
 
           if (!existingJournal) {
             try {
-              const journal = await postJournalForPayment(retryPayment, ctx);
+              const journal = await postJournalForPayment(
+                retryPayment,
+                paymentJournalCtx(retryPayment, ctx),
+              );
               if (journal) {
                 logger.info(
                   {
@@ -891,7 +904,10 @@ export async function reconcileStripeEvent(input, ctx) {
           "Creating journal entry for succeeded payment",
         );
         try {
-          const journal = await postJournalForPayment(doc, ctx);
+          const journal = await postJournalForPayment(
+            doc,
+            paymentJournalCtx(doc, ctx),
+          );
           if (journal) {
             logger.info(
               {
@@ -980,7 +996,10 @@ export async function reconcileStripeEvent(input, ctx) {
           try {
             // postJournalForPayment is defined in this file, call it directly
             // We need to import it at the top level, but for now use the function reference
-            const journal = await postJournalForPayment(fullPayment, ctx);
+            const journal = await postJournalForPayment(
+              fullPayment,
+              paymentJournalCtx(fullPayment, ctx),
+            );
             if (journal) {
               logger.info(
                 {
@@ -1060,7 +1079,10 @@ export async function reconcileStripeEvent(input, ctx) {
               "Creating journal entry for succeeded payment (duplicate key recovery)",
             );
             try {
-              const journal = await postJournalForPayment(doc, ctx);
+              const journal = await postJournalForPayment(
+                doc,
+                paymentJournalCtx(doc, ctx),
+              );
               if (journal) {
                 logger.info(
                   {
@@ -1126,7 +1148,10 @@ export async function reconcileStripeEvent(input, ctx) {
 
         if (!existingJournal) {
           try {
-            const journal = await postJournalForPayment(finalRetry, ctx);
+            const journal = await postJournalForPayment(
+              finalRetry,
+              paymentJournalCtx(finalRetry, ctx),
+            );
             if (journal) {
               logger.info(
                 {
@@ -1190,7 +1215,7 @@ export async function recordExternal(input, ctx) {
       external: { externalRef: parsed.externalRef },
       metadata: parsed.metadata || {},
     });
-    await postJournalForPayment(payment, ctx);
+    await postJournalForPayment(payment, paymentJournalCtx(payment, ctx));
     return { ok: true, paymentId: payment._id.toString() };
   }
 
@@ -1640,7 +1665,15 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
   });
 }
 
+function paymentJournalCtx(payment, ctx = {}) {
+  return {
+    ...ctx,
+    tenantId: payment?.tenantId || ctx?.tenantId,
+  };
+}
+
 export async function postJournalForPayment(payment, ctx) {
+  const journalCtx = paymentJournalCtx(payment, ctx);
   // Import required modules
   const { postBalancedJournal } =
     await import("../controllers/journal.controller.js");
@@ -1774,8 +1807,8 @@ export async function postJournalForPayment(payment, ctx) {
   // Note: postBalancedJournal needs to be exported from journal.controller.js
   const journal = await postBalancedJournal({
     date,
-    userId: ctx?.userId,
-    tenantId: ctx?.tenantId ?? payment.tenantId,
+    userId: journalCtx?.userId,
+    tenantId: journalCtx?.tenantId,
     docType: "Receipt",
     docNo,
     memo,

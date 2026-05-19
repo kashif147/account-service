@@ -1,6 +1,9 @@
 import express from "express";
 import { ensureAuthenticated } from "../middlewares/auth.js";
-import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
+import {
+  requireFinanceRead,
+  requireFinanceWrite,
+} from "../middlewares/financePermission.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
 import validate from "../middlewares/validate.js";
 import {
@@ -18,6 +21,7 @@ import {
 } from "../controllers/journalAdjustment.controller.js";
 import {
   listReconciliationHandler,
+  reconciliationDashboardHandler,
   seedReconciliationHandler,
   manualMatchHandler,
   suspenseHandler,
@@ -26,19 +30,10 @@ import {
 
 const router = express.Router();
 
-const financeWrite = defaultPolicyMiddleware.requirePermission(
-  "accounts.admin",
-  "write",
-);
-const financeRead = defaultPolicyMiddleware.requirePermission(
-  "accounts.admin",
-  "read",
-);
-
 router.post(
   "/journal-adjustments",
   ensureAuthenticated,
-  financeWrite,
+  requireFinanceWrite,
   idempotency(),
   createJournalAdjustmentRules,
   validate,
@@ -48,7 +43,7 @@ router.post(
 router.post(
   "/journal-adjustments/:docNo/approve",
   ensureAuthenticated,
-  financeWrite,
+  requireFinanceWrite,
   idempotency(),
   journalAdjustmentDocNoParam,
   validate,
@@ -58,23 +53,30 @@ router.post(
 router.get(
   "/journal-adjustments",
   ensureAuthenticated,
-  financeRead,
+  requireFinanceRead,
   listJournalAdjustmentRules,
   validate,
   listJournalAdjustmentsHandler,
 );
 
 router.get(
+  "/reconciliation/dashboard",
+  ensureAuthenticated,
+  requireFinanceRead,
+  reconciliationDashboardHandler,
+);
+
+router.get(
   "/reconciliation",
   ensureAuthenticated,
-  financeRead,
+  requireFinanceRead,
   listReconciliationHandler,
 );
 
 router.post(
   "/reconciliation/seed",
   ensureAuthenticated,
-  financeWrite,
+  requireFinanceWrite,
   idempotency(),
   reconciliationSeedRules,
   validate,
@@ -84,7 +86,7 @@ router.post(
 router.post(
   "/reconciliation/match",
   ensureAuthenticated,
-  financeWrite,
+  requireFinanceWrite,
   reconciliationMatchRules,
   validate,
   manualMatchHandler,
@@ -93,7 +95,7 @@ router.post(
 router.post(
   "/reconciliation/suspense",
   ensureAuthenticated,
-  financeWrite,
+  requireFinanceWrite,
   reconciliationSuspenseRules,
   validate,
   suspenseHandler,
@@ -102,7 +104,7 @@ router.post(
 router.post(
   "/reconciliation/:recordId/settle",
   ensureAuthenticated,
-  financeWrite,
+  requireFinanceWrite,
   settleReconciliationHandler,
 );
 

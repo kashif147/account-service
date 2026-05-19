@@ -1,16 +1,12 @@
 import { asyncHandler } from "../helpers/asyncHandler.js";
+import { collectRequestPermissions } from "../helpers/financePermissions.js";
 import { getLedgerActionsForDocument } from "../services/ledgerActions.service.js";
 
 export const memberLedgerActions = asyncHandler(async (req, res) => {
   const { memberId } = req.params;
   const { docType, docNo, status, year } = req.query;
 
-  const permissions = [];
-  if (req.user?.permissions) {
-    if (Array.isArray(req.user.permissions)) {
-      permissions.push(...req.user.permissions);
-    }
-  }
+  const permissions = collectRequestPermissions(req);
 
   const result = await getLedgerActionsForDocument({
     docType,
