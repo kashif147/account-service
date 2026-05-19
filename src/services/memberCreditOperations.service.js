@@ -123,6 +123,21 @@ export async function reverseMemberReceipt({
   return out;
 }
 
+function writeOffReversalMemoRegex(docNo) {
+  const escaped = String(docNo || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return `Reverse write-off ${escaped}`;
+}
+
+/** Whether a reversing journal already exists for this write-off doc. */
+export async function isWriteOffReversed(writeOffDocNo) {
+  const docNo = String(writeOffDocNo || "").trim();
+  if (!docNo) return false;
+  const existing = await GL.findOne({
+    memo: { $regex: writeOffReversalMemoRegex(docNo) },
+  }).lean();
+  return Boolean(existing);
+}
+
 /**
  * Reverse a posted WriteOff by posting offsetting GL lines.
  */
@@ -166,12 +181,7 @@ export async function reverseMemberWriteOff({
     throw AppError.conflict(`Reversal document ${revNo} already exists`);
   }
 
-  const alreadyReversed = await GL.findOne({
-    memo: {
-      $regex: `Reverse write-off ${docNo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-    },
-  }).lean();
-  if (alreadyReversed) {
+  if (await isWriteOffReversed(docNo)) {
     throw AppError.conflict(`Write-off ${docNo} was already reversed`);
   }
 

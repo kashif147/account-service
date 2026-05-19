@@ -1,6 +1,7 @@
 import CreditNote from "../models/creditNote.model.js";
 import { hasFinancePermission } from "../helpers/financePermissions.js";
 import { computeMemberFinanceSummary } from "./memberFinanceSummary.service.js";
+import { isWriteOffReversed } from "./memberCreditOperations.service.js";
 
 /**
  * Contextual ledger actions for member finance UI (permissions are resource names).
@@ -106,11 +107,14 @@ export async function getLedgerActionsForDocument(ctx) {
     }
   }
 
-  if (dt === "writeoff") {
-    add("reverse-writeoff", "Reverse Write-off", {
-      resource: "accounts.journals",
-      action: "write",
-    });
+  if (dt === "writeoff" && docNo) {
+    const reversed = await isWriteOffReversed(docNo);
+    if (!reversed) {
+      add("reverse-writeoff", "Reverse Write-off", {
+        resource: "accounts.journals",
+        action: "write",
+      });
+    }
   }
 
   return {
