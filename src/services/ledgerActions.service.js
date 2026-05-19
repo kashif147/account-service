@@ -107,11 +107,7 @@ export async function getLedgerActionsForDocument(ctx) {
   }
 
   if (dt === "writeoff") {
-    add("reverse", "Reverse", {
-      resource: "accounts.journals",
-      action: "write",
-    });
-    add("recovery-note", "Add Recovery Note", {
+    add("reverse-writeoff", "Reverse Write-off", {
       resource: "accounts.journals",
       action: "write",
     });

@@ -126,12 +126,20 @@ export async function reverseMemberReceipt({
 /**
  * Reverse a posted WriteOff by posting offsetting GL lines.
  */
+function buildWriteOffReversalMemo(docNo, { memo, recoveryNote } = {}) {
+  const base = memo?.trim() || `Reverse write-off ${docNo}`;
+  const recovery = String(recoveryNote || "").trim();
+  if (!recovery) return base;
+  return `${base} — Recovery: ${recovery}`;
+}
+
 export async function reverseMemberWriteOff({
   writeOffDocNo,
   reversalDocNo,
   memberId,
   userId,
   memo,
+  recoveryNote,
 }) {
   const docNo = String(writeOffDocNo || "").trim();
   const revNo = String(reversalDocNo || "").trim();
@@ -188,38 +196,8 @@ export async function reverseMemberWriteOff({
     userId,
     docType: "Adjustment",
     docNo: revNo,
-    memo: memo || `Reverse write-off ${docNo}`,
+    memo: buildWriteOffReversalMemo(docNo, { memo, recoveryNote }),
     lines,
     adjSubType: "writeoff-reversal",
   });
-}
-
-/**
- * Append a recovery note to an existing write-off GL document.
- */
-export async function addWriteOffRecoveryNote({ writeOffDocNo, note, memberId }) {
-  const docNo = String(writeOffDocNo || "").trim();
-  const text = String(note || "").trim();
-  if (!docNo) throw AppError.badRequest("writeOffDocNo is required");
-  if (!text) throw AppError.badRequest("note is required");
-
-  const txn = await GL.findOne({ docNo, docType: "WriteOff" });
-  if (!txn) throw AppError.notFound(`Write-off ${docNo} not found`);
-
-  if (memberId) {
-    const mid = String(memberId).trim();
-    const memberTouched = (txn.entries || []).some(
-      (e) => String(e.memberId || "").trim() === mid,
-    );
-    if (!memberTouched) {
-      throw AppError.badRequest("Write-off does not belong to this member");
-    }
-  }
-
-  const stamp = new Date().toISOString().slice(0, 10);
-  const suffix = `[Recovery ${stamp}] ${text}`;
-  const base = txn.memo ? String(txn.memo).trim() : "Write off";
-  txn.memo = `${base} — ${suffix}`;
-  await txn.save();
-  return txn.toObject();
 }

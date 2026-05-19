@@ -12,13 +12,11 @@ import {
   applyMemberCreditRules,
   reverseReceiptRules,
   reverseWriteOffRules,
-  writeOffRecoveryNoteRules,
 } from "../validators/journal.validators.js";
 import {
   applyMemberCreditHandler,
   reverseReceiptHandler,
   reverseWriteOffHandler,
-  writeOffRecoveryNoteHandler,
 } from "../controllers/memberCreditOperations.controller.js";
 import {
   invoice,
@@ -210,15 +208,6 @@ router.post(
   reverseWriteOffRules,
   validate,
   reverseWriteOffHandler,
-);
-
-router.post(
-  "/writeoff/recovery-note",
-  ensureAuthenticated,
-  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
-  writeOffRecoveryNoteRules,
-  validate,
-  writeOffRecoveryNoteHandler,
 );
 
 // Claim application credit - requires minimum Membership Officer level
