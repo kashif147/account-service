@@ -1184,6 +1184,13 @@ export async function claimApplicationCredit(req, res, next) {
   }
 }
 
+function resolveWriteOffDocNo(docNo) {
+  const trimmed = docNo != null ? String(docNo).trim() : "";
+  if (trimmed) return trimmed;
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.toUpperCase();
+  return `WO-${suffix}`;
+}
+
 export async function writeOff(req, res, next) {
   try {
     const {
@@ -1194,6 +1201,7 @@ export async function writeOff(req, res, next) {
       periodBucket = "current",
       memo: bodyMemo,
     } = req.body;
+    const resolvedDocNo = resolveWriteOffDocNo(docNo);
     const userMemo =
       bodyMemo != null && String(bodyMemo).trim() !== ""
         ? String(bodyMemo).trim()
@@ -1204,7 +1212,7 @@ export async function writeOff(req, res, next) {
       userId: req.ctx?.userId,
       tenantId: req.ctx?.tenantId ?? req.tenantId,
       docType: "WriteOff",
-      docNo,
+      docNo: resolvedDocNo,
       memo,
       lines: [
         { accountCode: "5200", dc: "D", amount, adjSubType: "writeoff" },

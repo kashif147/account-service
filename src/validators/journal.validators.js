@@ -52,10 +52,11 @@ export const creditNoteRules = [
 export const writeOffRules = [
   body("date").isISO8601().withMessage("date must be ISO (YYYY-MM-DD)"),
   body("docNo")
+    .optional({ checkFalsy: true })
     .trim()
     .isString()
     .notEmpty()
-    .withMessage("docNo is required"),
+    .withMessage("docNo must be non-empty when provided"),
   body("memberId").isString().notEmpty(),
   body("amount").isFloat({ gt: 0 }),
   body("periodBucket").optional().isIn(isBucket),
