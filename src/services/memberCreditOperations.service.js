@@ -59,6 +59,7 @@ export async function reverseMemberReceipt({
   memberId,
   userId,
   memo,
+  date,
 }) {
   const docNo = String(receiptDocNo || "").trim();
   const revNo = String(reversalDocNo || "").trim();
@@ -110,11 +111,17 @@ export async function reverseMemberReceipt({
     throw AppError.badRequest("Receipt has no lines to reverse");
   }
 
+  const journalDate =
+    date != null && String(date).trim() !== ""
+      ? new Date(String(date).trim().split("T")[0])
+      : new Date();
+
   const out = await postBalancedJournal({
-    date: new Date(),
+    date: journalDate,
     userId,
     docType: "Adjustment",
     docNo: revNo,
+    reference: docNo,
     memo: memo || `Reverse receipt ${docNo}`,
     lines,
     adjSubType: "receipt-reversal",

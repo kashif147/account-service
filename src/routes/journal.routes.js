@@ -12,12 +12,14 @@ import {
   applyMemberCreditRules,
   reverseReceiptRules,
   reverseWriteOffRules,
+  reassignPaymentsRules,
 } from "../validators/journal.validators.js";
 import {
   applyMemberCreditHandler,
   reverseReceiptHandler,
   reverseWriteOffHandler,
 } from "../controllers/memberCreditOperations.controller.js";
+import { reassignPaymentsHandler } from "../controllers/paymentReassignment.controller.js";
 import {
   invoice,
   receipt,
@@ -208,6 +210,16 @@ router.post(
   reverseWriteOffRules,
   validate,
   reverseWriteOffHandler,
+);
+
+router.post(
+  "/reassign-payments",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  idempotency(),
+  reassignPaymentsRules,
+  validate,
+  reassignPaymentsHandler,
 );
 
 // Claim application credit - requires minimum Membership Officer level

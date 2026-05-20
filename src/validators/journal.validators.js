@@ -138,6 +138,40 @@ export const reverseWriteOffRules = [
   body("recoveryNote").optional().isString(),
 ];
 
+export const reassignPaymentsRules = [
+  body("fromMemberId").isString().notEmpty(),
+  body("toMemberId").isString().notEmpty(),
+  body("receiptDocNos").optional().isArray(),
+  body("receiptDocNos.*").optional().isString().notEmpty(),
+  body("payments").optional().isArray({ min: 1 }),
+  body("payments.*.receiptDocNo").optional().isString().notEmpty(),
+  body("payments.*.amountCents")
+    .optional()
+    .isInt({ gt: 0 })
+    .withMessage("payments.*.amountCents must be a positive integer (cents)"),
+  body("memo")
+    .isString()
+    .trim()
+    .notEmpty()
+    .withMessage("memo is required (audit reason)"),
+  body("correctionDate").optional().isISO8601(),
+  body("effectiveDate").optional().isISO8601(),
+  body("totalMoveAmountCents")
+    .optional()
+    .isInt({ gt: 0 })
+    .withMessage("totalMoveAmountCents must be a positive integer (cents)"),
+  body().custom((_, { req }) => {
+    const hasNos =
+      Array.isArray(req.body?.receiptDocNos) && req.body.receiptDocNos.length > 0;
+    const hasPayments =
+      Array.isArray(req.body?.payments) && req.body.payments.length > 0;
+    if (!hasNos && !hasPayments) {
+      throw new Error("Provide payments[] or receiptDocNos");
+    }
+    return true;
+  }),
+];
+
 export const claimApplicationCreditRules = [
   body("date")
     .isISO8601()
