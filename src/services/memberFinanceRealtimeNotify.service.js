@@ -2,7 +2,7 @@ import logger from "../config/logger.js";
 
 /**
  * Best-effort HTTP push to notification-service (in addition to journal.created.v1).
- * Set NOTIFICATION_SERVICE_URL + NOTIFICATION_INTERNAL_API_KEY on account-service.
+ * Set NOTIFICATION_SERVICE_URL on account-service.
  */
 export async function notifyMemberFinanceUpdated({
   tenantId,
@@ -12,11 +12,10 @@ export async function notifyMemberFinanceUpdated({
   docNo,
 }) {
   const baseUrl = (process.env.NOTIFICATION_SERVICE_URL || "").trim();
-  const apiKey = (process.env.NOTIFICATION_INTERNAL_API_KEY || "").trim();
   const tid = tenantId != null ? String(tenantId).trim() : "";
   const mid = memberId != null ? String(memberId).trim() : "";
 
-  if (!baseUrl || !apiKey || !tid || !mid) {
+  if (!baseUrl || !tid || !mid) {
     return false;
   }
 
@@ -27,7 +26,8 @@ export async function notifyMemberFinanceUpdated({
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-internal-api-key": apiKey,
+        "x-internal-request": "true",
+        "x-tenant-id": tid,
       },
       body: JSON.stringify({
         tenantId: tid,
