@@ -27,7 +27,7 @@ export const listRunsRules = [
 export const listItemsRules = [
   param("id").isMongoId(),
   query("status").optional().isString(),
-  query("limit").optional().isInt({ min: 1, max: 2000 }),
+  query("limit").optional().isInt({ min: 1, max: 5000 }),
   query("skip").optional().isInt({ min: 0 }),
 ];
 
