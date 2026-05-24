@@ -1,7 +1,10 @@
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
 import GL from "../models/glTransaction.model.js";
-import { getProfileReadModel } from "../models/profileRead.model.js";
+import {
+  fetchProfilesByIds,
+  fetchProfilesByMembershipNumbers,
+} from "../services/profileUpstream.client.js";
 
 export function normMemberKey(value) {
   return String(value || "").trim().toLowerCase();
@@ -39,17 +42,15 @@ export function collectIdentityKeysFromGlTxns(txns) {
   };
 }
 
-export async function profileKeysLinkedToMember(memberId) {
+export async function profileKeysLinkedToMember(memberId, req) {
   const mid = String(memberId || "").trim();
-  if (!mid) return [];
+  if (!mid || !req) return [];
   try {
-    const Profile = getProfileReadModel();
-    const profile = await Profile.findOne({ membershipNumber: mid })
-      .select("_id")
-      .lean();
+    const profiles = await fetchProfilesByMembershipNumbers(req, [mid]);
+    const profile = profiles[0];
     if (profile?._id) return [`profile:${profile._id}`];
   } catch {
-    // profile DB not configured
+    // profile-service unavailable
   }
   return [];
 }
@@ -139,45 +140,42 @@ export async function buildApplicationMemberMap(applicationIds) {
   return map;
 }
 
-export async function buildProfileMemberMap(profileIds) {
+export async function buildProfileMemberMap(profileIds, req) {
   const map = new Map();
   const ids = [
     ...new Set(
       (profileIds || []).map((id) => String(id).trim()).filter(Boolean),
     ),
   ];
-  if (!ids.length) return map;
+  if (!ids.length || !req) return map;
   try {
-    const Profile = getProfileReadModel();
-    const profiles = await Profile.find({ _id: { $in: ids } })
-      .select("membershipNumber")
-      .lean();
+    const profiles = await fetchProfilesByIds(req, ids);
     for (const p of profiles) {
       const mn = String(p.membershipNumber || "").trim();
       if (mn && p._id) map.set(String(p._id), mn);
     }
   } catch {
-    // profile DB unavailable
+    // profile-service unavailable
   }
   return map;
 }
 
 export async function createMemberIdentityResolver(txns, options = {}) {
-  const { seedMemberId } = options;
+  const { seedMemberId, req } = options;
   const keys = collectIdentityKeysFromGlTxns(txns);
   const applicationIds = new Set(keys.applicationIds);
   const profileIds = new Set(keys.profileIds);
 
-  if (seedMemberId) {
+  if (seedMemberId && req) {
     const linkedApps = await applicationIdsLinkedToMember(seedMemberId);
     for (const id of linkedApps) applicationIds.add(id);
-    const profileKeys = await profileKeysLinkedToMember(seedMemberId);
+    const profileKeys = await profileKeysLinkedToMember(seedMemberId, req);
     for (const pk of profileKeys) profileIds.add(pk.slice(8));
   }
 
   const [appToMember, profileToMember] = await Promise.all([
     buildApplicationMemberMap([...applicationIds]),
-    buildProfileMemberMap([...profileIds]),
+    buildProfileMemberMap([...profileIds], req),
   ]);
 
   function resolveMemberId(raw) {
@@ -222,6 +220,7 @@ export async function buildMemberFacingGlQuery({
   docType,
   from,
   to,
+  req,
 }) {
   const q = { docType: { $ne: "Settlement" } };
   const date = {};
@@ -237,11 +236,8 @@ export async function buildMemberFacingGlQuery({
 
   if (memberId) {
     const mid = String(memberId).trim();
-    const memberOr = [
-      { "entries.memberId": mid },
-      { claimMemberId: mid },
-    ];
-    const profileKeys = await profileKeysLinkedToMember(mid);
+    const memberOr = [{ "entries.memberId": mid }, { claimMemberId: mid }];
+    const profileKeys = await profileKeysLinkedToMember(mid, req);
     for (const pk of profileKeys) {
       memberOr.push({ "entries.memberId": pk });
     }

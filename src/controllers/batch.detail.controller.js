@@ -3,111 +3,23 @@ import BatchDetail, {
   BATCH_DETAIL_TYPES,
 } from "../models/batch.detail.model.js";
 import User from "../models/user.model.js";
-import { getProfileReadModel } from "../models/profileRead.model.js";
+import {
+  enrichBatchDetailWithProfiles,
+  findProfileByMembershipNumber,
+} from "../services/profileUpstream.client.js";
 import * as azureBlob from "../services/azure.blob.service.js";
 import * as batchPaymentProcess from "../services/batch.payment.process.service.js";
 import { enrichBatchDetailWithMembershipStatus } from "../services/batch.membershipStatus.service.js";
 import logger from "../config/logger.js";
 import { publisher } from "../rabbitMQ/index.js";
 
-function escapeRegexMembership(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-const PROFILE_LOOKUP_SELECT =
-  "membershipNumber personalInfo contactInfo professionalDetails preferences";
-
-/**
- * Resolves a profile for batch flows (same DB and tenant rules as batch payment processing).
- * Returns clearer failure reasons for staging/debug (wrong PROFILE DB, tenant mismatch, legacy profiles without tenantId).
- */
-async function findProfileByMembershipNumber(membershipNumberTrimmed, tenantId) {
-  const Profile = getProfileReadModel();
-
-  const withTenant = (q) =>
-    tenantId ? { ...q, tenantId } : q;
-
-  let profile = await Profile.findOne(
-    withTenant({ membershipNumber: membershipNumberTrimmed })
-  )
-    .select(PROFILE_LOOKUP_SELECT)
-    .lean();
-
-  if (!profile && tenantId) {
-    profile = await Profile.findOne(
-      withTenant({
-        membershipNumber: {
-          $regex: new RegExp(
-            `^${escapeRegexMembership(membershipNumberTrimmed)}$`,
-            "i"
-          ),
-        },
-      })
-    )
-      .select(PROFILE_LOOKUP_SELECT)
-      .lean();
-  }
-
-  if (profile) return { profile, lookupError: null };
-
-  if (tenantId) {
-    const byNumber = await Profile.findOne({
-      membershipNumber: membershipNumberTrimmed,
-    })
-      .select("tenantId membershipNumber")
-      .lean();
-    const byNumberCi =
-      byNumber ||
-      (await Profile.findOne({
-        membershipNumber: {
-          $regex: new RegExp(
-            `^${escapeRegexMembership(membershipNumberTrimmed)}$`,
-            "i"
-          ),
-        },
-      })
-        .select("tenantId membershipNumber")
-        .lean());
-
-    if (byNumberCi) {
-      const pt = byNumberCi.tenantId;
-      if (pt != null && pt !== "" && pt !== tenantId) {
-        return {
-          profile: null,
-          lookupError:
-            "A profile exists for this membership number but under a different tenant than your session. Align profile.tenantId with the gateway x-tenant-id (or use the correct CRM tenant).",
-        };
-      }
-      if (pt == null || pt === "") {
-        return {
-          profile: null,
-          lookupError:
-            "A profile exists for this membership number but it has no tenantId set; batch resolution requires tenantId on the profile to match your session.",
-        };
-      }
-      if (pt === tenantId) {
-        const full = await Profile.findById(byNumberCi._id)
-          .select(PROFILE_LOOKUP_SELECT)
-          .lean();
-        if (full) return { profile: full, lookupError: null };
-      }
-    }
-  }
-
-  return {
-    profile: null,
-    lookupError:
-      "No profile found with this membership number. Confirm the member exists in profile-service, account-service PROFILE_MONGODB_URI points at that database, and the number matches exactly.",
-  };
-}
-
-function batchPaymentsProfilePopulate() {
-  return {
-    path: "batchPayments.profileId",
-    model: getProfileReadModel(),
-    select:
-      "membershipNumber personalInfo contactInfo professionalDetails preferences",
-  };
+async function loadBatchDetailEnriched(batchDetailId, req) {
+  const batch = await BatchDetail.findOne({
+    _id: batchDetailId,
+    isDeleted: false,
+  }).lean();
+  if (!batch) return null;
+  return enrichBatchDetailWithProfiles(batch, req);
 }
 
 async function resolveCreatedByName(createdBy, tenantId) {
@@ -240,7 +152,8 @@ export async function createBatchDetail(req, res) {
         await batchPaymentProcess.processBatchDetailWithBuffer(
           batch,
           req.file.buffer,
-          tenantId
+          tenantId,
+          req,
         );
       } catch (err) {
         logger.error(
@@ -372,12 +285,7 @@ export async function deleteBatchDetail(req, res) {
 export async function getBatchDetailById(req, res) {
   try {
     const { batchDetailId } = req.params;
-    const batch = await BatchDetail.findOne({
-      _id: batchDetailId,
-      isDeleted: false,
-    })
-      .populate(batchPaymentsProfilePopulate())
-      .lean();
+    const batch = await loadBatchDetailEnriched(batchDetailId, req);
     if (!batch) {
       return res
         .status(404)
@@ -535,8 +443,8 @@ export async function resolveBatchException(req, res) {
     }
 
     const { profile, lookupError } = await findProfileByMembershipNumber(
+      req,
       membershipNumberTrimmed,
-      tenantId
     );
     if (!profile) {
       return res.status(404).json({
@@ -568,9 +476,7 @@ export async function resolveBatchException(req, res) {
     );
     await batch.save();
 
-    const updated = await BatchDetail.findById(batch._id)
-      .populate(batchPaymentsProfilePopulate())
-      .lean();
+    const updated = await loadBatchDetailEnriched(batch._id, req);
 
     const createdByName = await resolveCreatedByName(
       updated.createdBy,
@@ -680,9 +586,7 @@ export async function excludeBatchPaymentsToExceptions(req, res) {
     }
     await batch.save();
 
-    const updated = await BatchDetail.findById(batch._id)
-      .populate(batchPaymentsProfilePopulate())
-      .lean();
+    const updated = await loadBatchDetailEnriched(batch._id, req);
     const tenantId = req.user?.tenantId || null;
     const createdByName = await resolveCreatedByName(
       updated.createdBy,
@@ -789,8 +693,8 @@ export async function addPaymentToBatch(req, res) {
     }
 
     const { profile, lookupError } = await findProfileByMembershipNumber(
+      req,
       membershipNumberTrimmed,
-      tenantId
     );
     if (!profile) {
       return res.status(404).json({
@@ -814,9 +718,7 @@ export async function addPaymentToBatch(req, res) {
     batch.batchPayments.push(paymentEntry);
     await batch.save();
 
-    const updated = await BatchDetail.findById(batch._id)
-      .populate(batchPaymentsProfilePopulate())
-      .lean();
+    const updated = await loadBatchDetailEnriched(batch._id, req);
 
     const createdByName = await resolveCreatedByName(
       updated.createdBy,

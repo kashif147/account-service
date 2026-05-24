@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 import logger from "./logger.js";
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
-import { disconnectProfileDB } from "./profileDb.js";
 
 export async function connectDB(
   uri = process.env.MONGODB_URI ||
@@ -54,7 +53,6 @@ export async function connectDB(
 // ]);
 
 export async function disconnectDB() {
-  await disconnectProfileDB();
   if (mongoose.connection.readyState !== 0) {
     await mongoose.connection.close();
     logger.info("Mongo disconnected");

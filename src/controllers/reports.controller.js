@@ -1080,6 +1080,7 @@ export async function generalLedgerTransactions(req, res, next) {
       tenantId: req.tenantId || req.ctx?.tenantId,
       maxDocuments,
       includeDrafts,
+      req,
     });
 
     res.success(result);
@@ -1112,7 +1113,7 @@ export async function memberLedger(req, res, next) {
     const { memberId } = req.params;
     const { accountCode } = req.query;
 
-    const q = await buildMemberFacingGlQuery({ memberId });
+    const q = await buildMemberFacingGlQuery({ memberId, req });
     if (accountCode) q["entries.accountCode"] = accountCode;
 
     const allItems = await GL.find(q)

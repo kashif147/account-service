@@ -1,6 +1,6 @@
 import XLSX from "xlsx";
 import BatchDetail from "../models/batch.detail.model.js";
-import { getProfileReadModel } from "../models/profileRead.model.js";
+import { fetchProfilesByMembershipNumbers } from "./profileUpstream.client.js";
 import * as azureBlob from "./azure.blob.service.js";
 import logger from "../config/logger.js";
 
@@ -179,20 +179,14 @@ export function parseRows(buffer) {
   return dataRows;
 }
 
-async function loadProfilesByMembership(tenantId, membershipNumbers) {
-  const Profile = getProfileReadModel();
-  const tenantFilter = tenantId ? { tenantId } : {};
-  return Profile.find({
-    ...tenantFilter,
-    membershipNumber: { $in: membershipNumbers },
-  })
-    .select(
-      "membershipNumber personalInfo contactInfo professionalDetails preferences"
-    )
-    .lean();
+async function loadProfilesByMembership(req, membershipNumbers) {
+  if (!req) {
+    throw new Error("Profile lookup requires request context for profile-service API");
+  }
+  return fetchProfilesByMembershipNumbers(req, membershipNumbers);
 }
 
-export async function processBatchDetail({ batchDetailId, tenantId }) {
+export async function processBatchDetail({ batchDetailId, tenantId, req = null }) {
   const batchDetail = await BatchDetail.findOne({
     _id: batchDetailId,
     isDeleted: false,
@@ -223,9 +217,12 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
   }
 
   const membershipNumbers = [...new Set(rows.map((r) => r.membershipNumber))];
-  const profiles = await loadProfilesByMembership(tenantId, membershipNumbers);
+  const profiles = await loadProfilesByMembership(req, membershipNumbers);
   const profileByMembership = new Map(
-    profiles.map((p) => [String(p.membershipNumber).trim(), p])
+    profiles.map((p) => [
+      String(p.membershipNumber).trim().toLowerCase(),
+      p,
+    ]),
   );
 
   function toCents(euroVal) {
@@ -243,7 +240,7 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
   const batchExceptions = [];
   for (const row of rows) {
     const normalizedMembership = String(row.membershipNumber).trim();
-    const profile = profileByMembership.get(normalizedMembership);
+    const profile = profileByMembership.get(normalizedMembership.toLowerCase());
     const valueMissingOrZero = isValueMissingOrZero(row.valueForPeriodSelected);
     const valueInCents = toCents(row.valueForPeriodSelected);
 
@@ -338,7 +335,8 @@ export async function processBatchDetail({ batchDetailId, tenantId }) {
 export async function processBatchDetailWithBuffer(
   batchDetail,
   buffer,
-  tenantId = null
+  tenantId = null,
+  req = null,
 ) {
   const rows = parseRows(buffer);
   logger.info(
@@ -364,9 +362,12 @@ export async function processBatchDetailWithBuffer(
   }
 
   const membershipNumbers = [...new Set(rows.map((r) => r.membershipNumber))];
-  const profiles = await loadProfilesByMembership(tenantId, membershipNumbers);
+  const profiles = await loadProfilesByMembership(req, membershipNumbers);
   const profileByMembership = new Map(
-    profiles.map((p) => [String(p.membershipNumber).trim(), p])
+    profiles.map((p) => [
+      String(p.membershipNumber).trim().toLowerCase(),
+      p,
+    ]),
   );
   logger.info(
     {
@@ -391,7 +392,7 @@ export async function processBatchDetailWithBuffer(
   const batchExceptions = [];
   for (const row of rows) {
     const normalizedMembership = String(row.membershipNumber).trim();
-    const profile = profileByMembership.get(normalizedMembership);
+    const profile = profileByMembership.get(normalizedMembership.toLowerCase());
     const valueMissingOrZero = isValueMissingOrZero(row.valueForPeriodSelected);
     const valueInCents = toCents(row.valueForPeriodSelected);
 

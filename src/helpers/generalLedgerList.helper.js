@@ -259,9 +259,16 @@ export async function buildGeneralLedgerList({
   tenantId,
   maxDocuments = DEFAULT_MAX_GL_DOCUMENTS,
   includeDrafts = true,
+  req,
 }) {
   const filterMember = String(memberId || "").trim();
-  const q = await buildMemberFacingGlQuery({ memberId: filterMember, docType, from, to });
+  const q = await buildMemberFacingGlQuery({
+    memberId: filterMember,
+    docType,
+    from,
+    to,
+    req,
+  });
   const { rawItems, totalGlDocuments, truncated } = await fetchAllMemberFacingGl(
     q,
     maxDocuments,
@@ -271,6 +278,7 @@ export async function buildGeneralLedgerList({
   const trackedCodes = await getMemberTrackedAccountCodes();
   const resolver = await createMemberIdentityResolver(consolidated, {
     seedMemberId: filterMember || undefined,
+    req,
   });
 
   const byMember = new Map();

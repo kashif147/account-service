@@ -15,7 +15,7 @@ If `batchdetails` still lives in the profile-service database, copy that collect
 ## Environment
 
 - **Primary DB** (`MONGODB_URI`): stores `batchdetails` collection.
-- **Profile read DB** (`PROFILE_MONGODB_URI` or `PROFILE_SERVICE_MONGO_URI`): same Mongo as profile-service for `Profile` lookups during Excel matching.
+- **Profile service** (`PROFILE_SERVICE_URL`): HTTP lookups for member profiles during Excel matching (forwards CRM JWT + gateway headers).
 - **Azure**: `AZURE_STORAGE_*` for batch file blobs (`batch-details/...` prefix).
 - **RabbitMQ**: `RABBIT_URL`; exchange `batch.events`, queue `accounts.batch.process`, routing keys `batch.process.requested` / `batch.process.completed`.
 - **Chunk size**: `PROCESS_BATCH_CHUNK_SIZE` (default 250).
