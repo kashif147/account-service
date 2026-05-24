@@ -83,6 +83,14 @@ export const cancelRun = asyncHandler(async (req, res) => {
   res.success({ run });
 });
 
+export const deleteRun = asyncHandler(async (req, res) => {
+  const result = await ddRunService.deleteDirectDebitRun(
+    req.params.id,
+    tenantId(req),
+  );
+  res.success(result);
+});
+
 export const importPain002 = asyncHandler(async (req, res) => {
   const result = await ddRunService.importPain002ForRun(
     req.params.id,

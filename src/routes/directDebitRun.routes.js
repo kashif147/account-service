@@ -20,6 +20,7 @@ import {
   approveRun,
   cancelRun,
   createRun,
+  deleteRun,
   downloadPain008,
   generatePain008,
   getRun,
@@ -104,6 +105,15 @@ router.post(
   cancelRunRules,
   validate,
   cancelRun,
+);
+
+router.delete(
+  "/:id",
+  requireFinanceWrite,
+  idempotency(),
+  runIdParam,
+  validate,
+  deleteRun,
 );
 
 router.post(

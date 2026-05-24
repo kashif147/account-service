@@ -93,6 +93,11 @@ import {
 
 const app = express();
 
+// Behind Azure / reverse proxy so X-Forwarded-For and per-user rate limits work
+if (process.env.TRUST_PROXY !== "0") {
+  app.set("trust proxy", 1);
+}
+
 // Disable Express automatic ETag generation (304 responses)
 app.set("etag", false);
 

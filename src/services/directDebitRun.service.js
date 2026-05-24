@@ -449,6 +449,16 @@ export async function cancelDirectDebitRun(runId, tenantId, actorId, reason) {
   return run;
 }
 
+/** Hard-delete a draft run and its items so the same period can be run again. */
+export async function deleteDirectDebitRun(runId, tenantId) {
+  const run = await DirectDebitRun.findOne({ _id: runId, tenantId });
+  if (!run) throw AppError.notFound("Direct debit run not found");
+  assertStatus(run, ["DRAFT"], "delete");
+  await DirectDebitRunItem.deleteMany({ tenantId, runId: run._id });
+  await DirectDebitRun.deleteOne({ _id: run._id });
+  return { deletedRunId: String(run._id), runNo: run.runNo };
+}
+
 export async function importPain002ForRun(runId, tenantId, actorId, { xml, fileName, receivedDate }) {
   const run = await DirectDebitRun.findOne({ _id: runId, tenantId });
   if (!run) throw AppError.notFound("Direct debit run not found");
