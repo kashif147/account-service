@@ -20,7 +20,10 @@ export function sanitizeSepaText(value, maxLen = 70) {
 }
 
 export function sanitizeMsgId(value) {
-  return sanitizeSepaText(String(value || "").replace(/\s+/g, "-"), 35);
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 35);
 }
 
 export function normalizeIban(iban) {

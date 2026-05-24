@@ -9,6 +9,16 @@ import {
   findDuplicateOpenRun,
 } from "./directDebitEligibility.service.js";
 import {
+  allocateMessageId,
+  allocatePaymentInformationId,
+  allocateRunNumberParts,
+  generateEndToEndId,
+  normalizeTenantCode,
+  validateSepaReference,
+  SEPA_MAX,
+} from "./sepaReferenceGenerator.js";
+import { resolveTenantCode } from "./tenant.service.client.js";
+import {
   buildPain008Xml,
   groupItemsForPain008,
   validatePain008Inputs,
@@ -22,26 +32,35 @@ function pushAudit(run, action, actorId, details = {}) {
     at: new Date(),
     action,
     actorId: actorId || null,
-    details,
+    details: {
+      runNo: run.runNo,
+      messageId: run.file?.messageId || run.pain008?.msgId || null,
+      paymentInformationId:
+        run.file?.paymentInformationId || run.pain008?.pmtInfIds?.[0] || null,
+      ...details,
+    },
   });
 }
 
-async function nextRunNo(tenantId) {
-  const year = new Date().getFullYear();
-  const prefix = `DD-${year}-`;
-  const last = await DirectDebitRun.findOne({
-    tenantId,
-    runNo: new RegExp(`^${prefix}`),
-  })
-    .sort({ runNo: -1 })
-    .select("runNo")
-    .lean();
-  let seq = 1;
-  if (last?.runNo) {
-    const part = parseInt(String(last.runNo).split("-").pop(), 10);
-    if (Number.isFinite(part)) seq = part + 1;
+async function createRunWithRetry(payload, maxAttempts = 5) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await DirectDebitRun.create(payload);
+    } catch (err) {
+      if (err?.code === 11000 && attempt < maxAttempts - 1) {
+        const parts = await allocateRunNumberParts({
+          tenantId: payload.tenantId,
+          tenantCode: payload.tenantCode,
+          runType: payload.runType,
+          periodEndDate: payload.periodEndDate,
+        });
+        Object.assign(payload, parts);
+        continue;
+      }
+      throw err;
+    }
   }
-  return `${prefix}${String(seq).padStart(4, "0")}`;
+  throw AppError.conflict("Could not allocate unique DD run number");
 }
 
 function assertStatus(run, allowed, action) {
@@ -61,6 +80,7 @@ export async function createDirectDebitRun({
   submissionDueDate,
   creditorSnapshot,
   createdBy,
+  req = null,
 }) {
   const periodStart = new Date(periodStartDate);
   const periodEnd = new Date(periodEndDate);
@@ -79,10 +99,21 @@ export async function createDirectDebitRun({
     );
   }
 
-  const runNo = await nextRunNo(tenantId);
-  const run = await DirectDebitRun.create({
+  const tenantCodeRaw = await resolveTenantCode(tenantId, req);
+  const tenantCode = normalizeTenantCode(tenantCodeRaw, tenantId);
+  const { runNo, runSequence, periodKey } = await allocateRunNumberParts({
+    tenantId,
+    tenantCode,
+    runType,
+    periodEndDate: periodEnd,
+  });
+
+  const run = await createRunWithRetry({
     tenantId,
     runNo,
+    runSequence,
+    periodKey,
+    tenantCode,
     runType,
     periodStartDate: periodStart,
     periodEndDate: periodEnd,
@@ -97,14 +128,20 @@ export async function createDirectDebitRun({
         at: new Date(),
         action: "CREATED",
         actorId: createdBy,
-        details: { runNo, runType },
+        details: {
+          runNo,
+          runSequence,
+          periodKey,
+          tenantCode,
+          runType,
+        },
       },
     ],
   });
   return run;
 }
 
-export async function prepareDirectDebitRun(runId, tenantId, actorId) {
+export async function prepareDirectDebitRun(runId, tenantId, actorId, req) {
   const run = await DirectDebitRun.findOne({ _id: runId, tenantId });
   if (!run) throw AppError.notFound("Direct debit run not found");
   assertStatus(run, ["DRAFT", "VALIDATED"], "prepare");
@@ -115,28 +152,38 @@ export async function prepareDirectDebitRun(runId, tenantId, actorId) {
     tenantId,
     run,
     actorId,
+    req,
   });
 
   const docs = [
     ...included,
-    ...excluded.map((e) => ({
-      tenantId,
-      runId: run._id,
-      memberId: e.memberId || "UNKNOWN",
-      profileId: e.profileId,
-      subscriptionId: e.subscriptionId,
-      amountEur: 0,
-      currency: "EUR",
-      endToEndId: `EXC-${String(e.profileId).slice(-8)}-${run.runNo}`.slice(0, 35),
-      status: "EXCLUDED",
-      exclusionReason: e.exclusionReason,
-      memberSnapshot: {},
-      mandateSnapshot: {},
-      collectionPeriod: {
-        startDate: run.periodStartDate,
-        endDate: run.periodEndDate,
-      },
-    })),
+    ...excluded.map((e, idx) => {
+      const endToEndId = generateEndToEndId({
+        membershipNumber: null,
+        periodKey: run.periodKey,
+        runSequence: run.runSequence,
+        itemSequence: idx + 1,
+      });
+      return {
+        tenantId,
+        runId: run._id,
+        memberId: e.memberId || "UNKNOWN",
+        profileId: e.profileId,
+        subscriptionId: e.subscriptionId,
+        amountEur: 0,
+        currency: "EUR",
+        endToEndId,
+        collection: { endToEndId },
+        status: "EXCLUDED",
+        exclusionReason: e.exclusionReason,
+        memberSnapshot: {},
+        mandateSnapshot: {},
+        collectionPeriod: {
+          startDate: run.periodStartDate,
+          endDate: run.periodEndDate,
+        },
+      };
+    }),
   ];
 
   if (docs.length) {
@@ -251,16 +298,52 @@ export async function generatePain008ForRun(runId, tenantId, actorId) {
   }
 
   const collectionDate = run.collectionDate.toISOString().slice(0, 10);
+  const tenantCode = run.tenantCode || normalizeTenantCode(null, tenantId);
+
+  const existingMsgId = run.file?.messageId || run.pain008?.msgId;
+  let messageId = existingMsgId;
+  if (!messageId) {
+    const allocated = await allocateMessageId({
+      tenantId,
+      tenantCode,
+      utcTimestamp: new Date(),
+    });
+    messageId = allocated.messageId;
+  }
+
+  const msgErrors = validateSepaReference(messageId, {
+    maxLength: SEPA_MAX.MSG_ID,
+    fieldName: "messageId",
+  });
+  if (msgErrors.length) {
+    throw AppError.badRequest(msgErrors.join("; "));
+  }
+
+  const duplicateMsg = await DirectDebitRun.findOne({
+    tenantId,
+    "file.messageId": messageId,
+    _id: { $ne: run._id },
+  }).lean();
+  if (duplicateMsg) {
+    throw AppError.conflict(`Duplicate PAIN.008 MsgId ${messageId}`);
+  }
+
+  const { paymentInformationId } = await allocatePaymentInformationId({
+    tenantId,
+    tenantCode,
+    collectionDate: run.collectionDate,
+  });
+
   const blocks = groupItemsForPain008(
     items.map((i) => i.toObject()),
     run.creditorSnapshot,
     collectionDate,
+    { primaryPaymentInformationId: paymentInformationId },
   );
 
-  const msgId = `SDD-${run.runNo}-${Date.now()}`.replace(/\s+/g, "");
   const creDtTm = new Date().toISOString().replace(/\.\d{3}Z$/, "");
   const built = buildPain008Xml({
-    msgId,
+    msgId: messageId,
     creDtTm,
     oin: run.creditorSnapshot.oin,
     blocks,
@@ -295,6 +378,10 @@ export async function generatePain008ForRun(runId, tenantId, actorId) {
     }
   }
 
+  run.file = {
+    messageId: built.msgId,
+    paymentInformationId,
+  };
   run.pain008 = {
     msgId: built.msgId,
     fileName,
@@ -309,7 +396,8 @@ export async function generatePain008ForRun(runId, tenantId, actorId) {
   };
   run.status = "FILE_GENERATED";
   pushAudit(run, "FILE_GENERATED", actorId, {
-    msgId: built.msgId,
+    messageId: built.msgId,
+    paymentInformationId,
     fileHash: built.fileHash,
   });
   run.updatedBy = actorId;
@@ -375,6 +463,9 @@ export async function importPain002ForRun(runId, tenantId, actorId, { xml, fileN
     );
   }
 
+  const runPmtInfId =
+    run.file?.paymentInformationId || run.pain008?.pmtInfIds?.[0] || null;
+
   const items = await DirectDebitRunItem.find({
     tenantId,
     runId: run._id,
@@ -384,7 +475,11 @@ export async function importPain002ForRun(runId, tenantId, actorId, { xml, fileN
   const { matches, unmatched, fileRejected, fileRejectCode } = matchPain002ToItems(
     parsed,
     items,
-    { collectionDate: run.collectionDate, receivedDate },
+    {
+      collectionDate: run.collectionDate,
+      receivedDate,
+      runPaymentInformationId: runPmtInfId,
+    },
   );
 
   for (const m of matches) {
@@ -450,6 +545,8 @@ export async function importPain002ForRun(runId, tenantId, actorId, { xml, fileN
     matches: matches.length,
     unmatched: unmatched.length,
     fileName,
+    messageId: run.file?.messageId || run.pain008?.msgId,
+    paymentInformationId: runPmtInfId,
   });
   run.updatedBy = actorId;
   await run.save();

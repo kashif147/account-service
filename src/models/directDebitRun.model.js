@@ -31,6 +31,9 @@ const DirectDebitRunSchema = new mongoose.Schema(
   {
     tenantId: { type: String, required: true, index: true },
     runNo: { type: String, required: true, trim: true, index: true },
+    runSequence: { type: Number, default: null, index: true },
+    periodKey: { type: String, trim: true, index: true },
+    tenantCode: { type: String, trim: true, uppercase: true },
     runType: { type: String, enum: DD_RUN_TYPES, required: true, index: true },
     periodStartDate: { type: Date, required: true, index: true },
     periodEndDate: { type: Date, required: true, index: true },
@@ -51,6 +54,10 @@ const DirectDebitRunSchema = new mongoose.Schema(
       city: String,
       postcode: String,
       country: String,
+    },
+    file: {
+      messageId: { type: String, default: null, trim: true, index: true },
+      paymentInformationId: { type: String, default: null, trim: true },
     },
     pain008: {
       msgId: { type: String, default: null, trim: true },
@@ -119,6 +126,21 @@ DirectDebitRunSchema.index(
   { tenantId: 1, runNo: 1 },
   { unique: true },
 );
+
+DirectDebitRunSchema.index(
+  { tenantId: 1, "file.messageId": 1 },
+  {
+    unique: true,
+    partialFilterExpression: { "file.messageId": { $type: "string", $ne: "" } },
+  },
+);
+
+DirectDebitRunSchema.index({
+  tenantId: 1,
+  runType: 1,
+  periodKey: 1,
+  runSequence: 1,
+});
 
 DirectDebitRunSchema.index({
   tenantId: 1,

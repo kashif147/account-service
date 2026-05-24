@@ -1,31 +1,18 @@
-import mongoose from "mongoose";
-import { getSubscriptionReadModel } from "../models/subscriptionRead.model.js";
-import { getPaymentFormReadModel } from "../models/paymentFormRead.model.js";
-import { getProfileReadModel } from "../models/profileRead.model.js";
 import DirectDebitMandate from "../models/directDebitMandate.model.js";
 import DirectDebitRunItem from "../models/directDebitRunItem.model.js";
 import DirectDebitRun, { OPEN_RUN_STATUSES } from "../models/directDebitRun.model.js";
-import { decryptField } from "../helpers/paymentFormCrypto.js";
 import { normalizeIban } from "../helpers/sepaXml.helper.js";
 import {
-  buildEndToEndId,
   buildRemittanceInfo,
   computeCollectibleAmountEur,
   resolveSeqTp,
 } from "../helpers/directDebitAmount.helper.js";
+import { assignUniqueEndToEndIds } from "./sepaReferenceGenerator.js";
 import { memberOwed1400ByBucket } from "../helpers/paymentReceiptAllocation.js";
+import { loadDirectDebitEligibilitySource } from "./directDebitUpstream.client.js";
 
 const ACTIVE_SUBSCRIPTION = "Active";
 const DIRECT_DEBIT_PAYMENT = "Direct Debit";
-const DD_FORM_TYPE = "DD_MANDATE";
-const ACTIVE_FORM_STATUS = "active";
-
-function resolveMemberName(profile) {
-  const pi = profile?.personalInfo || {};
-  const forename = pi.forename || pi.firstName || "";
-  const surname = pi.surname || pi.lastName || "";
-  return `${forename} ${surname}`.trim() || profile?.membershipNumber || "";
-}
 
 export async function findDuplicateOpenRun(tenantId, runType, periodStart, periodEnd, collectionDate) {
   return DirectDebitRun.findOne({
@@ -59,33 +46,31 @@ export async function membersInOpenRunsForPeriod(tenantId, periodStart, periodEn
   return new Set(items.map((i) => i.memberId));
 }
 
-async function upsertMandateFromForm(tenantId, profile, form, decrypted) {
-  const dd = form.directDebitMandate || {};
-  const org = form.organisationSnapshot || {};
-  const memberId = profile.membershipNumber;
-  const umr = dd.uniqueMandateReference;
+async function upsertMandateFromSnapshot(tenantId, profileId, membershipNumber, mandateRow, paymentFormId, org) {
+  const dd = mandateRow?.mandate || mandateRow || {};
+  const umr = dd.umr;
   if (!umr) return null;
 
   const payload = {
     tenantId,
-    profileId: profile._id,
-    memberId,
-    membershipNumber: profile.membershipNumber,
-    paymentFormId: form._id,
+    profileId,
+    memberId: membershipNumber,
+    membershipNumber,
+    paymentFormId,
     umr,
     signedDate: dd.signedDate ? new Date(dd.signedDate) : new Date("2013-01-01"),
     status: "ACTIVE",
     debtorName: dd.debtorName,
-    debtorIban: normalizeIban(decrypted.iban),
-    debtorBic: decrypted.bic || null,
+    debtorIban: normalizeIban(dd.debtorIban),
+    debtorBic: dd.debtorBic || null,
     debtorAddress: dd.debtorAddress,
     debtorCity: dd.debtorCity,
     debtorPostcode: dd.debtorPostcode,
     debtorCountry: dd.debtorCountry || "IE",
-    creditorName: dd.creditorName || org.name,
-    creditorOin: dd.creditorIdentifier || org.sepaOriginatorIdentificationNumber,
-    creditorIban: normalizeIban(dd.creditorIban || org.creditorIban),
-    creditorBic: dd.creditorBic || org.creditorBic,
+    creditorName: dd.creditorName || org?.legalName || org?.name,
+    creditorOin: dd.creditorIdentifier || org?.sepaOriginatorIdentificationNumber,
+    creditorIban: normalizeIban(dd.creditorIban || org?.iban),
+    creditorBic: dd.creditorBic || org?.bic,
     syncedFromPaymentFormAt: new Date(),
   };
 
@@ -96,54 +81,39 @@ async function upsertMandateFromForm(tenantId, profile, form, decrypted) {
   );
 }
 
+function subscriptionProfileId(sub) {
+  const pid = sub.profileId || sub.profile?._id;
+  return pid ? String(pid) : null;
+}
+
+function subscriptionId(sub) {
+  return sub._id || sub.id;
+}
+
 /**
- * Select eligible members and return INCLUDED + EXCLUDED item drafts.
+ * Select eligible members via subscription-service + profile-service HTTP APIs.
  */
 export async function buildEligibilityItems({
   tenantId,
   run,
   actorId,
+  req,
 }) {
-  const Subscription = getSubscriptionReadModel();
-  const PaymentForm = getPaymentFormReadModel();
-  const Profile = getProfileReadModel();
-
-  const subs = await Subscription.find({
-    tenantId,
-    isCurrent: true,
-    subscriptionStatus: ACTIVE_SUBSCRIPTION,
-    paymentType: DIRECT_DEBIT_PAYMENT,
-    deleted: { $ne: true },
-  })
-    .select(
-      "profileId membershipCategory paymentFrequency subscriptionStatus startDate endDate",
-    )
-    .lean();
-
-  const profileIds = subs.map((s) => s.profileId).filter(Boolean);
-  const profiles = await Profile.find({
-    _id: { $in: profileIds },
-    ...(tenantId ? { tenantId } : {}),
-  })
-    .select("membershipNumber personalInfo contactInfo tenantId")
-    .lean();
-  const profileById = new Map(profiles.map((p) => [String(p._id), p]));
-
-  const forms = await PaymentForm.find({
-    tenantId,
-    profileId: { $in: profileIds },
-    formType: DD_FORM_TYPE,
-    status: ACTIVE_FORM_STATUS,
-    "directDebitMandate.isAuthorized": true,
-  })
-    .sort({ updatedAt: -1 })
-    .lean();
-
-  const formByProfile = new Map();
-  for (const f of forms) {
-    const k = String(f.profileId);
-    if (!formByProfile.has(k)) formByProfile.set(k, f);
+  if (!req) {
+    throw new Error("Request context required for direct debit eligibility (service HTTP calls)");
   }
+
+  const { subs, mandateByProfile } = await loadDirectDebitEligibilitySource(req);
+
+  const eligibleSubs = subs.filter((sub) => {
+    const status = sub.subscriptionStatus || sub.status;
+    const paymentType = sub.paymentType || sub.paymentMethod;
+    return (
+      (status == null || status === ACTIVE_SUBSCRIPTION) &&
+      String(paymentType || "") === DIRECT_DEBIT_PAYMENT &&
+      sub.isCurrent !== false
+    );
+  });
 
   const alreadyInRun = await membersInOpenRunsForPeriod(
     tenantId,
@@ -154,17 +124,34 @@ export async function buildEligibilityItems({
   const included = [];
   const excluded = [];
 
-  for (const sub of subs) {
-    const pid = String(sub.profileId);
-    const profile = profileById.get(pid);
-    const memberId = profile?.membershipNumber;
+  for (const sub of eligibleSubs) {
+    const pid = subscriptionProfileId(sub);
+    const mandateRow = pid ? mandateByProfile.get(pid) : null;
+    const memberId =
+      mandateRow?.membershipNumber ||
+      sub.membershipNumber ||
+      sub.personalDetails?.membershipNo ||
+      sub.memberSnapshot?.membershipNumber ||
+      null;
+
     const exclusionBase = {
-      profileId: sub.profileId,
-      subscriptionId: sub._id,
-      memberId: memberId || null,
+      profileId: pid,
+      subscriptionId: subscriptionId(sub),
+      memberId,
     };
 
-    if (!profile || !memberId) {
+    if (!pid) {
+      excluded.push({
+        ...exclusionBase,
+        exclusionReason: {
+          code: "NO_PROFILE",
+          message: "Subscription missing profileId",
+        },
+      });
+      continue;
+    }
+
+    if (!memberId) {
       excluded.push({
         ...exclusionBase,
         exclusionReason: {
@@ -187,8 +174,7 @@ export async function buildEligibilityItems({
       continue;
     }
 
-    const form = formByProfile.get(pid);
-    if (!form) {
+    if (!mandateRow) {
       excluded.push({
         ...exclusionBase,
         memberId,
@@ -200,10 +186,10 @@ export async function buildEligibilityItems({
       continue;
     }
 
-    const dd = form.directDebitMandate || {};
-    const debtorIban = normalizeIban(decryptField(dd.debtorIban));
-    const debtorBic = decryptField(dd.debtorBic);
-    if (!debtorIban || !dd.debtorName || !dd.uniqueMandateReference) {
+    const dd = mandateRow.mandate || {};
+    const debtorIban = normalizeIban(dd.debtorIban);
+    const debtorBic = dd.debtorBic || null;
+    if (!debtorIban || !dd.debtorName || !dd.umr) {
       excluded.push({
         ...exclusionBase,
         memberId,
@@ -242,42 +228,40 @@ export async function buildEligibilityItems({
       continue;
     }
 
-    const mandate = await upsertMandateFromForm(tenantId, profile, form, {
-      iban: debtorIban,
-      bic: debtorBic,
-    });
+    const mandate = await upsertMandateFromSnapshot(
+      tenantId,
+      pid,
+      memberId,
+      mandateRow,
+      mandateRow.paymentFormId,
+      mandateRow.organisationSnapshot,
+    );
 
     const seqTp = resolveSeqTp(mandate);
-    const endToEndId = buildEndToEndId({
-      membershipNumber: memberId,
-      periodEndDate: run.periodEndDate,
-      runNo: run.runNo,
-    });
+    const memberSnapshot = mandateRow.memberSnapshot || {};
 
     included.push({
       tenantId,
       runId: run._id,
       memberId,
-      profileId: profile._id,
-      subscriptionId: sub._id,
+      profileId: pid,
+      subscriptionId: subscriptionId(sub),
       mandateId: mandate?._id,
-      paymentFormId: form._id,
+      paymentFormId: mandateRow.paymentFormId,
+      membershipNumber: memberId,
       memberSnapshot: {
         membershipNumber: memberId,
-        fullName: resolveMemberName(profile),
-        email:
-          profile.contactInfo?.personalEmail ||
-          profile.contactInfo?.workEmail ||
-          null,
+        fullName: memberSnapshot.fullName || memberId,
+        email: memberSnapshot.email || null,
         membershipCategory: sub.membershipCategory,
         paymentFrequency: sub.paymentFrequency,
       },
       mandateSnapshot: {
-        umr: dd.uniqueMandateReference,
+        umr: dd.umr,
         signedDate: dd.signedDate ? new Date(dd.signedDate) : new Date("2013-01-01"),
         debtorName: dd.debtorName,
         debtorIban,
-        debtorBic: debtorBic || null,
+        debtorBic,
         debtorAddress: dd.debtorAddress,
         debtorCity: dd.debtorCity,
         debtorPostcode: dd.debtorPostcode,
@@ -286,7 +270,6 @@ export async function buildEligibilityItems({
       },
       amountEur,
       currency: "EUR",
-      endToEndId,
       remittanceInfo: buildRemittanceInfo({
         membershipNumber: memberId,
         periodStart: run.periodStartDate,
@@ -300,7 +283,30 @@ export async function buildEligibilityItems({
     });
   }
 
-  return { included, excluded, preparedBy: actorId };
+  const periodKey =
+    run.periodKey ||
+    (run.periodEndDate
+      ? new Date(run.periodEndDate).toISOString().slice(0, 7).replace("-", "")
+      : "");
+  const runSequence = run.runSequence || 1;
+
+  const withE2e = assignUniqueEndToEndIds({
+    items: included.map((row) => ({ ...row, membershipNumber: row.memberId })),
+    periodKey,
+    runSequence,
+  });
+
+  const finalizedIncluded = withE2e.map((row) => {
+    const endToEndId = row.endToEndId;
+    const { membershipNumber: _m, ...rest } = row;
+    return {
+      ...rest,
+      collection: { endToEndId },
+      endToEndId,
+    };
+  });
+
+  return { included: finalizedIncluded, excluded, preparedBy: actorId };
 }
 
 export function computeRunTotals(items) {

@@ -61,6 +61,10 @@ const DirectDebitRunItemSchema = new mongoose.Schema(
     },
     amountEur: { type: Number, required: true, min: 0 },
     currency: { type: String, default: "EUR" },
+    collection: {
+      endToEndId: { type: String, trim: true, index: true },
+    },
+    /** @deprecated use collection.endToEndId — kept in sync for queries */
     endToEndId: { type: String, required: true, trim: true, index: true },
     remittanceInfo: { type: String, default: "", trim: true, maxlength: 140 },
     collectionPeriod: {
@@ -90,10 +94,19 @@ const DirectDebitRunItemSchema = new mongoose.Schema(
       settlementPhase: { type: String, enum: ["pre_settlement", "post_settlement", null], default: null },
     },
   },
-  { timestamps: true, collection: "directdebitrunitems" },
+  { timestamps: true, collection: "directdebitrunitems", suppressReservedKeysWarning: true },
 );
 
 DirectDebitRunItemSchema.index({ tenantId: 1, runId: 1, status: 1 });
+DirectDebitRunItemSchema.index(
+  { tenantId: 1, "collection.endToEndId": 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      "collection.endToEndId": { $type: "string", $ne: "" },
+    },
+  },
+);
 DirectDebitRunItemSchema.index({ tenantId: 1, endToEndId: 1 });
 DirectDebitRunItemSchema.index(
   { tenantId: 1, runId: 1, memberId: 1 },

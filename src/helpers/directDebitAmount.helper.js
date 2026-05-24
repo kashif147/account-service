@@ -55,24 +55,19 @@ export function computeCollectibleAmountEur({
   return Math.round((annual / periods) * 100) / 100;
 }
 
-export function buildEndToEndId({ membershipNumber, periodEndDate, runNo }) {
-  const period = periodEndDate
-    ? new Date(periodEndDate).toISOString().slice(0, 7).replace("-", "")
-    : "000000";
-  const base = `E2E-${String(membershipNumber || "MBR").replace(/\s+/g, "")}-${period}`;
-  const suffix = String(runNo || "")
-    .replace(/[^A-Za-z0-9]/g, "")
-    .slice(-6);
-  return `${base}-${suffix}`.slice(0, 35);
+export function resolveSeqTp(mandate) {
+  const count = mandate?.successfulCollectionCount || 0;
+  return count > 0 ? "RCUR" : "FRST";
+}
+
+export { generateEndToEndId as buildEndToEndId } from "../services/sepaReferenceGenerator.js";
+
+export function itemEndToEndId(item) {
+  return item?.collection?.endToEndId || item?.endToEndId || "";
 }
 
 export function buildRemittanceInfo({ membershipNumber, periodStart, periodEnd }) {
   const ps = periodStart ? new Date(periodStart).toISOString().slice(0, 10) : "";
   const pe = periodEnd ? new Date(periodEnd).toISOString().slice(0, 10) : "";
   return `Membership ${membershipNumber} ${ps} to ${pe}`.slice(0, 140);
-}
-
-export function resolveSeqTp(mandate) {
-  const count = mandate?.successfulCollectionCount || 0;
-  return count > 0 ? "RCUR" : "FRST";
 }

@@ -23,8 +23,10 @@ function blockKey(item) {
  * @param {object[]} items - frozen snapshots with mandateSnapshot, amountEur, etc.
  * @param {object} creditor - creditorSnapshot from run
  * @param {string} collectionDate - YYYY-MM-DD
+ * @param {object} [options]
+ * @param {string} [options.primaryPaymentInformationId] - run-level PmtInfId (first block)
  */
-export function groupItemsForPain008(items, creditor, collectionDate) {
+export function groupItemsForPain008(items, creditor, collectionDate, options = {}) {
   const oin = creditor.oin;
   const creditorIban = normalizeIban(creditor.iban);
   const creditorBic = creditor.bic || "AIBKIE2DXXX";
@@ -64,12 +66,20 @@ export function groupItemsForPain008(items, creditor, collectionDate) {
 
   return blocks.map((block, idx) => {
     const amounts = block.transactions.map((t) => t.amountEur);
-    const pmtInfId =
-      block.pmtInfId ||
-      sanitizeSepaText(
-        `PMTID.${String(oin || "OIN").slice(-8)}.${collectionDate.replace(/-/g, "")}.${String(idx + 1).padStart(2, "0")}`,
-        35,
-      );
+    let pmtInfId = block.pmtInfId;
+    if (!pmtInfId) {
+      if (idx === 0 && options.primaryPaymentInformationId) {
+        pmtInfId = options.primaryPaymentInformationId;
+      } else if (options.primaryPaymentInformationId) {
+        const suffix = String(idx + 1).padStart(2, "0");
+        pmtInfId = `${options.primaryPaymentInformationId}-${suffix}`.slice(0, 35);
+      } else {
+        pmtInfId = sanitizeSepaText(
+          `PMTID.${String(oin || "OIN").slice(-8)}.${collectionDate.replace(/-/g, "")}.${String(idx + 1).padStart(2, "0")}`,
+          35,
+        );
+      }
+    }
     return {
       ...block,
       pmtInfId,
@@ -102,6 +112,7 @@ function renderCdtrAgt(bic) {
 
 function renderDrctDbtTxInf(tx, oin) {
   const m = tx.mandateSnapshot || {};
+  const e2e = tx.collection?.endToEndId || tx.endToEndId || "";
   const signed =
     m.signedDate instanceof Date
       ? m.signedDate.toISOString().slice(0, 10)
@@ -113,7 +124,7 @@ function renderDrctDbtTxInf(tx, oin) {
     : "";
 
   return `<DrctDbtTxInf>
-<PmtId><EndToEndId>${escapeXml(sanitizeSepaText(tx.endToEndId, 35))}</EndToEndId></PmtId>
+<PmtId><EndToEndId>${escapeXml(sanitizeSepaText(e2e, 35))}</EndToEndId></PmtId>
 <InstdAmt Ccy="EUR">${formatAmount2dp(tx.amountEur)}</InstdAmt>
 <DrctDbtTx>
 <MndtRltdInf>

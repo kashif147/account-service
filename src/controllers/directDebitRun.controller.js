@@ -20,6 +20,7 @@ export const createRun = asyncHandler(async (req, res) => {
     submissionDueDate: req.body.submissionDueDate,
     creditorSnapshot: req.body.creditorSnapshot || {},
     createdBy: actorId(req),
+    req,
   });
   res.created({ run });
 });
@@ -29,6 +30,7 @@ export const prepareRun = asyncHandler(async (req, res) => {
     req.params.id,
     tenantId(req),
     actorId(req),
+    req,
   );
   res.success({ run });
 });
