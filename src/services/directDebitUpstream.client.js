@@ -97,6 +97,30 @@ function unwrapData(payload) {
   return payload;
 }
 
+function profileServiceBase() {
+  const base = (process.env.PROFILE_SERVICE_URL || "").replace(/\/$/, "");
+  if (!base) {
+    throw new Error("PROFILE_SERVICE_URL is required for direct debit prepare");
+  }
+  return base;
+}
+
+/** Build profile-service API URL whether PROFILE_SERVICE_URL ends with /api or not. */
+function profileApiUrl(path) {
+  const base = profileServiceBase();
+  const segment = path.startsWith("/") ? path : `/${path}`;
+  if (base.endsWith("/api")) {
+    return `${base}${segment}`;
+  }
+  return `${base}/api${segment}`;
+}
+
+function parseMandateRows(payload) {
+  const rows = unwrapData(payload);
+  if (Array.isArray(rows?.mandates)) return rows.mandates;
+  return Array.isArray(rows) ? rows : [];
+}
+
 /**
  * Current Active Direct Debit subscriptions from subscription-service.
  */
@@ -122,22 +146,53 @@ export async function fetchDirectDebitSubscriptions(req) {
  * Active authorized DD mandates with decrypted bank fields from profile-service CRM API.
  */
 export async function fetchDirectDebitMandates(req, profileIds = []) {
-  const base = (process.env.PROFILE_SERVICE_URL || "").replace(/\/$/, "");
-  if (!base) {
-    throw new Error("PROFILE_SERVICE_URL is required for direct debit prepare");
-  }
   const ids = [...new Set(profileIds.map((id) => String(id || "").trim()).filter(Boolean))].slice(
     0,
     BULK_MAX_PROFILE_IDS,
   );
-  const url = `${base}/api/payment-forms/direct-debit/mandates-for-prepare`;
-  const payload = await fetchJson(url, req, {
-    method: "POST",
-    body: JSON.stringify({ profileIds: ids }),
-  });
-  const rows = unwrapData(payload);
-  if (Array.isArray(rows?.mandates)) return rows.mandates;
-  return Array.isArray(rows) ? rows : [];
+  const body = JSON.stringify({ profileIds: ids });
+
+  const primaryUrl = profileApiUrl(
+    "/payment-forms/direct-debit/mandates-for-prepare",
+  );
+  const fallbackUrl = profileApiUrl("/payment-forms/filter");
+
+  let lastError = null;
+
+  try {
+    const payload = await fetchJson(primaryUrl, req, {
+      method: "POST",
+      body,
+    });
+    return parseMandateRows(payload);
+  } catch (err) {
+    lastError = err;
+    const is404 =
+      err?.message?.includes("404") || err?.message?.includes("Not found");
+    if (!is404) throw err;
+    logger.warn(
+      { primaryUrl, err: err.message },
+      "[DirectDebit] mandates-for-prepare not found; trying filter fallback",
+    );
+  }
+
+  try {
+    const payload = await fetchJson(fallbackUrl, req, {
+      method: "PUT",
+      body: JSON.stringify({
+        purpose: "direct-debit-prepare",
+        profileIds: ids,
+      }),
+    });
+    return parseMandateRows(payload);
+  } catch (err) {
+    const hint =
+      "Ensure profile-service is deployed with POST /api/payment-forms/direct-debit/mandates-for-prepare " +
+      "or PUT /api/payment-forms/filter (purpose: direct-debit-prepare).";
+    throw new Error(
+      `${err.message || lastError?.message || "Profile mandate fetch failed"}. ${hint}`,
+    );
+  }
 }
 
 export async function loadDirectDebitEligibilitySource(req) {
