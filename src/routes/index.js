@@ -6,6 +6,7 @@ import paymentsRoutes from "./payment.routes.js";
 import batchDetailRoutes from "./batch.detail.routes.js";
 import internalRoutes from "./internal.routes.js";
 import financeRoutes from "./finance.routes.js";
+import directDebitRunRoutes from "./directDebitRun.routes.js";
 
 const router = express.Router();
 
@@ -23,6 +24,8 @@ router.get("/", (req, res) => {
       reports: "/reports",
       batchDetails: "/batch-details",
       internal: "/internal",
+      finance: "/finance",
+      directDebitRuns: "/direct-debit-runs",
       docs: "/api/docs",
     },
     timestamp: new Date().toISOString(),
@@ -36,5 +39,6 @@ router.use("/payments", paymentsRoutes);
 router.use("/batch-details", batchDetailRoutes);
 router.use("/internal", internalRoutes);
 router.use("/finance", financeRoutes);
+router.use("/direct-debit-runs", directDebitRunRoutes);
 
 export default router;
