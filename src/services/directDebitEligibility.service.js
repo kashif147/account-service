@@ -100,7 +100,7 @@ export async function buildEligibilityItems({
   req,
 }) {
   if (!req) {
-    throw new Error("Request context required for direct debit eligibility (service HTTP calls)");
+    throw new Error("Request context required for direct debit eligibility (use queuePrepareJob with captured headers)");
   }
 
   const { subs, mandateByProfile } = await loadDirectDebitEligibilitySource(req);

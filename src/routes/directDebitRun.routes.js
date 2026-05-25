@@ -22,6 +22,7 @@ import {
   createRun,
   deleteRun,
   downloadPain008,
+  getPrepareStatus,
   generatePain008,
   getRun,
   importPain002,
@@ -50,6 +51,14 @@ router.get("/", requireFinanceRead, listRunsRules, validate, listRuns);
 router.get("/:id", requireFinanceRead, runIdParam, validate, getRun);
 
 router.get("/:id/items", requireFinanceRead, listItemsRules, validate, listItems);
+
+router.get(
+  "/:id/prepare-status",
+  requireFinanceRead,
+  runIdParam,
+  validate,
+  getPrepareStatus,
+);
 
 router.get("/:id/download-pain008", requireFinanceRead, runIdParam, validate, downloadPain008);
 

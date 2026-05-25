@@ -13,6 +13,7 @@ import {
   parsePain002Xml,
 } from "../services/pain002.service.js";
 import { computeRunTotals } from "../services/directDebitEligibility.service.js";
+import { captureForwardHeaders } from "../services/directDebitUpstream.client.js";
 import {
   generateMessageId,
   generatePaymentInformationId,
@@ -182,6 +183,38 @@ describe("pain002.service", () => {
     expect(matches[0].endToEndId).toBe("MEM10245-202605");
     expect(matches[0].pmtInfId).toBe("INMO-MAY25-01");
     expect(matches[0].settlementPhase).toBe("pre_settlement");
+  });
+});
+
+describe("captureForwardHeaders", () => {
+  test("snapshots only the gateway/JWT-trust headers", () => {
+    const req = {
+      headers: {
+        authorization: "Bearer xyz",
+        "x-tenant-id": "tenant-1",
+        "x-user-id": "user-9",
+        "x-jwt-verified": "true",
+        "x-auth-source": "gateway",
+        cookie: "session=should-not-leak",
+        "user-agent": "jest",
+      },
+      tenantId: "tenant-1",
+      correlationId: "corr-1",
+    };
+    const snap = captureForwardHeaders(req);
+    expect(snap.headers.authorization).toBe("Bearer xyz");
+    expect(snap.headers["x-tenant-id"]).toBe("tenant-1");
+    expect(snap.headers["x-user-id"]).toBe("user-9");
+    expect(snap.headers.cookie).toBeUndefined();
+    expect(snap.headers["user-agent"]).toBeUndefined();
+    expect(snap.tenantId).toBe("tenant-1");
+    expect(snap.correlationId).toBe("corr-1");
+  });
+
+  test("returns empty bundle when req is null", () => {
+    const snap = captureForwardHeaders(null);
+    expect(snap.headers).toEqual({});
+    expect(snap.tenantId).toBeNull();
   });
 });
 

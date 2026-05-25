@@ -1,6 +1,7 @@
 import { asyncHandler } from "../helpers/asyncHandler.js";
 import * as ddRunService from "../services/directDebitRun.service.js";
 import * as azureBlob from "../services/azure.blob.service.js";
+import { captureForwardHeaders } from "../services/directDebitUpstream.client.js";
 
 function tenantId(req) {
   return req.ctx?.tenantId ?? req.tenantId ?? req.user?.tenantId;
@@ -26,13 +27,36 @@ export const createRun = asyncHandler(async (req, res) => {
 });
 
 export const prepareRun = asyncHandler(async (req, res) => {
-  const run = await ddRunService.prepareDirectDebitRun(
+  const forwardHeaders = captureForwardHeaders(req);
+  const run = await ddRunService.queuePrepareJob(
     req.params.id,
     tenantId(req),
     actorId(req),
-    req,
+    forwardHeaders,
   );
-  res.success({ run });
+  res.status(202).json({
+    status: "success",
+    message: "Prepare job queued",
+    data: {
+      run,
+      prepareJob: run.prepareJob,
+    },
+    timestamp: new Date().toISOString(),
+  });
+});
+
+export const getPrepareStatus = asyncHandler(async (req, res) => {
+  const run = await ddRunService.getDirectDebitRun(
+    req.params.id,
+    tenantId(req),
+  );
+  res.success({
+    runId: String(run._id),
+    runNo: run.runNo,
+    status: run.status,
+    prepareJob: run.prepareJob || { status: "idle" },
+    totals: run.totals,
+  });
 });
 
 export const validateRun = asyncHandler(async (req, res) => {

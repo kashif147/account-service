@@ -90,6 +90,10 @@ import {
   startBatchProcessingCron,
   stopBatchProcessingCron,
 } from "./services/batch.processing.cron.service.js";
+import {
+  startDirectDebitPrepareCron,
+  stopDirectDebitPrepareCron,
+} from "./services/directDebitPrepare.cron.service.js";
 
 const app = express();
 
@@ -131,6 +135,7 @@ export async function initializeMessagingMiddleware() {
 }
 
 startBatchProcessingCron();
+startDirectDebitPrepareCron();
 
 // Graceful shutdown
 process.on("SIGTERM", async () => {
@@ -373,6 +378,7 @@ app.use(errorHandler);
 process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, shutting down gracefully");
   stopBatchProcessingCron();
+  stopDirectDebitPrepareCron();
   await shutdownEventSystem();
   process.exit(0);
 });
@@ -380,6 +386,7 @@ process.on("SIGTERM", async () => {
 process.on("SIGINT", async () => {
   logger.info("SIGINT received, shutting down gracefully");
   stopBatchProcessingCron();
+  stopDirectDebitPrepareCron();
   await shutdownEventSystem();
   process.exit(0);
 });

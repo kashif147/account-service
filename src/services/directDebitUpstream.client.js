@@ -5,6 +5,10 @@ const DEFAULT_TIMEOUT_MS = 60000;
 
 /**
  * Forward gateway/JWT trust bundle (same as batch.membershipStatus.service).
+ *
+ * Background workers pass a `req`-shaped object built from `captureForwardHeaders`
+ * (snapshot of the live request) so this works the same for live HTTP and
+ * post-response workers.
  */
 function buildForwardHeaders(req) {
   if (!req?.headers) {
@@ -48,6 +52,40 @@ function buildForwardHeaders(req) {
     headers["x-correlation-id"] = String(Array.isArray(cid) ? cid[0] : cid);
   }
   return headers;
+}
+
+/**
+ * Snapshot the headers we need from a live request so a background worker can
+ * reuse them after the HTTP response has been sent.
+ */
+export function captureForwardHeaders(req) {
+  const snapshot = { headers: {}, tenantId: null, correlationId: null };
+  if (!req) return snapshot;
+  const h = req.headers || {};
+  const keep = [
+    "authorization",
+    "x-ms-token-aad-access-token",
+    "x-tenant-id",
+    "x-jwt-verified",
+    "x-auth-source",
+    "x-user-id",
+    "x-user-email",
+    "x-user-type",
+    "x-user-roles",
+    "x-user-permissions",
+    "x-token-expires-at",
+    "x-correlation-id",
+  ];
+  for (const key of keep) {
+    const v = h[key];
+    if (v != null && v !== "") {
+      snapshot.headers[key] = Array.isArray(v) ? v[0] : v;
+    }
+  }
+  snapshot.tenantId = req.tenantId || req.ctx?.tenantId || h["x-tenant-id"] || null;
+  snapshot.correlationId =
+    req.correlationId || h["x-correlation-id"] || null;
+  return snapshot;
 }
 
 async function fetchJson(url, req, options = {}) {
