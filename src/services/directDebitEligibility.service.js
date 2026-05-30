@@ -124,6 +124,56 @@ export async function buildEligibilityItems({
   const included = [];
   const excluded = [];
 
+  /** Best-effort member identification for exclusion rows (so the Excluded tab
+   * shows membership no + name even when we skip the member). */
+  function buildExcludedSnapshots(sub, mandateRow, memberId) {
+    const mandateMember = mandateRow?.memberSnapshot || {};
+    const mandateDd = mandateRow?.mandate || {};
+    const personal = sub.personalDetails || {};
+    const profile = sub.profile || {};
+    const fullName =
+      mandateMember.fullName ||
+      mandateDd.debtorName ||
+      personal.fullName ||
+      [personal.firstName, personal.lastName].filter(Boolean).join(" ") ||
+      profile.fullName ||
+      sub.memberSnapshot?.fullName ||
+      memberId ||
+      null;
+    const email =
+      mandateMember.email ||
+      personal.email ||
+      profile.email ||
+      sub.memberSnapshot?.email ||
+      null;
+    return {
+      memberSnapshot: {
+        membershipNumber: memberId || null,
+        fullName,
+        email,
+        membershipCategory: sub.membershipCategory || null,
+        paymentFrequency: sub.paymentFrequency || null,
+      },
+      mandateSnapshot: {
+        umr: mandateDd.umr || null,
+        debtorName: mandateDd.debtorName || null,
+        debtorIban: mandateDd.debtorIban || null,
+        debtorBic: mandateDd.debtorBic || null,
+        debtorCountry: mandateDd.debtorCountry || "IE",
+        seqTp: mandateDd.seqTp || "RCUR",
+      },
+    };
+  }
+
+  function pushExcluded(sub, mandateRow, memberId, base, reason) {
+    excluded.push({
+      ...base,
+      memberId,
+      ...buildExcludedSnapshots(sub, mandateRow, memberId),
+      exclusionReason: reason,
+    });
+  }
+
   for (const sub of eligibleSubs) {
     const pid = subscriptionProfileId(sub);
     const mandateRow = pid ? mandateByProfile.get(pid) : null;
@@ -141,47 +191,33 @@ export async function buildEligibilityItems({
     };
 
     if (!pid) {
-      excluded.push({
-        ...exclusionBase,
-        exclusionReason: {
-          code: "NO_PROFILE",
-          message: "Subscription missing profileId",
-        },
+      pushExcluded(sub, null, memberId, exclusionBase, {
+        code: "NO_PROFILE",
+        message: "Subscription missing profileId",
       });
       continue;
     }
 
     if (!memberId) {
-      excluded.push({
-        ...exclusionBase,
-        exclusionReason: {
-          code: "NO_PROFILE",
-          message: "Profile not found for subscription",
-        },
+      pushExcluded(sub, mandateRow, null, exclusionBase, {
+        code: "NO_PROFILE",
+        message: "Profile not found for subscription",
       });
       continue;
     }
 
     if (alreadyInRun.has(memberId)) {
-      excluded.push({
-        ...exclusionBase,
-        memberId,
-        exclusionReason: {
-          code: "DUPLICATE_OPEN_RUN",
-          message: "Member already in another open DD run for this period",
-        },
+      pushExcluded(sub, mandateRow, memberId, exclusionBase, {
+        code: "DUPLICATE_OPEN_RUN",
+        message: "Member already in another open DD run for this period",
       });
       continue;
     }
 
     if (!mandateRow) {
-      excluded.push({
-        ...exclusionBase,
-        memberId,
-        exclusionReason: {
-          code: "NO_ACTIVE_MANDATE",
-          message: "No active verified DD mandate on file",
-        },
+      pushExcluded(sub, null, memberId, exclusionBase, {
+        code: "NO_ACTIVE_MANDATE",
+        message: "No active verified DD mandate on file",
       });
       continue;
     }
@@ -190,13 +226,9 @@ export async function buildEligibilityItems({
     const debtorIban = normalizeIban(dd.debtorIban);
     const debtorBic = dd.debtorBic || null;
     if (!debtorIban || !dd.debtorName || !dd.umr) {
-      excluded.push({
-        ...exclusionBase,
-        memberId,
-        exclusionReason: {
-          code: "INCOMPLETE_MANDATE",
-          message: "Mandate missing UMR, debtor name, or IBAN",
-        },
+      pushExcluded(sub, mandateRow, memberId, exclusionBase, {
+        code: "INCOMPLETE_MANDATE",
+        message: "Mandate missing UMR, debtor name, or IBAN",
       });
       continue;
     }
@@ -217,13 +249,9 @@ export async function buildEligibilityItems({
     });
 
     if (amountEur <= 0) {
-      excluded.push({
-        ...exclusionBase,
-        memberId,
-        exclusionReason: {
-          code: "NO_COLLECTIBLE_AMOUNT",
-          message: "No collectible amount for the period",
-        },
+      pushExcluded(sub, mandateRow, memberId, exclusionBase, {
+        code: "NO_COLLECTIBLE_AMOUNT",
+        message: "No collectible amount for the period",
       });
       continue;
     }

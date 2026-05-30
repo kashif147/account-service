@@ -24,7 +24,7 @@ import {
   validatePain008Inputs,
 } from "./pain008.service.js";
 import { matchPain002ToItems, parsePain002Xml } from "./pain002.service.js";
-import { publishDomainEvent } from "../rabbitMQ/index.js";
+import { publisher } from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
 
 const DD_PREPARE_EXCHANGE = "batch.events";
@@ -35,7 +35,7 @@ const DD_PREPARE_COMPLETED = "batch.process.completed.v1";
 
 async function publishDdPrepareEvent(eventType, run, extra = {}) {
   try {
-    await publishDomainEvent(
+    await publisher.publish(
       eventType,
       {
         kind: "DD_PREPARE",
@@ -352,8 +352,8 @@ export async function executePrepareJob(runId, tenantId, forwardHeaders = null) 
         collection: { endToEndId },
         status: "EXCLUDED",
         exclusionReason: e.exclusionReason,
-        memberSnapshot: {},
-        mandateSnapshot: {},
+        memberSnapshot: e.memberSnapshot || {},
+        mandateSnapshot: e.mandateSnapshot || {},
         collectionPeriod: {
           startDate: claimed.periodStartDate,
           endDate: claimed.periodEndDate,
@@ -515,8 +515,8 @@ export async function prepareDirectDebitRun(runId, tenantId, actorId, req) {
         collection: { endToEndId },
         status: "EXCLUDED",
         exclusionReason: e.exclusionReason,
-        memberSnapshot: {},
-        mandateSnapshot: {},
+        memberSnapshot: e.memberSnapshot || {},
+        mandateSnapshot: e.mandateSnapshot || {},
         collectionPeriod: {
           startDate: run.periodStartDate,
           endDate: run.periodEndDate,

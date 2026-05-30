@@ -1,6 +1,6 @@
 import DirectDebitRun from "../models/directDebitRun.model.js";
 import logger from "../config/logger.js";
-import { publishDomainEvent } from "../rabbitMQ/index.js";
+import { publisher } from "../rabbitMQ/index.js";
 
 const DEFAULT_INTERVAL_MS = 60 * 1000;
 const DEFAULT_STUCK_AFTER_MS = 10 * 60 * 1000; // 10 minutes
@@ -54,7 +54,7 @@ async function tick() {
         },
       );
       try {
-        await publishDomainEvent(
+        await publisher.publish(
           "batch.process.completed.v1",
           {
             kind: "DD_PREPARE",
