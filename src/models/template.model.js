@@ -1,36 +1,73 @@
-// Template model - replace with your service-specific models
 import mongoose from "mongoose";
 
-const templateSchema = new mongoose.Schema(
+const TemplateSchema = new mongoose.Schema(
   {
     name: {
       type: String,
-      required: true,
       trim: true,
+      default: null,
     },
-    description: {
+    templateType: {
       type: String,
+      default: "creditnotes",
       trim: true,
+      index: true,
     },
-    status: {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: false,
+      index: true,
+    },
+    tenantId: {
       type: String,
-      enum: ["active", "inactive", "pending"],
-      default: "active",
+      default: null,
+      trim: true,
+      index: true,
     },
-    metadata: {
-      type: Map,
-      of: String,
+    filters: {
+      type: mongoose.Schema.Types.Mixed,
       default: {},
     },
+    columns: {
+      type: [String],
+      default: [],
+    },
+    columnLabels: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+    isDefault: {
+      type: Boolean,
+      default: false,
+    },
+    pinned: {
+      type: Boolean,
+      default: false,
+    },
+    systemDefault: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    meta: {
+      deleted: {
+        type: Boolean,
+        default: false,
+      },
+      deletedAt: {
+        type: Date,
+        default: null,
+      },
+    },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true },
 );
 
-// Indexes
-templateSchema.index({ name: 1 });
-templateSchema.index({ status: 1 });
-templateSchema.index({ createdAt: -1 });
+TemplateSchema.index({ userId: 1, "meta.deleted": 1 });
+TemplateSchema.index({ userId: 1, isDefault: 1 });
+TemplateSchema.index({ systemDefault: 1, "meta.deleted": 1 });
+TemplateSchema.index({ tenantId: 1, userId: 1, "meta.deleted": 1 });
+TemplateSchema.index({ tenantId: 1, systemDefault: 1, templateType: 1 });
 
-export default mongoose.model("Template", templateSchema);
+export default mongoose.model("Template", TemplateSchema);

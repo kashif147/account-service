@@ -7,6 +7,7 @@ import batchDetailRoutes from "./batch.detail.routes.js";
 import internalRoutes from "./internal.routes.js";
 import financeRoutes from "./finance.routes.js";
 import directDebitRunRoutes from "./directDebitRun.routes.js";
+import gridFilterTemplateRoutes from "./grid.filter.template.routes.js";
 
 const router = express.Router();
 
@@ -26,6 +27,7 @@ router.get("/", (req, res) => {
       internal: "/internal",
       finance: "/finance",
       directDebitRuns: "/direct-debit-runs",
+      templates: "/templates",
       docs: "/api/docs",
     },
     timestamp: new Date().toISOString(),
@@ -40,5 +42,6 @@ router.use("/batch-details", batchDetailRoutes);
 router.use("/internal", internalRoutes);
 router.use("/finance", financeRoutes);
 router.use("/direct-debit-runs", directDebitRunRoutes);
+router.use("/templates", gridFilterTemplateRoutes);
 
 export default router;
