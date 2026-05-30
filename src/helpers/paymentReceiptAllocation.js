@@ -30,6 +30,67 @@ export function allocateMemberReceiptAmounts(
 }
 
 /**
+ * Split refund remainder (after 2020 advance) across 1400 — mirror of receipt order reversed:
+ * **current → arrears** (unwind the last-applied payment buckets first).
+ *
+ * @param {number} amountCents
+ * @param {number} owedCurrentCents — cap for current bucket DR
+ * @param {number} owedArrearsCents — cap for arrears bucket DR
+ */
+export function allocateMemberRefund1400Amounts(
+  amountCents,
+  owedCurrentCents,
+  owedArrearsCents,
+) {
+  const pay = Math.max(0, Math.floor(Number(amountCents) || 0));
+  const curCap = Math.max(0, Math.floor(Number(owedCurrentCents) || 0));
+  const arrCap = Math.max(0, Math.floor(Number(owedArrearsCents) || 0));
+  if (pay <= 0) {
+    return { toCurrent1400: 0, toArrears1400: 0, overflowCurrent: 0 };
+  }
+  let rem = pay;
+  const toCurrent1400 = Math.min(rem, curCap);
+  rem -= toCurrent1400;
+  const toArrears1400 = Math.min(rem, arrCap);
+  rem -= toArrears1400;
+  return {
+    toCurrent1400,
+    toArrears1400,
+    overflowCurrent: rem,
+  };
+}
+
+function sumOwed1400Rows(rows) {
+  let arrears = 0;
+  let current = 0;
+  for (const r of rows) {
+    const amt = Number(r.amount) || 0;
+    const owed = amt > 0 ? amt : 0;
+    if (r.bucket === "arrears") arrears += owed;
+    else if (r.bucket === "current") current += owed;
+  }
+  return { arrears, current };
+}
+
+/**
+ * Sum owed 1400 across **all calendar years** (matches reminder eligibility snapshot).
+ * @param {string} memberId
+ * @returns {Promise<{ arrears: number, current: number }>}
+ */
+export async function memberOwed1400AllYears(memberId) {
+  const mid = String(memberId || "").trim();
+  if (!mid) return { arrears: 0, current: 0 };
+
+  const rows = await MaterializedBalance.find({
+    memberId: mid,
+    accountCode: "1400",
+    bucket: { $in: ["arrears", "current"] },
+  }).lean();
+
+  return sumOwed1400Rows(rows);
+}
+
+/**
  * @param {string} memberId
  * @param {number} year
  * @returns {Promise<{ arrears: number, current: number }>}
@@ -46,15 +107,7 @@ export async function memberOwed1400ByBucket(memberId, year) {
     bucket: { $in: ["arrears", "current"] },
   }).lean();
 
-  let arrears = 0;
-  let current = 0;
-  for (const r of rows) {
-    const amt = Number(r.amount) || 0;
-    const owed = amt > 0 ? amt : 0;
-    if (r.bucket === "arrears") arrears += owed;
-    else if (r.bucket === "current") current += owed;
-  }
-  return { arrears, current };
+  return sumOwed1400Rows(rows);
 }
 
 /**
@@ -73,8 +126,7 @@ export async function buildMemberReceiptCreditEntries(
   const cents = Math.max(0, Math.round(Number(amountCents) || 0));
   if (!mid || cents <= 0) return [];
 
-  const year = new Date(dateInput).getFullYear();
-  const { arrears, current } = await memberOwed1400ByBucket(mid, year);
+  const { arrears, current } = await memberOwed1400AllYears(mid);
   const { toArrears1400, toCurrent1400, toAdvance2020 } =
     allocateMemberReceiptAmounts(cents, arrears, current);
 
@@ -126,7 +178,7 @@ export async function buildMemberApplyCreditEntries(
   const apply = Math.min(requested, available);
   if (apply <= 0) return [];
 
-  const { arrears, current } = await memberOwed1400ByBucket(mid, year);
+  const { arrears, current } = await memberOwed1400AllYears(mid);
   const owed = Math.max(0, arrears) + Math.max(0, current);
   if (owed <= 0) return [];
 
@@ -192,12 +244,8 @@ export async function member2020AdvanceCreditCents(memberId, year) {
 }
 
 /**
- * GL debit lines for a member refund (mirror receipt): DR 2020 advance up to credit there,
- * then DR 1400 arrears / current using the same split as receipts (remainder overflow → current).
- * @param {string} memberId
- * @param {number} amountCents
- * @param {string|Date} dateInput
- * @returns {Promise<object[]>}
+ * GL debit lines for a member refund: DR 2020 advance first, then DR 1400
+ * **current → arrears** (reverse of receipt allocation on 1400).
  */
 export async function buildMemberRefundDebitEntries(
   memberId,
@@ -214,10 +262,10 @@ export async function buildMemberRefundDebitEntries(
   const rem = cents - d2020Adv;
 
   const { arrears: owedArrears, current: owedCurrent } =
-    await memberOwed1400ByBucket(mid, year);
-  const alloc = allocateMemberReceiptAmounts(rem, owedArrears, owedCurrent);
-  const to1400Arr = alloc.toArrears1400;
-  const to1400Cur = alloc.toCurrent1400 + alloc.toAdvance2020;
+    await memberOwed1400AllYears(mid);
+  const { toCurrent1400, toArrears1400, overflowCurrent } =
+    allocateMemberRefund1400Amounts(rem, owedCurrent, owedArrears);
+  const totalCurrentDr = toCurrent1400 + overflowCurrent;
 
   const lines = [];
   if (d2020Adv > 0) {
@@ -229,22 +277,22 @@ export async function buildMemberRefundDebitEntries(
       periodBucket: "advance",
     });
   }
-  if (to1400Arr > 0) {
+  if (totalCurrentDr > 0) {
     lines.push({
       accountCode: "1400",
       dc: "D",
-      amount: to1400Arr,
-      memberId: mid,
-      periodBucket: "arrears",
-    });
-  }
-  if (to1400Cur > 0) {
-    lines.push({
-      accountCode: "1400",
-      dc: "D",
-      amount: to1400Cur,
+      amount: totalCurrentDr,
       memberId: mid,
       periodBucket: "current",
+    });
+  }
+  if (toArrears1400 > 0) {
+    lines.push({
+      accountCode: "1400",
+      dc: "D",
+      amount: toArrears1400,
+      memberId: mid,
+      periodBucket: "arrears",
     });
   }
   return lines;

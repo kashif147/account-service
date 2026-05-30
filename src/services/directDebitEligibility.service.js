@@ -74,11 +74,31 @@ async function upsertMandateFromSnapshot(tenantId, profileId, membershipNumber, 
     syncedFromPaymentFormAt: new Date(),
   };
 
-  return DirectDebitMandate.findOneAndUpdate(
+  const mandate = await DirectDebitMandate.findOneAndUpdate(
     { tenantId, umr },
     { $set: payload, $setOnInsert: { successfulCollectionCount: 0 } },
     { upsert: true, new: true },
   );
+
+  if (mandate) {
+    await DirectDebitMandate.updateMany(
+      {
+        tenantId,
+        profileId,
+        status: "ACTIVE",
+        _id: { $ne: mandate._id },
+      },
+      {
+        $set: {
+          status: "CANCELLED",
+          cancelledAt: new Date(),
+          cancelReason: "Superseded by newer mandate",
+        },
+      },
+    );
+  }
+
+  return mandate;
 }
 
 function subscriptionProfileId(sub) {

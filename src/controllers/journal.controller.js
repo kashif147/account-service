@@ -18,6 +18,7 @@ import { buildCategoryChangeJournalPayload } from "../helpers/categoryChangeJour
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { notifyMemberFinanceUpdated } from "../services/memberFinanceRealtimeNotify.service.js";
+import { notifyMemberPaymentReceiptPosted } from "../services/memberReceiptReminderNotify.service.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 import { randomUUID } from "crypto";
 import { enrichStripePaymentItems } from "../services/stripe.payment.enrichment.service.js";
@@ -415,6 +416,25 @@ export async function postBalancedJournal({
         memberId,
         docType: txn.docType,
         docNo: txn.docNo,
+      }).catch(() => {});
+    }
+
+    if (
+      resolvedTenantId &&
+      memberId &&
+      txn.docType === "Receipt" &&
+      txn.entries?.some(
+        (e) =>
+          e.dc === "C" &&
+          e.memberId &&
+          (e.accountCode === "1400" || e.accountCode === "2020")
+      )
+    ) {
+      notifyMemberPaymentReceiptPosted({
+        tenantId: resolvedTenantId,
+        memberId,
+        docNo: txn.docNo,
+        date: txn.date,
       }).catch(() => {});
     }
 

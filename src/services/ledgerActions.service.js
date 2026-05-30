@@ -80,6 +80,13 @@ export async function getLedgerActionsForDocument(ctx) {
     });
   }
 
+  if (dt === "refund") {
+    add("view-source-batch", "View Source Batch", {
+      resource: "accounts.journals",
+      action: "read",
+    });
+  }
+
   if (dt === "creditnote" || dt === "credit_note") {
     const cnStatus = status || "Draft";
     if (docNo) {

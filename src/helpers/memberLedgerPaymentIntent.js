@@ -142,7 +142,11 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
 
   const tid = tenantId != null ? String(tenantId).trim() : "";
   if (!tid) {
-    return items.map((txn) => ({ ...txn, paymentIntentId: null }));
+    return items.map((txn) => ({
+      ...txn,
+      paymentIntentId: null,
+      paymentStatus: null,
+    }));
   }
 
   const paymentIdsFromRcp = new Set();
@@ -174,6 +178,7 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
   }
 
   const paymentIdToPi = new Map();
+  const paymentIdToStatus = new Map();
   const refundIdToPi = new Map();
 
   const refundObjectIds = [...refundIds]
@@ -204,10 +209,11 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
       tenantId: tid,
       _id: { $in: payObjectIds },
     })
-      .select({ stripe: 1 })
+      .select({ stripe: 1, status: 1 })
       .lean();
     for (const p of pays) {
       paymentIdToPi.set(String(p._id), p.stripe?.paymentIntentId ?? null);
+      paymentIdToStatus.set(String(p._id), p.status ?? null);
     }
   }
 
@@ -311,14 +317,19 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
   return items.map((txn) => {
     const docNo = String(txn.docNo || "");
     let paymentIntentId = null;
+    let paymentStatus = null;
     const rcp = objectIdSuffix(docNo, RCP_RE);
-    if (rcp) paymentIntentId = paymentIdToPi.get(rcp) ?? null;
+    if (rcp) {
+      paymentIntentId = paymentIdToPi.get(rcp) ?? null;
+      paymentStatus = paymentIdToStatus.get(rcp) ?? null;
+    }
     const rfd = objectIdSuffix(docNo, RFD_RE);
     if (rfd) paymentIntentId = refundIdToPi.get(rfd) ?? paymentIntentId;
     const claimKey = claimApplicationIdForTxn(txn);
     if (claimKey && !paymentIntentId) {
       const picked = fundingPaymentForClaimRow(txn);
       paymentIntentId = picked?.stripe?.paymentIntentId ?? null;
+      paymentStatus = picked?.status ?? paymentStatus;
     }
 
     let underlyingReceiptGl = null;
@@ -333,6 +344,11 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
       }
     }
 
-    return { ...txn, paymentIntentId, underlyingReceiptGl };
+    return {
+      ...txn,
+      paymentIntentId,
+      paymentStatus,
+      underlyingReceiptGl,
+    };
   });
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test, afterEach, jest } from "@jest/globals";
 import {
   allocateMemberReceiptAmounts,
+  allocateMemberRefund1400Amounts,
   member2020AdvanceCreditCents,
 } from "../helpers/paymentReceiptAllocation.js";
 import MaterializedBalance from "../models/materializedBalance.model.js";
@@ -35,6 +36,32 @@ describe("allocateMemberReceiptAmounts", () => {
       toArrears1400: 3000,
       toCurrent1400: 1000,
       toAdvance2020: 0,
+    });
+  });
+});
+
+describe("allocateMemberRefund1400Amounts", () => {
+  test("allocates current before arrears", () => {
+    expect(allocateMemberRefund1400Amounts(10000, 4000, 3000)).toEqual({
+      toCurrent1400: 4000,
+      toArrears1400: 3000,
+      overflowCurrent: 3000,
+    });
+  });
+
+  test("fills current then arrears when payment smaller than current", () => {
+    expect(allocateMemberRefund1400Amounts(5000, 8000, 2000)).toEqual({
+      toCurrent1400: 5000,
+      toArrears1400: 0,
+      overflowCurrent: 0,
+    });
+  });
+
+  test("overflow goes to current bucket", () => {
+    expect(allocateMemberRefund1400Amounts(9000, 2000, 1000)).toEqual({
+      toCurrent1400: 2000,
+      toArrears1400: 1000,
+      overflowCurrent: 6000,
     });
   });
 });
