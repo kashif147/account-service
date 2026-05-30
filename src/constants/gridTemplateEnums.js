@@ -34,6 +34,30 @@ export const JOURNAL_ADJUSTMENT_TEMPLATE_FILTER_KEYS = Object.keys(
   JOURNAL_ADJUSTMENT_FILTER_FIELD_MAP,
 );
 
-export const FINANCE_TEMPLATE_TYPES = ["creditnotes", "journaladjustments"];
+export const ONLINE_PAYMENT_FILTER_FIELD_MAP = {
+  membershipStatus: "membershipStatus",
+  paymentStatus: "paymentStatus",
+  paymentMethod: "paymentMethod",
+  billingCycle: "billingCycle",
+  category: "category",
+  memberNo: "memberNo",
+  transactionId: "transactionId",
+  fullName: "fullName",
+  email: "email",
+  phone: "phone",
+  renewalDate: "renewalDate",
+  date: "date",
+  joinDate: "joinDate",
+};
+
+export const ONLINE_PAYMENT_TEMPLATE_FILTER_KEYS = Object.keys(
+  ONLINE_PAYMENT_FILTER_FIELD_MAP,
+);
+
+export const FINANCE_TEMPLATE_TYPES = [
+  "creditnotes",
+  "journaladjustments",
+  "onlinepayment",
+];
 
 export const OPEN_COLUMN_TEMPLATE_TYPES = [...FINANCE_TEMPLATE_TYPES];

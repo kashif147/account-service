@@ -4,6 +4,7 @@ import {
   FILTER_OPERATOR,
   FINANCE_TEMPLATE_TYPES,
   JOURNAL_ADJUSTMENT_TEMPLATE_FILTER_KEYS,
+  ONLINE_PAYMENT_TEMPLATE_FILTER_KEYS,
 } from "../constants/gridTemplateEnums.js";
 
 const VALID_OPERATORS = new Set(Object.values(FILTER_OPERATOR));
@@ -23,6 +24,7 @@ function validateFilterEntry(key, entry) {
 function allowedKeysForType(type) {
   if (type === "creditnotes") return CREDIT_NOTE_TEMPLATE_FILTER_KEYS;
   if (type === "journaladjustments") return JOURNAL_ADJUSTMENT_TEMPLATE_FILTER_KEYS;
+  if (type === "onlinepayment") return ONLINE_PAYMENT_TEMPLATE_FILTER_KEYS;
   return null;
 }
 
