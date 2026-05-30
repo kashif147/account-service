@@ -2,6 +2,8 @@ import { asyncHandler } from "../helpers/asyncHandler.js";
 import {
   listReconciliationRecords,
   seedReconciliationFromPendingGl,
+  importBankReconciliationLines,
+  runAutoMatchReconciliation,
   manualMatchReconciliation,
   moveToSuspense,
   markReconciliationSettled,
@@ -31,6 +33,27 @@ export const seedReconciliationHandler = asyncHandler(async (req, res) => {
     createdBy: req.ctx?.userId,
   });
   res.created(result);
+});
+
+export const importBankReconciliationHandler = asyncHandler(async (req, res) => {
+  const { clearingAccountCode, batchReference, lines } = req.body;
+  const result = await importBankReconciliationLines({
+    clearingAccountCode,
+    batchReference,
+    lines,
+    createdBy: req.ctx?.userId,
+  });
+  res.created(result);
+});
+
+export const autoMatchReconciliationHandler = asyncHandler(async (req, res) => {
+  const { clearingAccountCode, apply } = req.body;
+  const result = await runAutoMatchReconciliation({
+    clearingAccountCode,
+    matchedBy: req.ctx?.userId,
+    apply: apply !== false,
+  });
+  res.success(result);
 });
 
 export const manualMatchHandler = asyncHandler(async (req, res) => {

@@ -18,6 +18,13 @@ const ReconciliationRecordSchema = new mongoose.Schema(
     },
     glDocNo: { type: String, index: true },
     externalReference: { type: String, index: true },
+    memberId: { type: String, index: true, sparse: true },
+    sourceType: {
+      type: String,
+      enum: ["gl", "bank"],
+      default: "gl",
+    },
+    importBatchId: { type: String, index: true, sparse: true },
     amount: { type: Number, required: true },
     reconciliationStatus: {
       type: String,

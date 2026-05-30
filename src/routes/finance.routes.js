@@ -11,6 +11,8 @@ import {
   journalAdjustmentDocNoParam,
   listJournalAdjustmentRules,
   reconciliationSeedRules,
+  reconciliationImportRules,
+  reconciliationAutoMatchRules,
   reconciliationMatchRules,
   reconciliationSuspenseRules,
 } from "../validators/journalAdjustment.validators.js";
@@ -23,6 +25,8 @@ import {
   listReconciliationHandler,
   reconciliationDashboardHandler,
   seedReconciliationHandler,
+  importBankReconciliationHandler,
+  autoMatchReconciliationHandler,
   manualMatchHandler,
   suspenseHandler,
   settleReconciliationHandler,
@@ -81,6 +85,26 @@ router.post(
   reconciliationSeedRules,
   validate,
   seedReconciliationHandler,
+);
+
+router.post(
+  "/reconciliation/import",
+  ensureAuthenticated,
+  requireFinanceWrite,
+  idempotency(),
+  reconciliationImportRules,
+  validate,
+  importBankReconciliationHandler,
+);
+
+router.post(
+  "/reconciliation/auto-match",
+  ensureAuthenticated,
+  requireFinanceWrite,
+  idempotency(),
+  reconciliationAutoMatchRules,
+  validate,
+  autoMatchReconciliationHandler,
 );
 
 router.post(

@@ -28,6 +28,24 @@ export const reconciliationSeedRules = [
     .isIn(["1210", "1220", "1230", "1240", "1250"]),
 ];
 
+export const reconciliationImportRules = [
+  body("clearingAccountCode")
+    .isIn(["1210", "1220", "1230", "1240", "1250"]),
+  body("batchReference").optional().isString(),
+  body("lines").isArray({ min: 1, max: 500 }),
+  body("lines.*.externalReference").isString().notEmpty(),
+  body("lines.*.amount").isInt({ gt: 0 }),
+  body("lines.*.memberId").optional().isString(),
+  body("lines.*.notes").optional().isString(),
+];
+
+export const reconciliationAutoMatchRules = [
+  body("clearingAccountCode")
+    .optional()
+    .isIn(["1210", "1220", "1230", "1240", "1250", "all"]),
+  body("apply").optional().isBoolean(),
+];
+
 export const reconciliationMatchRules = [
   body("recordId").isString().notEmpty(),
   body("matchedGlDocNo").isString().notEmpty(),
