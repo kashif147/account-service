@@ -3,6 +3,7 @@ import {
   CREDIT_NOTE_TEMPLATE_FILTER_KEYS,
   FILTER_OPERATOR,
   FINANCE_TEMPLATE_TYPES,
+  JOURNAL_ADJUSTMENT_TEMPLATE_FILTER_KEYS,
 } from "../constants/gridTemplateEnums.js";
 
 const VALID_OPERATORS = new Set(Object.values(FILTER_OPERATOR));
@@ -19,14 +20,19 @@ function validateFilterEntry(key, entry) {
   }
 }
 
+function allowedKeysForType(type) {
+  if (type === "creditnotes") return CREDIT_NOTE_TEMPLATE_FILTER_KEYS;
+  if (type === "journaladjustments") return JOURNAL_ADJUSTMENT_TEMPLATE_FILTER_KEYS;
+  return null;
+}
+
 function validateFiltersForType(templateType, filters = {}) {
   if (!filters || typeof filters !== "object") {
     throw AppError.badRequest("filters must be an object");
   }
 
   const type = String(templateType || "creditnotes").trim().toLowerCase();
-  const allowedKeys =
-    type === "creditnotes" ? CREDIT_NOTE_TEMPLATE_FILTER_KEYS : null;
+  const allowedKeys = allowedKeysForType(type);
 
   for (const [key, entry] of Object.entries(filters)) {
     if (allowedKeys && !allowedKeys.includes(key)) {
