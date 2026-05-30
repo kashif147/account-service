@@ -396,6 +396,7 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
   let joinDate = null;
   let renewalDate = null;
   let billingCycle = null;
+  let paymentMethod = null;
 
   if (memberId) {
     const approved = approvedByMember.get(String(memberId));
@@ -412,11 +413,11 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
     normalizedEmail = profile?.normalizedEmail || pickPreferredEmail(profile?.contactInfo);
     mobileNumber = profile?.contactInfo?.mobileNumber || null;
     membershipCategory = sub?.membershipCategory || null;
-    membershipStatus =
-      sub?.subscriptionStatus || profile?.additionalInformation?.membershipStatus || null;
+    membershipStatus = sub?.subscriptionStatus || null;
     joinDate = safeDate(sub?.startDate);
     renewalDate = safeDate(sub?.endDate);
     billingCycle = sub?.paymentFrequency || null;
+    paymentMethod = sub?.paymentType || null;
   } else if (applicationId) {
     const appId = String(applicationId);
     const application = pendingByApp.get(appId);
@@ -433,10 +434,11 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
     normalizedEmail = personal?.normalizedEmail || pickPreferredEmail(personal?.contactInfo);
     mobileNumber = personal?.contactInfo?.mobileNumber || null;
     membershipCategory = subscription?.membershipCategory || professional?.membershipCategory || null;
-    membershipStatus = subscription?.membershipStatus || application?.applicationStatus || null;
+    membershipStatus = null;
     joinDate = safeDate(subscription?.dateJoined);
     renewalDate = safeDate(subscription?.dateLeft);
     billingCycle = subscription?.paymentFrequency || null;
+    paymentMethod = subscription?.paymentType || null;
 
     const resolvedMembershipNumber =
       application?.membershipNumber ||
@@ -478,6 +480,7 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
     joinDate,
     renewalDate,
     billingCycle,
+    paymentMethod,
   };
 }
 

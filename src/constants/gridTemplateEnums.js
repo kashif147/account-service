@@ -4,6 +4,14 @@ export const FILTER_OPERATOR = {
   BETWEEN: "between",
   WITHIN: "within",
   MORE_THAN: "more_than",
+  LESS_THAN: "less_than",
+  GREATER_THAN: "greater_than",
+  LESS_THAN_OR_EQUAL: "less_than_or_equal",
+  GREATER_THAN_OR_EQUAL: "greater_than_or_equal",
+  CONTAINS: "contains",
+  NOT_CONTAINS: "not_contains",
+  STARTS_WITH: "starts_with",
+  ENDS_WITH: "ends_with",
 };
 
 export const CREDIT_NOTE_FILTER_FIELD_MAP = {
@@ -13,6 +21,9 @@ export const CREDIT_NOTE_FILTER_FIELD_MAP = {
   invoiceDocNo: "invoiceDocNo",
   effectiveDate: "effectiveDate",
   createdAt: "createdAt",
+  amount: "amount",
+  reason: "reason",
+  createdBy: "createdBy",
 };
 
 export const CREDIT_NOTE_TEMPLATE_FILTER_KEYS = Object.keys(
@@ -48,6 +59,7 @@ export const ONLINE_PAYMENT_FILTER_FIELD_MAP = {
   renewalDate: "renewalDate",
   date: "date",
   joinDate: "joinDate",
+  paidAmount: "paidAmount",
 };
 
 export const ONLINE_PAYMENT_TEMPLATE_FILTER_KEYS = Object.keys(
