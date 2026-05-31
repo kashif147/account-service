@@ -3,8 +3,12 @@ import {
   CREDIT_NOTE_TEMPLATE_FILTER_KEYS,
   FILTER_OPERATOR,
   FINANCE_TEMPLATE_TYPES,
+  GENERAL_LEDGER_TEMPLATE_FILTER_KEYS,
   JOURNAL_ADJUSTMENT_TEMPLATE_FILTER_KEYS,
   ONLINE_PAYMENT_TEMPLATE_FILTER_KEYS,
+  RECONCILIATION_TEMPLATE_FILTER_KEYS,
+  REFUNDS_TEMPLATE_FILTER_KEYS,
+  WRITE_OFFS_TEMPLATE_FILTER_KEYS,
 } from "../constants/gridTemplateEnums.js";
 
 const VALID_OPERATORS = new Set(Object.values(FILTER_OPERATOR));
@@ -25,6 +29,10 @@ function allowedKeysForType(type) {
   if (type === "creditnotes") return CREDIT_NOTE_TEMPLATE_FILTER_KEYS;
   if (type === "journaladjustments") return JOURNAL_ADJUSTMENT_TEMPLATE_FILTER_KEYS;
   if (type === "onlinepayment") return ONLINE_PAYMENT_TEMPLATE_FILTER_KEYS;
+  if (type === "refunds") return REFUNDS_TEMPLATE_FILTER_KEYS;
+  if (type === "writeoffs") return WRITE_OFFS_TEMPLATE_FILTER_KEYS;
+  if (type === "generalledger") return GENERAL_LEDGER_TEMPLATE_FILTER_KEYS;
+  if (type === "reconciliation") return RECONCILIATION_TEMPLATE_FILTER_KEYS;
   return null;
 }
 
