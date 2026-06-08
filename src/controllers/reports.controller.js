@@ -29,6 +29,7 @@ import {
 } from "../helpers/memberLastPayment.js";
 import { buildGeneralLedgerList } from "../helpers/generalLedgerList.helper.js";
 import { buildMemberFacingGlQuery } from "../helpers/memberIdentityResolver.js";
+import { computeMemberBalanceFromGl } from "../helpers/memberCreditorBalance.helper.js";
 
 /** Portal members (gateway x-user-type MEMBER / PORTAL) — not CRM. */
 function isPortalMemberStatementCaller(req) {
@@ -447,12 +448,18 @@ async function membersBalancesAsOf(endISO) {
     if (r.accountCode === "1400") byMember[r.memberId].ar1400 = r.amount;
     if (r.accountCode === "2020") byMember[r.memberId].poa2020 = r.amount;
   }
-  return Object.entries(byMember).map(([memberId, v]) => ({
-    memberId,
-    ar1400: v.ar1400, // Return in cents
-    poa2020: v.poa2020, // Return in cents
-    net: v.ar1400 - v.poa2020, // Return in cents
-  }));
+  return Object.entries(byMember).map(([memberId, v]) => {
+    const { net } = computeMemberBalanceFromGl({
+      ar1400: v.ar1400,
+      poa2020: v.poa2020,
+    });
+    return {
+      memberId,
+      ar1400: v.ar1400,
+      poa2020: v.poa2020,
+      net,
+    };
+  });
 }
 
 // Clearing accounts reconciliation for a month (1210–1250)

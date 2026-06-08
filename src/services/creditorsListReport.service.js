@@ -1,4 +1,5 @@
 import GL from "../models/glTransaction.model.js";
+import { computeMemberBalanceFromGl } from "../helpers/memberCreditorBalance.helper.js";
 
 function isMemberKey(memberId) {
   const mid = String(memberId || "").trim();
@@ -68,9 +69,9 @@ export function resolveMonthYearAsOfEnd(year, month) {
 }
 
 /**
- * GL balances on member AR (1400) and payment-on-account (2020) as at endDate.
- * amount = debit − credit per account; net = ar1400 − poa2020.
- * Creditor when net < 0 (organisation owes member).
+ * GL balances on member AR (1400) and POA (2020) as at endDate.
+ * Signed amount = debits − credits per account; combined net = ar1400 + poa2020.
+ * Creditor when net < 0 (organisation liability / member credit per Irish POA treatment).
  */
 async function memberBalancesAsOfGl(endDate) {
   const rows = await GL.aggregate([
@@ -122,13 +123,16 @@ async function memberBalancesAsOfGl(endDate) {
   }
 
   return [...byMember.entries()].map(([memberId, v]) => {
-    const net = v.ar1400 - v.poa2020;
+    const { net, amountCents } = computeMemberBalanceFromGl({
+      ar1400: v.ar1400,
+      poa2020: v.poa2020,
+    });
     return {
       memberId,
       ar1400: v.ar1400,
       poa2020: v.poa2020,
       net,
-      amountCents: net < 0 ? -net : 0,
+      amountCents,
     };
   });
 }
