@@ -12,7 +12,9 @@ import {
   memberCreditNotes,
   refundsList,
   generalLedgerTransactions,
+  creditorsList,
 } from "../controllers/reports.controller.js";
+import { glJournalReplicationFeed } from "../services/glJournalReplication.service.js";
 import { memberLedgerActions } from "../controllers/ledgerActions.controller.js";
 import {
   monthEndRules,
@@ -79,6 +81,20 @@ router.post(
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberSummaryBatch
+);
+
+router.post(
+  "/creditors-list",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  creditorsList
+);
+
+router.post(
+  "/gl-journal-replication",
+  ensureAuthenticated,
+  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  glJournalReplicationFeed
 );
 
 router.get(

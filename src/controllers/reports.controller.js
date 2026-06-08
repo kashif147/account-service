@@ -18,6 +18,7 @@ import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { computeMemberFinanceSummary } from "../services/memberFinanceSummary.service.js";
+import { listCreditorsAsOf } from "../services/creditorsListReport.service.js";
 import { listCreditNotes } from "../services/creditNote.service.js";
 import pLimit from "p-limit";
 import {
@@ -673,6 +674,28 @@ export async function memberSummary(req, res, next) {
  * POST /api/reports/members/summary-batch
  * Body: { memberIds: string[], year?: number, scope?: "all"|"current" }
  */
+export async function creditorsList(req, res, next) {
+  try {
+    const { asOf, year, month, dateFrom, dateTo, offset, limit } =
+      req.body || {};
+    const data = await listCreditorsAsOf({
+      asOf,
+      year,
+      month,
+      dateFrom,
+      dateTo,
+      offset,
+      limit,
+    });
+    res.success(data);
+  } catch (e) {
+    if (e.message?.includes("required") || e.message?.includes("Invalid") || e.message?.includes("must be")) {
+      return next(AppError.badRequest(e.message));
+    }
+    next(e);
+  }
+}
+
 export async function memberSummaryBatch(req, res, next) {
   try {
     const tenantId = req.tenantId || req.ctx?.tenantId;
