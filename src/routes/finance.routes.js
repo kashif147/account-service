@@ -31,6 +31,7 @@ import {
   suspenseHandler,
   settleReconciliationHandler,
 } from "../controllers/reconciliation.controller.js";
+import { profileMergeReassignHandler } from "../controllers/profileMerge.controller.js";
 
 const router = express.Router();
 
@@ -130,6 +131,13 @@ router.post(
   ensureAuthenticated,
   requireFinanceWrite,
   settleReconciliationHandler,
+);
+
+router.post(
+  "/internal/profile-merge",
+  ensureAuthenticated,
+  requireFinanceWrite,
+  profileMergeReassignHandler,
 );
 
 export default router;
