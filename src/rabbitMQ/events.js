@@ -26,6 +26,9 @@ export async function initEventSystem() {
       prefetch: 10,
       connectionName: "account-service",
       serviceName: "account-service",
+      exchanges: [
+        { name: "finance.events", type: "topic", options: { durable: true } },
+      ],
     });
     logger.info("Event system initialized with middleware");
   } catch (error) {

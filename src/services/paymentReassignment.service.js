@@ -2,6 +2,11 @@ import GL from "../models/glTransaction.model.js";
 import Payment from "../models/payment.model.js";
 import { AppError } from "../errors/AppError.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
+import {
+  inferPaymentMethodFromLines,
+  buildFinanceAuditSnapshot,
+} from "../helpers/financeAuditActions.js";
+import { publishFinanceAudit } from "./finance.audit.publisher.js";
 import { buildMemberReceiptCreditEntries } from "../helpers/paymentReceiptAllocation.js";
 import { memberPaymentCreditCents } from "../helpers/memberLastPayment.js";
 import { reverseMemberReceipt } from "./memberCreditOperations.service.js";
@@ -85,6 +90,7 @@ async function reverseMemberClaim({
     reference: docNo,
     memo: memo || `Reverse claim ${docNo}`,
     lines,
+    operation: "reverse_claim",
     adjSubType: "claim-reversal",
   });
 }
@@ -145,6 +151,8 @@ async function postReassignedReceipt({
     reference: originalDocNo,
     memo,
     lines,
+    operation: "payment_reassignment",
+    paymentMethod: inferPaymentMethodFromLines(lines),
     ...(settlement && leg === "move" ? { settlement } : {}),
   });
 
@@ -215,6 +223,7 @@ async function postReassignedClaim({
     reference: originalDocNo,
     memo,
     lines,
+    operation: "payment_reassignment",
     ...(leg === "move"
       ? {
           sourceApplicationId: applicationId,
@@ -428,6 +437,48 @@ export async function reassignSinglePayment({
     !isPartial && docType === "Receipt"
       ? await syncPaymentMemberFromReceiptDoc(docNo, toMid, tenantId)
       : { updated: false };
+
+  if (tenantId) {
+    await publishFinanceAudit({
+      action: "PAYMENT_REASSIGNED",
+      tenantId,
+      memberId: fromMid,
+      actorId: userId,
+      after: buildFinanceAuditSnapshot({
+        docNo,
+        docType,
+        memberId: fromMid,
+        amountCents: moveCents,
+        reason: memo,
+        extra: {
+          fromMemberId: fromMid,
+          toMemberId: toMid,
+          reversalDocNo: reversal?.docNo || reversalDocNo,
+          reassignedDocNo: repostTo.docNo,
+          isPartial,
+        },
+      }),
+    });
+    await publishFinanceAudit({
+      action: "PAYMENT_REASSIGNED",
+      tenantId,
+      memberId: toMid,
+      actorId: userId,
+      after: buildFinanceAuditSnapshot({
+        docNo: repostTo.docNo,
+        docType,
+        memberId: toMid,
+        amountCents: moveCents,
+        reason: memo,
+        extra: {
+          fromMemberId: fromMid,
+          toMemberId: toMid,
+          originalDocNo: docNo,
+          isPartial,
+        },
+      }),
+    });
+  }
 
   return {
     originalDocNo: docNo,

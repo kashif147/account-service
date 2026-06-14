@@ -25,6 +25,12 @@ import { randomUUID } from "crypto";
 import { enrichStripePaymentItems } from "../services/stripe.payment.enrichment.service.js";
 import { attachTxTypesToLedgerItems } from "../helpers/glTransactionTxType.js";
 import { buildMemberReceiptCreditEntries } from "../helpers/paymentReceiptAllocation.js";
+import {
+  buildFinanceAuditSnapshot,
+  inferPaymentMethodFromLines,
+  paymentMethodFromBatchType,
+  resolveJournalAuditAction,
+} from "../helpers/financeAuditActions.js";
 
 // Amounts are stored as integer cents - sum them as integers
 function sumArray(arr, sel) {
@@ -290,6 +296,12 @@ export async function postBalancedJournal({
   claimMemberId,
   userId,
   tenantId,
+  profileId,
+  operation,
+  paymentMethod,
+  batchType,
+  batchName,
+  batchDetailId,
 }) {
   // Wrap entire function in global DB limiter
   // This ensures all journal operations share the same resource pool
@@ -385,6 +397,43 @@ export async function postBalancedJournal({
         ? String(tenantId).trim()
         : undefined;
 
+    const resolvedProfileId =
+      profileId != null && String(profileId).trim()
+        ? String(profileId).trim()
+        : undefined;
+
+    const adjSubType = (lines || []).find((l) => l?.adjSubType)?.adjSubType;
+    const resolvedPaymentMethod =
+      paymentMethod ||
+      (batchType ? paymentMethodFromBatchType(batchType) : null) ||
+      inferPaymentMethodFromLines(lines || txn.entries);
+
+    const auditAction = resolveJournalAuditAction({
+      docType: txn.docType,
+      operation,
+      paymentMethod: resolvedPaymentMethod,
+      adjSubType,
+      settlement: txn.settlement,
+    });
+
+    const financeSnapshot = buildFinanceAuditSnapshot({
+      docNo: txn.docNo,
+      docType: txn.docType,
+      date: txn.date,
+      reference: txn.reference,
+      memo: txn.memo,
+      memberId: memberId || undefined,
+      profileId: resolvedProfileId,
+      paymentMethod: resolvedPaymentMethod,
+      operation: operation || "postBalancedJournal",
+      totalDebit: deb,
+      totalCredit: cre,
+      settlement: txn.settlement,
+      batchType,
+      batchName,
+      batchDetailId,
+    });
+
     // Publish journal created event
     await publishDomainEvent(
       EVENT_TYPES.JOURNAL_CREATED,
@@ -398,14 +447,21 @@ export async function postBalancedJournal({
         sourceApplicationId: txn.sourceApplicationId,
         claimMemberId: txn.claimMemberId,
         memberId: memberId || undefined,
+        profileId: resolvedProfileId,
         tenantId: resolvedTenantId,
+        createdBy: userId != null ? String(userId) : undefined,
+        action: auditAction,
+        paymentMethod: resolvedPaymentMethod,
+        operation: operation || "postBalancedJournal",
         entries: txn.entries,
         totalDebit: deb,
         totalCredit: cre,
+        financeSnapshot,
       },
       {
         source: "journal.controller",
-        operation: "postBalancedJournal",
+        operation: operation || "postBalancedJournal",
+        action: auditAction,
         ...(resolvedTenantId ? { tenantId: resolvedTenantId } : {}),
       }
     );
@@ -803,6 +859,7 @@ export async function receipt(req, res, next) {
       memo,
       lines,
       settlement,
+      paymentMethod: inferPaymentMethodFromLines(lines),
     });
     res.status(201).json(out);
   } catch (e) {
@@ -879,10 +936,14 @@ export async function runProcessDeductionBatchPayments(
       const txn = await postBalancedJournal({
         date,
         userId,
+        profileId: row?.profileId ? String(row.profileId) : undefined,
         docType: "Receipt",
         docNo: `test-${randomUUID()}`,
         memo: "test",
         lines,
+        operation: "batch_payment",
+        paymentMethod: "salary_deduction",
+        batchType: "deduction",
         settlement,
       });
       results.push({
@@ -945,6 +1006,10 @@ export async function runProcessBatchPayments(
     options?.tenantId != null && String(options.tenantId).trim() !== ""
       ? String(options.tenantId).trim()
       : undefined;
+  const batchDetailId =
+    options?.batchDetailId != null && String(options.batchDetailId).trim() !== ""
+      ? String(options.batchDetailId).trim()
+      : undefined;
 
   if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
     throw AppError.badRequest("batchPayments array is required and must not be empty", {
@@ -1002,10 +1067,16 @@ export async function runProcessBatchPayments(
         date,
         userId,
         tenantId,
+        profileId: row?.profileId ? String(row.profileId) : undefined,
         docType: "Receipt",
         docNo: `batch-${randomUUID()}`,
         memo: memoParts.join(" | "),
         lines,
+        operation: "batch_payment",
+        paymentMethod: paymentMethodFromBatchType(batchType),
+        batchType,
+        batchName: batchName || undefined,
+        batchDetailId,
         settlement: {
           provider: "batch",
           status: "PENDING",

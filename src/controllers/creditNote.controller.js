@@ -30,6 +30,8 @@ export const createCreditNote = asyncHandler(async (req, res) => {
     notes,
     effectiveDate: date,
     createdBy: req.ctx?.userId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    profileId: req.body?.profileId,
   });
 
   res.created({
@@ -44,6 +46,8 @@ export const approveCreditNoteHandler = asyncHandler(async (req, res) => {
     docNo,
     approvedBy: req.ctx?.userId,
     userId: req.ctx?.userId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    profileId: req.body?.profileId,
   });
   res.success(result);
 });
@@ -53,6 +57,8 @@ export const cancelCreditNoteHandler = asyncHandler(async (req, res) => {
   const cn = await cancelCreditNote({
     docNo,
     cancelledBy: req.ctx?.userId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    profileId: req.body?.profileId,
   });
   res.success(cn);
 });

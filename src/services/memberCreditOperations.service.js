@@ -44,6 +44,7 @@ export async function applyMemberCreditToInvoices({
     docNo,
     memo: memo || `Apply member credit (${mid})`,
     lines,
+    operation: "apply_member_credit",
     adjSubType: "apply-member-credit",
   });
 
@@ -124,6 +125,7 @@ export async function reverseMemberReceipt({
     reference: docNo,
     memo: memo || `Reverse receipt ${docNo}`,
     lines,
+    operation: "reverse_receipt",
     adjSubType: "receipt-reversal",
   });
 

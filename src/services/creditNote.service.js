@@ -3,6 +3,8 @@ import GL from "../models/glTransaction.model.js";
 import { AppError } from "../errors/AppError.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
 import MaterializedBalance from "../models/materializedBalance.model.js";
+import { publishFinanceAudit } from "./finance.audit.publisher.js";
+import { buildFinanceAuditSnapshot } from "../helpers/financeAuditActions.js";
 
 const INCOME_CODE_RE = /^40\d{2}$/;
 
@@ -184,6 +186,8 @@ export async function createCreditNoteDraft({
   notes,
   effectiveDate,
   createdBy,
+  tenantId,
+  profileId,
 }) {
   if (!Number.isInteger(amount) || amount <= 0) {
     throw AppError.badRequest("amount must be a positive integer (cents)");
@@ -215,10 +219,35 @@ export async function createCreditNoteDraft({
     createdBy,
   });
 
+  if (tenantId) {
+    await publishFinanceAudit({
+      action: "CREDIT_NOTE_DRAFT_CREATED",
+      tenantId,
+      profileId,
+      memberId,
+      actorId: createdBy,
+      after: buildFinanceAuditSnapshot({
+        docNo,
+        memberId,
+        profileId,
+        invoiceDocNo,
+        amountCents: amount,
+        reason,
+        status: "Draft",
+      }),
+    });
+  }
+
   return { creditNote: cn.toObject(), isAdjustmentLine };
 }
 
-export async function approveCreditNote({ docNo, approvedBy, userId }) {
+export async function approveCreditNote({
+  docNo,
+  approvedBy,
+  userId,
+  tenantId,
+  profileId,
+}) {
   const cn = await CreditNote.findOne({ docNo });
   if (!cn) throw AppError.notFound(`Credit note ${docNo} not found`);
   if (cn.status === "Approved") {
@@ -254,10 +283,13 @@ export async function approveCreditNote({ docNo, approvedBy, userId }) {
   const gl = await postBalancedJournal({
     date: cn.effectiveDate,
     userId,
+    tenantId,
+    profileId: profileId || undefined,
     docType: "CreditNote",
     docNo: glDocNo,
     reference: cn.invoiceDocNo,
     memo: cn.reason || `Credit note – ${cn.categoryName || cn.invoiceDocNo}`,
+    operation: "credit_note_approve",
     lines: [
       revenueLine,
       {
@@ -298,6 +330,30 @@ export async function approveCreditNote({ docNo, approvedBy, userId }) {
   cn.transferGlDocNo = transferGlDocNo;
   await cn.save();
 
+  if (tenantId) {
+    await publishFinanceAudit({
+      action: "CREDIT_NOTE_APPROVED",
+      tenantId,
+      profileId,
+      memberId: cn.memberId,
+      actorId: approvedBy || userId,
+      before: buildFinanceAuditSnapshot({
+        docNo: cn.docNo,
+        status: "Draft",
+        amountCents: cn.amount,
+      }),
+      after: buildFinanceAuditSnapshot({
+        docNo: cn.docNo,
+        glDocNo,
+        status: "Approved",
+        amountCents: cn.amount,
+        invoiceDocNo: cn.invoiceDocNo,
+        memberId: cn.memberId,
+        profileId,
+      }),
+    });
+  }
+
   return {
     creditNote: cn.toObject(),
     gl,
@@ -305,7 +361,12 @@ export async function approveCreditNote({ docNo, approvedBy, userId }) {
   };
 }
 
-export async function cancelCreditNote({ docNo, cancelledBy }) {
+export async function cancelCreditNote({
+  docNo,
+  cancelledBy,
+  tenantId,
+  profileId,
+}) {
   const cn = await CreditNote.findOne({ docNo });
   if (!cn) throw AppError.notFound(`Credit note ${docNo} not found`);
   if (cn.status === "Approved") {
@@ -320,6 +381,29 @@ export async function cancelCreditNote({ docNo, cancelledBy }) {
   cn.cancelledBy = cancelledBy;
   cn.cancelledAt = new Date();
   await cn.save();
+
+  if (tenantId) {
+    await publishFinanceAudit({
+      action: "CREDIT_NOTE_CANCELLED",
+      tenantId,
+      profileId,
+      memberId: cn.memberId,
+      actorId: cancelledBy,
+      before: buildFinanceAuditSnapshot({
+        docNo: cn.docNo,
+        status: "Draft",
+        amountCents: cn.amount,
+      }),
+      after: buildFinanceAuditSnapshot({
+        docNo: cn.docNo,
+        status: "Cancelled",
+        amountCents: cn.amount,
+        memberId: cn.memberId,
+        profileId,
+      }),
+    });
+  }
+
   return cn.toObject();
 }
 

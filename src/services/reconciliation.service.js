@@ -7,8 +7,49 @@ import {
   enrichReconciliationRecords,
   findGlMatchForBankLine,
 } from "../helpers/reconciliationEnrichment.js";
+import { publishFinanceAudit } from "./finance.audit.publisher.js";
+import { buildFinanceAuditSnapshot } from "../helpers/financeAuditActions.js";
 
 const CLEARING_CODES = ["1210", "1220", "1230", "1240", "1250"];
+
+async function auditReconciliationChange({
+  action,
+  rec,
+  tenantId,
+  actorId,
+  extra = {},
+}) {
+  if (!tenantId || !rec) return;
+  let memberId = null;
+  if (rec.glDocNo) {
+    const gl = await GL.findOne({ docNo: rec.glDocNo })
+      .select({ entries: 1, claimMemberId: 1 })
+      .lean();
+    memberId =
+      gl?.claimMemberId ||
+      (gl?.entries || []).find((e) => e.memberId)?.memberId ||
+      null;
+  }
+  await publishFinanceAudit({
+    action,
+    tenantId,
+    memberId: memberId ? String(memberId) : undefined,
+    actorId,
+    after: buildFinanceAuditSnapshot({
+      docNo: rec.glDocNo,
+      memberId: memberId ? String(memberId) : undefined,
+      amountCents: rec.amount,
+      status: rec.reconciliationStatus,
+      extra: {
+        recordId: String(rec._id),
+        clearingAccountCode: rec.clearingAccountCode,
+        matchedGlDocNo: rec.matchedGlDocNo,
+        suspenseReason: rec.suspenseReason,
+        ...extra,
+      },
+    }),
+  });
+}
 
 function normalizeClearingFilter(clearingAccountCode) {
   const code = String(clearingAccountCode || "").trim();
@@ -238,6 +279,7 @@ export async function manualMatchReconciliation({
   recordId,
   matchedGlDocNo,
   matchedBy,
+  tenantId,
 }) {
   const rec = await ReconciliationRecord.findById(recordId);
   if (!rec) throw AppError.notFound("Reconciliation record not found");
@@ -246,10 +288,24 @@ export async function manualMatchReconciliation({
   rec.matchedGlDocNo = matchedGlDocNo;
   rec.matchedBy = matchedBy;
   await rec.save();
+
+  await auditReconciliationChange({
+    action: "RECONCILIATION_MANUAL_MATCHED",
+    rec,
+    tenantId,
+    actorId: matchedBy,
+    extra: { matchedGlDocNo },
+  });
+
   return rec.toObject();
 }
 
-export async function moveToSuspense({ recordId, suspenseReason, matchedBy }) {
+export async function moveToSuspense({
+  recordId,
+  suspenseReason,
+  matchedBy,
+  tenantId,
+}) {
   const rec = await ReconciliationRecord.findById(recordId);
   if (!rec) throw AppError.notFound("Reconciliation record not found");
 
@@ -257,10 +313,19 @@ export async function moveToSuspense({ recordId, suspenseReason, matchedBy }) {
   rec.suspenseReason = suspenseReason;
   rec.matchedBy = matchedBy;
   await rec.save();
+
+  await auditReconciliationChange({
+    action: "RECONCILIATION_MOVED_TO_SUSPENSE",
+    rec,
+    tenantId,
+    actorId: matchedBy,
+    extra: { suspenseReason },
+  });
+
   return rec.toObject();
 }
 
-export async function markReconciliationSettled({ recordId }) {
+export async function markReconciliationSettled({ recordId, tenantId, actorId }) {
   const rec = await ReconciliationRecord.findById(recordId);
   if (!rec) throw AppError.notFound("Reconciliation record not found");
 
@@ -280,6 +345,13 @@ export async function markReconciliationSettled({ recordId }) {
       },
     );
   }
+
+  await auditReconciliationChange({
+    action: "RECONCILIATION_SETTLED",
+    rec,
+    tenantId,
+    actorId,
+  });
 
   return rec.toObject();
 }

@@ -62,6 +62,7 @@ export const manualMatchHandler = asyncHandler(async (req, res) => {
     recordId,
     matchedGlDocNo,
     matchedBy: req.ctx?.userId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
   });
   res.success(rec);
 });
@@ -72,6 +73,7 @@ export const suspenseHandler = asyncHandler(async (req, res) => {
     recordId,
     suspenseReason,
     matchedBy: req.ctx?.userId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
   });
   res.success(rec);
 });
@@ -79,6 +81,8 @@ export const suspenseHandler = asyncHandler(async (req, res) => {
 export const settleReconciliationHandler = asyncHandler(async (req, res) => {
   const rec = await markReconciliationSettled({
     recordId: req.params.recordId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    actorId: req.ctx?.userId,
   });
   res.success(rec);
 });

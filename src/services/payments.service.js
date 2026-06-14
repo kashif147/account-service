@@ -1662,6 +1662,7 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
     reference,
     memo,
     lines,
+    operation: "refund_posted",
   });
 }
 
@@ -1809,11 +1810,14 @@ export async function postJournalForPayment(payment, ctx) {
     date,
     userId: journalCtx?.userId,
     tenantId: journalCtx?.tenantId,
+    profileId: payment?.profileId || undefined,
     docType: "Receipt",
     docNo,
     memo,
     lines,
     settlement,
+    operation: "online_payment_receipt",
+    paymentMethod: "online_payment",
   });
 
   return journal;

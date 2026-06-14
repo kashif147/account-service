@@ -2,6 +2,8 @@ import BatchDetail from "../models/batch.detail.model.js";
 import { runProcessBatchPayments } from "../controllers/journal.controller.js";
 import logger from "../config/logger.js";
 import { publisher } from "../rabbitMQ/index.js";
+import { publishFinanceAudit } from "./finance.audit.publisher.js";
+import { buildFinanceAuditSnapshot } from "../helpers/financeAuditActions.js";
 
 const PROCESS_BATCH_CHUNK_SIZE =
   parseInt(process.env.PROCESS_BATCH_CHUNK_SIZE, 10) || 250;
@@ -185,6 +187,8 @@ export async function runBatchProcessing(
             batchName: batch.description || "",
             referenceNumber: batch.referenceNumber || "",
             tenantId: tenantId || batch.tenantId || undefined,
+            userId: batch.createdBy || batch.queuedBy || undefined,
+            batchDetailId: String(batchDetailId),
           }
         );
       } catch (err) {
@@ -269,6 +273,27 @@ export async function runBatchProcessing(
         totalTransactions,
       },
     });
+
+    const resolvedTenantId = tenantId || batch.tenantId || null;
+    if (resolvedTenantId) {
+      await publishFinanceAudit({
+        action: "BATCH_PROCESS_COMPLETED",
+        tenantId: resolvedTenantId,
+        actorId: batch.createdBy || batch.queuedBy,
+        after: buildFinanceAuditSnapshot({
+          batchDetailId: String(batchDetailId),
+          batchName: batch.description || "",
+          batchType: batch.batchType,
+          status: "processed",
+          extra: {
+            processedTransactions: totalProcessed,
+            failedTransactions: totalFailed,
+            totalTransactions,
+            referenceNumber: batch.referenceNumber || "",
+          },
+        }),
+      });
+    }
 
     return {
       success: true,

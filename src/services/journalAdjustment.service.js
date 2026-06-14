@@ -1,6 +1,8 @@
 import JournalAdjustment from "../models/journalAdjustment.model.js";
 import { AppError } from "../errors/AppError.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
+import { publishFinanceAudit } from "./finance.audit.publisher.js";
+import { buildFinanceAuditSnapshot } from "../helpers/financeAuditActions.js";
 
 export async function createJournalAdjustmentDraft({
   docNo,
@@ -15,6 +17,7 @@ export async function createJournalAdjustmentDraft({
   financialPeriod,
   effectiveDate,
   createdBy,
+  tenantId,
 }) {
   if (!Number.isInteger(amount) || amount <= 0) {
     throw AppError.badRequest("amount must be a positive integer (cents)");
@@ -42,10 +45,34 @@ export async function createJournalAdjustmentDraft({
     createdBy,
   });
 
+  if (tenantId) {
+    await publishFinanceAudit({
+      action: "JOURNAL_ADJUSTMENT_DRAFT_CREATED",
+      tenantId,
+      profileId: memberProfileId,
+      memberId,
+      actorId: createdBy,
+      after: buildFinanceAuditSnapshot({
+        docNo,
+        memberId,
+        profileId: memberProfileId,
+        amountCents: amount,
+        reason,
+        status: "Draft",
+        extra: { debitAccount, creditAccount },
+      }),
+    });
+  }
+
   return adj.toObject();
 }
 
-export async function approveJournalAdjustment({ docNo, approvedBy, userId }) {
+export async function approveJournalAdjustment({
+  docNo,
+  approvedBy,
+  userId,
+  tenantId,
+}) {
   const adj = await JournalAdjustment.findOne({ docNo });
   if (!adj) throw AppError.notFound(`Journal adjustment ${docNo} not found`);
   if (adj.approvalStatus === "Approved") {
@@ -75,9 +102,12 @@ export async function approveJournalAdjustment({ docNo, approvedBy, userId }) {
   const gl = await postBalancedJournal({
     date: adj.effectiveDate,
     userId,
+    tenantId,
+    profileId: adj.memberProfileId || undefined,
     docType: "Adjustment",
     docNo: glDocNo,
     memo: `Journal adjustment – ${adj.reason}`,
+    operation: "journal_adjustment_approve",
     lines,
   });
 
@@ -85,6 +115,34 @@ export async function approveJournalAdjustment({ docNo, approvedBy, userId }) {
   adj.approvedBy = approvedBy;
   adj.glDocNo = glDocNo;
   await adj.save();
+
+  if (tenantId) {
+    await publishFinanceAudit({
+      action: "JOURNAL_ADJUSTMENT_APPROVED",
+      tenantId,
+      profileId: adj.memberProfileId,
+      memberId: adj.memberId,
+      actorId: approvedBy || userId,
+      before: buildFinanceAuditSnapshot({
+        docNo: adj.docNo,
+        status: "Draft",
+        amountCents: adj.amount,
+      }),
+      after: buildFinanceAuditSnapshot({
+        docNo: adj.docNo,
+        glDocNo,
+        status: "Approved",
+        amountCents: adj.amount,
+        memberId: adj.memberId,
+        profileId: adj.memberProfileId,
+        reason: adj.reason,
+        extra: {
+          debitAccount: adj.debitAccount,
+          creditAccount: adj.creditAccount,
+        },
+      }),
+    });
+  }
 
   return { adjustment: adj.toObject(), gl };
 }

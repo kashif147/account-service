@@ -33,6 +33,7 @@ export const createJournalAdjustment = asyncHandler(async (req, res) => {
     financialPeriod,
     effectiveDate: date,
     createdBy: req.ctx?.userId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
   });
 
   res.created({
@@ -46,6 +47,7 @@ export const approveJournalAdjustmentHandler = asyncHandler(async (req, res) => 
     docNo: req.params.docNo,
     approvedBy: req.ctx?.userId,
     userId: req.ctx?.userId,
+    tenantId: req.ctx?.tenantId ?? req.tenantId,
   });
   res.success(result);
 });
