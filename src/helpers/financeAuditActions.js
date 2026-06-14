@@ -63,8 +63,8 @@ export function resolveJournalAuditAction({
     return "MEMBER_CREDIT_APPLIED";
   }
   if (op === "batch_payment") return "BATCH_RECEIPT_POSTED";
-  if (op === "credit_note_approve") return "CREDIT_NOTE_POSTED";
-  if (op === "journal_adjustment_approve") return "JOURNAL_ADJUSTMENT_POSTED";
+  if (op === "credit_note_approve") return "CREDIT_NOTE_APPROVED";
+  if (op === "journal_adjustment_approve") return "JOURNAL_ADJUSTMENT_APPROVED";
 
   if (adj.includes("fee-increase")) return "FEE_INCREASE_POSTED";
   if (adj.includes("fee-decrease")) return "FEE_DECREASE_POSTED";

@@ -235,6 +235,7 @@ export async function createCreditNoteDraft({
         reason,
         status: "Draft",
       }),
+      metadata: { dedupeKey: `credit-note-draft:${docNo}` },
     });
   }
 
@@ -330,30 +331,6 @@ export async function approveCreditNote({
   cn.transferGlDocNo = transferGlDocNo;
   await cn.save();
 
-  if (tenantId) {
-    await publishFinanceAudit({
-      action: "CREDIT_NOTE_APPROVED",
-      tenantId,
-      profileId,
-      memberId: cn.memberId,
-      actorId: approvedBy || userId,
-      before: buildFinanceAuditSnapshot({
-        docNo: cn.docNo,
-        status: "Draft",
-        amountCents: cn.amount,
-      }),
-      after: buildFinanceAuditSnapshot({
-        docNo: cn.docNo,
-        glDocNo,
-        status: "Approved",
-        amountCents: cn.amount,
-        invoiceDocNo: cn.invoiceDocNo,
-        memberId: cn.memberId,
-        profileId,
-      }),
-    });
-  }
-
   return {
     creditNote: cn.toObject(),
     gl,
@@ -401,6 +378,7 @@ export async function cancelCreditNote({
         memberId: cn.memberId,
         profileId,
       }),
+      metadata: { dedupeKey: `credit-note-cancel:${docNo}`, changedFields: ["status"] },
     });
   }
 

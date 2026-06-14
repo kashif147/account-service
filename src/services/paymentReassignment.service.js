@@ -2,11 +2,7 @@ import GL from "../models/glTransaction.model.js";
 import Payment from "../models/payment.model.js";
 import { AppError } from "../errors/AppError.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
-import {
-  inferPaymentMethodFromLines,
-  buildFinanceAuditSnapshot,
-} from "../helpers/financeAuditActions.js";
-import { publishFinanceAudit } from "./finance.audit.publisher.js";
+import { inferPaymentMethodFromLines } from "../helpers/financeAuditActions.js";
 import { buildMemberReceiptCreditEntries } from "../helpers/paymentReceiptAllocation.js";
 import { memberPaymentCreditCents } from "../helpers/memberLastPayment.js";
 import { reverseMemberReceipt } from "./memberCreditOperations.service.js";
@@ -437,48 +433,6 @@ export async function reassignSinglePayment({
     !isPartial && docType === "Receipt"
       ? await syncPaymentMemberFromReceiptDoc(docNo, toMid, tenantId)
       : { updated: false };
-
-  if (tenantId) {
-    await publishFinanceAudit({
-      action: "PAYMENT_REASSIGNED",
-      tenantId,
-      memberId: fromMid,
-      actorId: userId,
-      after: buildFinanceAuditSnapshot({
-        docNo,
-        docType,
-        memberId: fromMid,
-        amountCents: moveCents,
-        reason: memo,
-        extra: {
-          fromMemberId: fromMid,
-          toMemberId: toMid,
-          reversalDocNo: reversal?.docNo || reversalDocNo,
-          reassignedDocNo: repostTo.docNo,
-          isPartial,
-        },
-      }),
-    });
-    await publishFinanceAudit({
-      action: "PAYMENT_REASSIGNED",
-      tenantId,
-      memberId: toMid,
-      actorId: userId,
-      after: buildFinanceAuditSnapshot({
-        docNo: repostTo.docNo,
-        docType,
-        memberId: toMid,
-        amountCents: moveCents,
-        reason: memo,
-        extra: {
-          fromMemberId: fromMid,
-          toMemberId: toMid,
-          originalDocNo: docNo,
-          isPartial,
-        },
-      }),
-    });
-  }
 
   return {
     originalDocNo: docNo,

@@ -61,6 +61,7 @@ export async function createJournalAdjustmentDraft({
         status: "Draft",
         extra: { debitAccount, creditAccount },
       }),
+      metadata: { dedupeKey: `journal-adjustment-draft:${docNo}` },
     });
   }
 
@@ -115,34 +116,6 @@ export async function approveJournalAdjustment({
   adj.approvedBy = approvedBy;
   adj.glDocNo = glDocNo;
   await adj.save();
-
-  if (tenantId) {
-    await publishFinanceAudit({
-      action: "JOURNAL_ADJUSTMENT_APPROVED",
-      tenantId,
-      profileId: adj.memberProfileId,
-      memberId: adj.memberId,
-      actorId: approvedBy || userId,
-      before: buildFinanceAuditSnapshot({
-        docNo: adj.docNo,
-        status: "Draft",
-        amountCents: adj.amount,
-      }),
-      after: buildFinanceAuditSnapshot({
-        docNo: adj.docNo,
-        glDocNo,
-        status: "Approved",
-        amountCents: adj.amount,
-        memberId: adj.memberId,
-        profileId: adj.memberProfileId,
-        reason: adj.reason,
-        extra: {
-          debitAccount: adj.debitAccount,
-          creditAccount: adj.creditAccount,
-        },
-      }),
-    });
-  }
 
   return { adjustment: adj.toObject(), gl };
 }

@@ -48,6 +48,9 @@ async function auditReconciliationChange({
         ...extra,
       },
     }),
+    metadata: {
+      dedupeKey: `recon:${action}:${String(rec._id)}`,
+    },
   });
 }
 
