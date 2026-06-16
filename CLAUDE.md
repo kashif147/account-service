@@ -82,7 +82,7 @@ Consumed queues and their exchanges:
 | Queue | Exchange | Routing keys |
 |-------|----------|-------------|
 | `accounts.user.events` | `user.events` | `user.crm.created.v1`, `user.crm.updated.v1` |
-| `accounts.application.events` | `application.events` | `applications.review.approved.v1` |
+| `accounts.application.events` | `application.events` | `applications.review.processed.v1` |
 | `accounts.product.events` | `product.events` | `product.*.*.v1`, `pricing.*.v1` |
 | `accounts.membership.events` | `membership.events` | `members.subscription.current.updated.v1` |
 

@@ -168,7 +168,7 @@ export async function setupConsumers() {
     logger.info("Creating application events queue...", {
       queue: APPLICATION_QUEUE,
       exchange: "application.events",
-      routingKeys: ["applications.review.approved.v1"],
+      routingKeys: ["applications.review.processed.v1"],
       prefetch: APPLICATION_PREFETCH,
     });
 
@@ -195,11 +195,11 @@ export async function setupConsumers() {
 
     try {
       await consumer.bindQueue(APPLICATION_QUEUE, "application.events", [
-        "applications.review.approved.v1",
+        "applications.review.processed.v1",
       ]);
 
       consumer.registerHandler(
-        "applications.review.approved.v1",
+        "applications.review.processed.v1",
         async (payload) => {
           await handleApplicationApproved(payload);
         }

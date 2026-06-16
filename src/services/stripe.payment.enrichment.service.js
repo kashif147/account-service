@@ -139,9 +139,9 @@ function subscriptionsListFromPayload(subData) {
   return [];
 }
 
-function isApprovedApplicationStatus(value) {
+function isProcessedApplicationStatus(value) {
   const s = String(value || "").trim().toLowerCase();
-  return s === "approved";
+  return s === "processed";
 }
 
 async function fetchJson(url, req, options = {}) {
@@ -235,9 +235,9 @@ async function loadPendingApplicationMap(applicationIds, req) {
       let resolvedMembershipNumber = null;
       let resolvedProfile = null;
 
-      // Some approved records still come via applicationId and have null membershipNumber.
-      // Resolve through profileId so downstream UI can use membership number for approved members.
-      if (isApprovedApplicationStatus(status) && !hasMembershipNumber) {
+      // Some processed records still come via applicationId and have null membershipNumber.
+      // Resolve through profileId so downstream UI can use membership number for processed members.
+      if (isProcessedApplicationStatus(status) && !hasMembershipNumber) {
         if (!profileId && subscriptionBase) {
           try {
             const subByAppUrl =
@@ -269,7 +269,7 @@ async function loadPendingApplicationMap(applicationIds, req) {
             resolvedMembershipNumber = profile?.membershipNumber || null;
             resolvedProfile = profile || null;
           } catch (profileError) {
-            logWarn("Failed to resolve profile by profileId for approved application", {
+            logWarn("Failed to resolve profile by profileId for processed application", {
               applicationId,
               profileId,
               error: profileError.message,
@@ -444,7 +444,7 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
       application?.membershipNumber ||
       application?._resolvedMembershipNumber ||
       null;
-    if (isApprovedApplicationStatus(application?.applicationStatus) && resolvedMembershipNumber) {
+    if (isProcessedApplicationStatus(application?.applicationStatus) && resolvedMembershipNumber) {
       membershipNumber = String(resolvedMembershipNumber);
       resolvedMemberId = membershipNumber;
       // Prefer canonical profile fields when available from profile lookup fallback.

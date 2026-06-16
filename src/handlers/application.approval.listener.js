@@ -169,7 +169,7 @@ function isRetrospectivePricingCase({
 }
 
 /**
- * Backfill refunds created against application credit so they follow the approved member.
+ * Backfill refunds created against application credit so they follow the processed member.
  * This mirrors CLAIM transfer semantics for downstream reporting.
  */
 async function associateRefundsWithMember({
@@ -219,7 +219,7 @@ async function associateRefundsWithMember({
   if (updatedCount > 0) {
     logger.info(
       { tenantId, applicationId, memberId, updatedRefunds: updatedCount },
-      "Associated historical refunds to approved member"
+      "Associated historical refunds to processed member"
     );
   }
 }
@@ -538,8 +538,8 @@ export async function getMembershipPricing({
 }
 
 /**
- * Handles application approved event
- * Creates invoice for the newly approved member
+ * Handles application processed event
+ * Creates invoice for the newly processed member
  */
 export async function handleApplicationApproved(payload) {
   try {
@@ -618,7 +618,7 @@ export async function handleApplicationApproved(payload) {
   } catch (error) {
     logger.error(
       { error: error.message, applicationId: payload?.data?.applicationId },
-      "Error handling application approved event"
+      "Error handling application processed event"
     );
     // Don't throw - allow event processing to continue
     // The invoice can be created manually if needed

@@ -356,11 +356,11 @@ export async function setupConsumers() {
   const APPLICATION_QUEUE = "account.application.events";
   await consumer.createQueue(APPLICATION_QUEUE, { durable: true });
   await consumer.bindQueue(APPLICATION_QUEUE, "application.events", [
-    "applications.review.approved.v1",
+    "applications.review.processed.v1",
   ]);
 
   consumer.registerHandler(
-    "applications.review.approved.v1",
+    "applications.review.processed.v1",
     async (payload, context) => {
       await handleApplicationApproved(payload);
     }
