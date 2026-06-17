@@ -5,6 +5,40 @@ import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
 import bizLogger from "../config/bizLogger.js";
 
+async function publishApplicationPaymentEvent(eventPayload, event) {
+  if (!eventPayload) return;
+
+  try {
+    await publishDomainEvent(
+      APPLICATION_EVENTS.STATUS_UPDATED,
+      eventPayload,
+      {
+        source: "stripe-webhook",
+        eventId: event.id,
+      }
+    );
+    logger.info(
+      {
+        applicationId: eventPayload.applicationId,
+        paymentIntentId: eventPayload.paymentIntentId,
+        tenantId: eventPayload.tenantId,
+        status: eventPayload.status,
+      },
+      "Published application payment update event to portal-service"
+    );
+  } catch (error) {
+    logger.error(
+      {
+        error: error.message,
+        applicationId: eventPayload.applicationId,
+        paymentIntentId: eventPayload.paymentIntentId,
+        tenantId: eventPayload.tenantId,
+      },
+      "Failed to publish application payment update event"
+    );
+  }
+}
+
 export async function handleStripeWebhook(req, res) {
   const sig = req.headers["stripe-signature"];
 
@@ -65,14 +99,54 @@ async function processStripeEvent(event) {
   }
 
   let paymentData = {};
+  let applicationEventPayload = null;
   switch (event.type) {
-    case "payment_intent.succeeded": {
+    case "payment_intent.amount_capturable_updated": {
       const pi = obj;
       paymentData = {
         paymentIntentId: pi.id,
         amount: pi.amount,
         currency: pi.currency,
+        status: "requires_capture",
+        stripeStatus: pi.status,
+        chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
+        customerId: pi.customer || undefined,
+        paymentMethodId: pi.payment_method || undefined,
+        metadata: pi.metadata || {},
+      };
+
+      const applicationId = metadata.applicationId || metadata.application_id;
+      const memberId = metadata.memberId || metadata.member_id;
+
+      bizLogger.business("Stripe payment authorised received", {
+        eventType: "PaymentAuthorised",
+        tenantId: tenantId || null,
+        applicationId: applicationId || null,
+        membershipId: memberId || metadata.membershipId || null,
+        correlationId: metadata.correlationId || event.id,
+      });
+
+      if (applicationId && !memberId) {
+        applicationEventPayload = {
+          applicationId,
+          status: "requires_capture",
+          paymentIntentId: pi.id,
+          amount: pi.amount,
+          currency: pi.currency,
+          tenantId,
+        };
+      }
+      break;
+    }
+    case "payment_intent.succeeded": {
+      const pi = obj;
+      paymentData = {
+        paymentIntentId: pi.id,
+        amount: pi.amount_received || pi.amount,
+        currency: pi.currency,
         status: "succeeded",
+        stripeStatus: pi.status,
+        capturedAt: new Date((pi.created || Math.floor(Date.now() / 1000)) * 1000),
         chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
         customerId: pi.customer || undefined,
         paymentMethodId: pi.payment_method || undefined,
@@ -93,42 +167,14 @@ async function processStripeEvent(event) {
       });
 
       if (applicationId && !memberId) {
-        try {
-          await publishDomainEvent(
-            APPLICATION_EVENTS.STATUS_UPDATED,
-            {
-              applicationId,
-              status: "submitted",
-              paymentIntentId: pi.id,
-              amount: pi.amount,
-              currency: pi.currency,
-              tenantId,
-            },
-            {
-              source: "stripe-webhook",
-              eventId: event.id,
-            }
-          );
-          logger.info(
-            {
-              applicationId,
-              paymentIntentId: pi.id,
-              tenantId,
-            },
-            "Published application status update event to portal-service"
-          );
-        } catch (error) {
-          logger.error(
-            {
-              error: error.message,
-              applicationId,
-              paymentIntentId: pi.id,
-              tenantId,
-            },
-            "Failed to publish application status update event"
-          );
-          // Continue processing even if event publishing fails
-        }
+        applicationEventPayload = {
+          applicationId,
+          status: "submitted",
+          paymentIntentId: pi.id,
+          amount: pi.amount_received || pi.amount,
+          currency: pi.currency,
+          tenantId,
+        };
       } else if (memberId) {
         logger.info(
           {
@@ -204,12 +250,14 @@ async function processStripeEvent(event) {
     case "payment_intent.payment_failed": {
       const pi = obj;
       const pmd = pi.metadata || {};
+      const applicationId = pmd.applicationId || pmd.application_id;
+      const memberId = pmd.memberId || pmd.member_id;
       bizLogger.error("Stripe payment failed", {
         eventType: "PaymentFailed",
         tenantId:
           pmd.tenantId || pmd.tenant_id || pmd.tenant || tenantId || null,
-        applicationId: pmd.applicationId || pmd.application_id || null,
-        membershipId: pmd.memberId || pmd.member_id || null,
+        applicationId: applicationId || null,
+        membershipId: memberId || null,
         correlationId: pmd.correlationId || event.id,
       });
       paymentData = {
@@ -217,11 +265,91 @@ async function processStripeEvent(event) {
         amount: pi.amount,
         currency: pi.currency,
         status: "failed",
+        stripeStatus: pi.status,
+        failureCode:
+          pi.last_payment_error?.code ||
+          pi.last_payment_error?.decline_code ||
+          undefined,
+        failureMessage: pi.last_payment_error?.message || undefined,
         chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
         customerId: pi.customer || undefined,
         paymentMethodId: pi.payment_method || undefined,
         metadata: pi.metadata || {},
       };
+      if (applicationId && !memberId) {
+        applicationEventPayload = {
+          applicationId,
+          status: "failed",
+          paymentIntentId: pi.id,
+          amount: pi.amount,
+          currency: pi.currency,
+          tenantId,
+        };
+      }
+      break;
+    }
+    case "payment_intent.requires_action": {
+      const pi = obj;
+      const pmd = pi.metadata || {};
+      const applicationId = pmd.applicationId || pmd.application_id;
+      const memberId = pmd.memberId || pmd.member_id;
+      paymentData = {
+        paymentIntentId: pi.id,
+        amount: pi.amount,
+        currency: pi.currency,
+        status: "requires_action",
+        stripeStatus: pi.status,
+        chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
+        customerId: pi.customer || undefined,
+        paymentMethodId: pi.payment_method || undefined,
+        nextAction: pi.next_action || undefined,
+        metadata: pi.metadata || {},
+      };
+      if (applicationId && !memberId) {
+        applicationEventPayload = {
+          applicationId,
+          status: "requires_action",
+          paymentIntentId: pi.id,
+          amount: pi.amount,
+          currency: pi.currency,
+          tenantId,
+        };
+      }
+      break;
+    }
+    case "payment_intent.canceled": {
+      const pi = obj;
+      const reason = pi.cancellation_reason;
+      const pmd = pi.metadata || {};
+      const applicationId = pmd.applicationId || pmd.application_id;
+      const memberId = pmd.memberId || pmd.member_id;
+      const status =
+        reason === "abandoned" || reason === "automatic" || reason === "expired"
+          ? "authorization_expired"
+          : "canceled";
+      paymentData = {
+        paymentIntentId: pi.id,
+        amount: pi.amount,
+        currency: pi.currency,
+        status,
+        stripeStatus: pi.status,
+        canceledAt: new Date((pi.canceled_at || Math.floor(Date.now() / 1000)) * 1000),
+        cancellationReason: reason || undefined,
+        chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
+        customerId: pi.customer || undefined,
+        paymentMethodId: pi.payment_method || undefined,
+        metadata: pi.metadata || {},
+      };
+      if (applicationId && !memberId) {
+        applicationEventPayload = {
+          applicationId,
+          status,
+          paymentIntentId: pi.id,
+          amount: pi.amount,
+          currency: pi.currency,
+          tenantId,
+        };
+      }
       break;
     }
     default: {
@@ -232,7 +360,7 @@ async function processStripeEvent(event) {
 
   // Only reconcile if paymentData was set (not all cases set it)
   if (paymentData && paymentData.paymentIntentId) {
-    await reconcileStripeEvent(
+    const reconcileResult = await reconcileStripeEvent(
       {
         eventId: event.id,
         type: event.type,
@@ -240,5 +368,8 @@ async function processStripeEvent(event) {
       },
       { tenantId }
     );
+    if (!reconcileResult?.duplicate) {
+      await publishApplicationPaymentEvent(applicationEventPayload, event);
+    }
   }
 }

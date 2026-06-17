@@ -5,6 +5,9 @@ import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
 import {
   createPaymentIntent,
+  captureExistingPaymentIntent,
+  cancelExistingPaymentIntent,
+  getLatestApplicationPayment,
   reconcilePayment,
   getPaymentByStripeId,
   recordExternalPayment,
@@ -44,6 +47,19 @@ router.post(
 );
 
 router.get("/by-stripe/:paymentIntentId", getPaymentByStripeId);
+router.get("/applications/:applicationId/latest", getLatestApplicationPayment);
+
+router.post(
+  "/intents/:paymentIntentId/capture",
+  idempotency(),
+  captureExistingPaymentIntent
+);
+
+router.post(
+  "/intents/:paymentIntentId/cancel",
+  idempotency(),
+  cancelExistingPaymentIntent
+);
 
 // Gateway aggregation: list payments by member IDs (subscription service)
 router.post("/batch", listPaymentsBatch);

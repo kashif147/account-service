@@ -25,15 +25,95 @@ function mapStripeStatusToDomain(status) {
     case "requires_action":
       return "requires_action";
     case "requires_capture":
-      return "processing";
+      return "requires_capture";
     case "processing":
       return "processing";
     case "succeeded":
       return "succeeded";
     case "canceled":
-      return "failed";
+      return "canceled";
     default:
       return "processing";
+  }
+}
+
+function normalizeStripeStatusForPayment(status) {
+  if (status === "canceled") return "canceled";
+  if (status === "requires_capture") return "requires_capture";
+  if (status === "succeeded") return "succeeded";
+  return mapStripeStatusToDomain(status);
+}
+
+function canReuseDomainPaymentStatus(status) {
+  return [
+    "created",
+    "requires_action",
+    "requires_capture",
+    "processing",
+    "payment_required",
+  ].includes(status);
+}
+
+function canReuseStripePaymentIntentStatus(status) {
+  return [
+    "requires_payment_method",
+    "requires_confirmation",
+    "requires_action",
+    "requires_capture",
+    "processing",
+  ].includes(status);
+}
+
+function isExpiredAuthorization(pi) {
+  const cancellationReason = pi?.cancellation_reason;
+  return (
+    pi?.status === "canceled" &&
+    (cancellationReason === "abandoned" ||
+      cancellationReason === "automatic" ||
+      cancellationReason === "expired")
+  );
+}
+
+function paymentIntentStatusToDomain(pi) {
+  if (isExpiredAuthorization(pi)) return "authorization_expired";
+  return normalizeStripeStatusForPayment(pi?.status);
+}
+
+function stripeDetailsFromIntent(pi) {
+  if (!pi) return {};
+  return {
+    status: pi.status,
+    chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
+    customerId: pi.customer || undefined,
+    paymentMethodId: pi.payment_method || undefined,
+    capturedAt:
+      pi.status === "succeeded"
+        ? new Date((pi.created || Math.floor(Date.now() / 1000)) * 1000)
+        : undefined,
+    canceledAt:
+      pi.status === "canceled"
+        ? new Date((pi.canceled_at || Math.floor(Date.now() / 1000)) * 1000)
+        : undefined,
+    cancellationReason: pi.cancellation_reason || undefined,
+    failureCode:
+      pi.last_payment_error?.code ||
+      pi.last_payment_error?.decline_code ||
+      undefined,
+    failureMessage: pi.last_payment_error?.message || undefined,
+    nextAction: pi.next_action || undefined,
+  };
+}
+
+function setDefined(target, key, value) {
+  if (value !== undefined && value !== null) {
+    target[key] = value;
+  }
+}
+
+function appendStripeIntentFields(set, pi) {
+  const details = stripeDetailsFromIntent(pi);
+  for (const [key, value] of Object.entries(details)) {
+    setDefined(set, `stripe.${key}`, value);
   }
 }
 
@@ -65,7 +145,166 @@ async function buildIntentResponse(payment, stripe) {
     clientSecret,
     checkoutUrl,
     status: payment.status,
+    stripeStatus: payment?.stripe?.status || null,
+    amount: payment?.amount,
+    currency: payment?.currency,
+    attemptNumber: payment?.attemptNumber || 1,
+    isActiveAttempt: payment?.isActiveAttempt !== false,
     id: payment._id.toString(),
+  };
+}
+
+async function refreshPaymentFromStripe(payment, pi, ctx = {}) {
+  const status = paymentIntentStatusToDomain(pi);
+  const set = {
+    status,
+    amount: pi.amount_received || pi.amount || payment.amount,
+    currency: pi.currency || payment.currency,
+    "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+  };
+  appendStripeIntentFields(set, pi);
+  await Payment.updateOne({ _id: payment._id }, { $set: set });
+  return (await Payment.findById(payment._id).lean()) || {
+    ...payment,
+    status,
+  };
+}
+
+async function markPaymentAttemptSuperseded(payment, reason, ctx = {}) {
+  if (!payment?._id) return;
+  await Payment.updateOne(
+    { _id: payment._id },
+    {
+      $set: {
+        isActiveAttempt: false,
+        supersededAt: new Date(),
+        supersededReason: reason,
+        "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+      },
+    },
+  );
+}
+
+async function resolveReusableApplicationAttempt({
+  applicationId,
+  purpose,
+  amount,
+  currency,
+  ctx,
+  stripe,
+  logger,
+}) {
+  if (!applicationId) {
+    return { reusablePayment: null, attemptNumber: 1 };
+  }
+
+  const latestAttempt = await Payment.findOne({
+    tenantId: ctx.tenantId,
+    applicationId,
+    purpose,
+    mode: "stripe",
+    "stripe.paymentIntentId": { $exists: true, $ne: null },
+  })
+    .sort({ attemptNumber: -1, createdAt: -1 })
+    .lean();
+
+  if (!latestAttempt?.stripe?.paymentIntentId) {
+    return { reusablePayment: null, attemptNumber: 1 };
+  }
+
+  const nextAttemptNumber = (latestAttempt.attemptNumber || 1) + 1;
+  let pi;
+  try {
+    pi = await stripe.paymentIntents.retrieve(
+      latestAttempt.stripe.paymentIntentId,
+    );
+  } catch (err) {
+    logger.warn(
+      {
+        paymentId: latestAttempt._id,
+        applicationId,
+        paymentIntentId: latestAttempt.stripe.paymentIntentId,
+        error: err.message,
+      },
+      "Unable to retrieve latest application PaymentIntent; creating replacement attempt",
+    );
+    await markPaymentAttemptSuperseded(
+      latestAttempt,
+      "stripe_retrieve_failed",
+      ctx,
+    );
+    return {
+      reusablePayment: null,
+      attemptNumber: nextAttemptNumber,
+      supersededPaymentId: latestAttempt._id,
+    };
+  }
+
+  const refreshed = await refreshPaymentFromStripe(latestAttempt, pi, ctx);
+  const sameAmount = Number(pi.amount) === Number(amount);
+  const sameCurrency =
+    String(pi.currency || "").toLowerCase() === String(currency || "").toLowerCase();
+  const reusable =
+    canReuseStripePaymentIntentStatus(pi.status) &&
+    !isExpiredAuthorization(pi) &&
+    sameAmount &&
+    sameCurrency;
+
+  if (reusable) {
+    logger.info(
+      {
+        paymentId: latestAttempt._id,
+        applicationId,
+        paymentIntentId: latestAttempt.stripe.paymentIntentId,
+        stripeStatus: pi.status,
+        attemptNumber: latestAttempt.attemptNumber || 1,
+      },
+      "Reusing latest application PaymentIntent",
+    );
+    if (latestAttempt.isActiveAttempt === false) {
+      await Payment.updateOne(
+        { _id: latestAttempt._id },
+        {
+          $set: {
+            isActiveAttempt: true,
+            supersededAt: null,
+            supersededReason: null,
+            supersededByPaymentId: null,
+          },
+        },
+      );
+    }
+    return {
+      reusablePayment: refreshed,
+      attemptNumber: latestAttempt.attemptNumber || 1,
+    };
+  }
+
+  await markPaymentAttemptSuperseded(
+    latestAttempt,
+    !sameAmount || !sameCurrency
+      ? "amount_or_currency_changed"
+      : isExpiredAuthorization(pi)
+        ? "authorization_expired"
+        : `stripe_status_${pi.status}`,
+    ctx,
+  );
+  logger.info(
+    {
+      paymentId: latestAttempt._id,
+      applicationId,
+      paymentIntentId: latestAttempt.stripe.paymentIntentId,
+      stripeStatus: pi.status,
+      sameAmount,
+      sameCurrency,
+      nextAttemptNumber,
+    },
+    "Latest application PaymentIntent is not reusable; creating replacement attempt",
+  );
+  return {
+    reusablePayment: null,
+    attemptNumber: nextAttemptNumber,
+    supersededPaymentId: latestAttempt._id,
   };
 }
 
@@ -92,6 +331,27 @@ export async function createIntent(input, ctx) {
 
   const memberId = parsed.memberId || memberIdFromMetadata;
   const applicationId = parsed.applicationId || applicationIdFromMetadata;
+  const logger = (await import("../config/logger.js")).default;
+  let attemptNumber = 1;
+  let supersededPaymentId = null;
+  let persistIdempotencyKey = true;
+
+  if (applicationId && !parsed.useCheckout) {
+    const attemptDecision = await resolveReusableApplicationAttempt({
+      applicationId,
+      purpose: parsed.purpose,
+      amount: parsed.amount,
+      currency: normalizedCurrency,
+      ctx,
+      stripe,
+      logger,
+    });
+    if (attemptDecision.reusablePayment) {
+      return await buildIntentResponse(attemptDecision.reusablePayment, stripe);
+    }
+    attemptNumber = attemptDecision.attemptNumber || 1;
+    supersededPaymentId = attemptDecision.supersededPaymentId || null;
+  }
 
   // Idempotency and duplicate protection: check for existing payments BEFORE Stripe API call
   // 1. Check by idempotency key (if provided)
@@ -100,10 +360,25 @@ export async function createIntent(input, ctx) {
       tenantId: ctx.tenantId,
       idempotencyKey: ctx.idempotencyKey,
     })
-      .select("stripe status _id memberId applicationId")
+      .select("stripe status _id memberId applicationId isActiveAttempt")
       .lean();
     if (existingByIdem) {
-      const logger = (await import("../config/logger.js")).default;
+      if (
+        applicationId &&
+        (!canReuseDomainPaymentStatus(existingByIdem.status) ||
+          existingByIdem.isActiveAttempt === false)
+      ) {
+        logger.info(
+          {
+            existingPaymentId: existingByIdem._id,
+            idempotencyKey: ctx.idempotencyKey,
+            existingStatus: existingByIdem.status,
+            applicationId,
+          },
+          "Ignoring non-reusable idempotency match for application payment continuation",
+        );
+        persistIdempotencyKey = false;
+      } else {
       logger.info(
         {
           existingPaymentId: existingByIdem._id,
@@ -113,6 +388,7 @@ export async function createIntent(input, ctx) {
         "Found existing payment by idempotency key - returning existing payment",
       );
       return await buildIntentResponse(existingByIdem, stripe);
+      }
     }
   }
 
@@ -126,6 +402,7 @@ export async function createIntent(input, ctx) {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
+      isActiveAttempt: { $ne: false },
       createdAt: { $gte: tenMinutesAgo },
       // Don't filter by status - check ALL recent payments to prevent duplicates
     };
@@ -138,25 +415,35 @@ export async function createIntent(input, ctx) {
     }
 
     const existingDuplicate = await Payment.findOne(duplicateCheck)
-      .select("stripe status _id memberId applicationId")
+      .select("stripe status _id memberId applicationId isActiveAttempt")
       .sort({ createdAt: -1 })
       .lean();
 
     if (existingDuplicate) {
-      const logger = (await import("../config/logger.js")).default;
-      logger.warn(
-        {
-          existingPaymentId: existingDuplicate._id,
-          existingStatus: existingDuplicate.status,
-          existingPaymentIntentId: existingDuplicate.stripe?.paymentIntentId,
-          memberId,
-          applicationId,
-          amount: parsed.amount,
-          purpose: parsed.purpose,
-          idempotencyKey: ctx.idempotencyKey,
-        },
-        "Duplicate payment detected - returning existing payment",
-      );
+      if (!canReuseDomainPaymentStatus(existingDuplicate.status)) {
+        logger.info(
+          {
+            existingPaymentId: existingDuplicate._id,
+            existingStatus: existingDuplicate.status,
+            memberId,
+            applicationId,
+          },
+          "Recent terminal payment found - creating a new PaymentIntent instead of reusing it",
+        );
+      } else {
+        logger.warn(
+          {
+            existingPaymentId: existingDuplicate._id,
+            existingStatus: existingDuplicate.status,
+            existingPaymentIntentId: existingDuplicate.stripe?.paymentIntentId,
+            memberId,
+            applicationId,
+            amount: parsed.amount,
+            purpose: parsed.purpose,
+            idempotencyKey: ctx.idempotencyKey,
+          },
+          "Duplicate payment detected - returning existing payment",
+        );
 
       // Ensure the existing payment has memberId/applicationId if they're missing
       // This is important for journal entry creation later
@@ -187,7 +474,8 @@ export async function createIntent(input, ctx) {
         }
       }
 
-      return await buildIntentResponse(existingDuplicate, stripe);
+        return await buildIntentResponse(existingDuplicate, stripe);
+      }
     }
   }
 
@@ -200,6 +488,7 @@ export async function createIntent(input, ctx) {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
       amount: parsed.amount,
+      isActiveAttempt: { $ne: false },
       createdAt: { $gte: twoMinutesAgo },
       // Check ALL statuses to catch any recent payment attempt
     };
@@ -212,27 +501,37 @@ export async function createIntent(input, ctx) {
     }
 
     const recentPayment = await Payment.findOne(lastSecondCheck)
-      .select("stripe status _id memberId applicationId createdAt")
+      .select("stripe status _id memberId applicationId createdAt isActiveAttempt")
       .sort({ createdAt: -1 })
       .lean();
 
     if (recentPayment) {
-      const logger = (await import("../config/logger.js")).default;
-      logger.warn(
-        {
-          existingPaymentId: recentPayment._id,
-          existingStatus: recentPayment.status,
-          existingPaymentIntentId: recentPayment.stripe?.paymentIntentId,
-          memberId,
-          applicationId,
-          amount: parsed.amount,
-          purpose: parsed.purpose,
-          idempotencyKey: ctx.idempotencyKey,
-          timeSinceCreation:
-            Date.now() - new Date(recentPayment.createdAt).getTime(),
-        },
-        "Race condition detected - payment created within last 2 minutes, returning existing payment",
-      );
+      if (!canReuseDomainPaymentStatus(recentPayment.status)) {
+        logger.info(
+          {
+            existingPaymentId: recentPayment._id,
+            existingStatus: recentPayment.status,
+            memberId,
+            applicationId,
+          },
+          "Recent terminal payment found during race check - creating a new PaymentIntent instead of reusing it",
+        );
+      } else {
+        logger.warn(
+          {
+            existingPaymentId: recentPayment._id,
+            existingStatus: recentPayment.status,
+            existingPaymentIntentId: recentPayment.stripe?.paymentIntentId,
+            memberId,
+            applicationId,
+            amount: parsed.amount,
+            purpose: parsed.purpose,
+            idempotencyKey: ctx.idempotencyKey,
+            timeSinceCreation:
+              Date.now() - new Date(recentPayment.createdAt).getTime(),
+          },
+          "Race condition detected - payment created within last 2 minutes, returning existing payment",
+        );
 
       // Ensure the existing payment has memberId/applicationId if they're missing
       // This is important for journal entry creation later
@@ -263,7 +562,8 @@ export async function createIntent(input, ctx) {
         }
       }
 
-      return await buildIntentResponse(recentPayment, stripe);
+        return await buildIntentResponse(recentPayment, stripe);
+      }
     }
   }
 
@@ -274,7 +574,7 @@ export async function createIntent(input, ctx) {
   const crypto = await import("crypto");
   let stripeIdempotencyKey = null;
 
-  if (ctx.idempotencyKey) {
+  if (ctx.idempotencyKey && persistIdempotencyKey) {
     // Use client's idempotency key - hash it to ensure it's valid format for Stripe
     // Stripe keys must be max 64 chars, so we hash if longer
     if (ctx.idempotencyKey.length <= 64) {
@@ -286,6 +586,21 @@ export async function createIntent(input, ctx) {
         .digest("hex")
         .substring(0, 64);
     }
+  } else if (applicationId && !parsed.useCheckout) {
+    const applicationAttemptKeyParts = [
+      "application-payment",
+      ctx.tenantId,
+      applicationId,
+      parsed.purpose,
+      attemptNumber,
+      parsed.amount,
+      normalizedCurrency,
+    ];
+    stripeIdempotencyKey = crypto
+      .createHash("sha256")
+      .update(applicationAttemptKeyParts.join("-"))
+      .digest("hex")
+      .substring(0, 64);
   } else {
     // Generate a unique key for this request
     // Include timestamp to ensure uniqueness
@@ -302,7 +617,6 @@ export async function createIntent(input, ctx) {
       .substring(0, 64);
   }
 
-  const logger = (await import("../config/logger.js")).default;
   logger.info(
     {
       clientIdempotencyKey: ctx.idempotencyKey,
@@ -344,6 +658,7 @@ export async function createIntent(input, ctx) {
           },
         ],
         payment_intent_data: {
+          capture_method: "manual",
           metadata: stripeMetadata,
         },
         success_url: `${
@@ -360,6 +675,7 @@ export async function createIntent(input, ctx) {
     stripeIds = {
       checkoutSessionId: session.id,
       checkoutUrl: session.url,
+      status: session.payment_status || "checkout_session_created",
     };
 
     // After creating Stripe checkout session, check if a payment with this session ID already exists
@@ -392,6 +708,7 @@ export async function createIntent(input, ctx) {
         tenantId: ctx.tenantId,
         purpose: parsed.purpose,
         amount: parsed.amount,
+        isActiveAttempt: { $ne: false },
         createdAt: { $gte: new Date(Date.now() - 2 * 60 * 1000) }, // Last 2 minutes
         "stripe.paymentIntentId": { $exists: true, $ne: null },
       };
@@ -399,20 +716,32 @@ export async function createIntent(input, ctx) {
       if (applicationId) recentCheck.applicationId = applicationId;
 
       const recentWithIntent = await Payment.findOne(recentCheck)
-        .select("stripe status _id memberId applicationId")
+        .select("stripe status _id memberId applicationId isActiveAttempt")
         .lean();
 
       if (recentWithIntent && recentWithIntent.stripe?.paymentIntentId) {
-        logger.warn(
-          {
-            existingPaymentId: recentWithIntent._id,
-            existingPaymentIntentId: recentWithIntent.stripe.paymentIntentId,
-            memberId,
-            applicationId,
-            amount: parsed.amount,
-          },
-          "Recent payment with paymentIntentId found - returning existing payment to prevent duplicate Stripe intent",
-        );
+        if (!canReuseDomainPaymentStatus(recentWithIntent.status)) {
+          logger.info(
+            {
+              existingPaymentId: recentWithIntent._id,
+              existingStatus: recentWithIntent.status,
+              existingPaymentIntentId: recentWithIntent.stripe.paymentIntentId,
+              memberId,
+              applicationId,
+            },
+            "Recent terminal PaymentIntent found - creating a new PaymentIntent instead of reusing it",
+          );
+        } else {
+          logger.warn(
+            {
+              existingPaymentId: recentWithIntent._id,
+              existingPaymentIntentId: recentWithIntent.stripe.paymentIntentId,
+              memberId,
+              applicationId,
+              amount: parsed.amount,
+            },
+            "Recent payment with paymentIntentId found - returning existing payment to prevent duplicate Stripe intent",
+          );
 
         // Ensure memberId/applicationId are set
         if (
@@ -433,7 +762,8 @@ export async function createIntent(input, ctx) {
           }
         }
 
-        return await buildIntentResponse(recentWithIntent, stripe);
+          return await buildIntentResponse(recentWithIntent, stripe);
+        }
       }
     }
 
@@ -444,6 +774,7 @@ export async function createIntent(input, ctx) {
           amount: parsed.amount,
           currency: normalizedCurrency,
           payment_method_types: ["card"],
+          capture_method: "manual",
           metadata: stripeMetadata,
         },
         { idempotencyKey: stripeIdempotencyKey },
@@ -468,6 +799,7 @@ export async function createIntent(input, ctx) {
           amount: parsed.amount,
           currency: normalizedCurrency,
           payment_method_types: ["card"],
+          capture_method: "manual",
           metadata: stripeMetadata,
         });
       } else {
@@ -476,10 +808,11 @@ export async function createIntent(input, ctx) {
     }
 
     stripeResult = intent;
-    status = mapStripeStatusToDomain(intent.status) || "requires_action";
+    status = normalizeStripeStatusForPayment(intent.status) || "requires_action";
     stripeIds = {
       paymentIntentId: intent.id,
       clientSecret: intent.client_secret,
+      status: intent.status,
     };
 
     // After creating Stripe payment intent, check if a payment with this intent ID already exists
@@ -587,6 +920,8 @@ export async function createIntent(input, ctx) {
       amount: parsed.amount,
       currency: normalizedCurrency,
       status,
+      attemptNumber,
+      isActiveAttempt: true,
       // Only set memberId if applicationId is not present
       ...(applicationId ? { applicationId } : memberId ? { memberId } : {}),
       invoiceId: parsed.invoiceId,
@@ -601,11 +936,32 @@ export async function createIntent(input, ctx) {
     };
 
     // Only include idempotencyKey if it's actually provided (not null or undefined)
-    if (ctx.idempotencyKey) {
+    if (ctx.idempotencyKey && persistIdempotencyKey) {
       paymentData.idempotencyKey = ctx.idempotencyKey;
     }
 
     const payment = await Payment.create(paymentData);
+    if (applicationId && stripeIds.paymentIntentId) {
+      await Payment.updateMany(
+        {
+          tenantId: ctx.tenantId,
+          applicationId,
+          purpose: parsed.purpose,
+          _id: { $ne: payment._id },
+          isActiveAttempt: { $ne: false },
+        },
+        {
+          $set: {
+            supersededByPaymentId: payment._id,
+            isActiveAttempt: false,
+            supersededAt: new Date(),
+            supersededReason: supersededPaymentId
+              ? "replacement_attempt_created"
+              : "newer_attempt_created",
+          },
+        },
+      );
+    }
 
     return {
       paymentIntentId: stripeIds.paymentIntentId,
@@ -613,13 +969,14 @@ export async function createIntent(input, ctx) {
       clientSecret: stripeIds.clientSecret || stripeResult.client_secret,
       checkoutUrl: stripeIds.checkoutUrl || stripeResult.url,
       status,
+      attemptNumber,
       id: payment._id.toString(),
     };
   } catch (e) {
     // Handle MongoDB duplicate key errors (11000) by returning existing payment
     if (e && e.code === 11000) {
       // Try to find existing payment by idempotency key first
-      if (ctx.idempotencyKey) {
+      if (ctx.idempotencyKey && persistIdempotencyKey) {
         const existing = await Payment.findOne({
           tenantId: ctx.tenantId,
           idempotencyKey: ctx.idempotencyKey,
@@ -668,6 +1025,335 @@ export async function findByStripePaymentIntent(paymentIntentId, ctx) {
   return doc;
 }
 
+export async function findLatestApplicationPayment(applicationId, ctx = {}) {
+  const appId = String(applicationId || "").trim();
+  if (!appId) {
+    throw AppError.badRequest("applicationId is required");
+  }
+
+  const query = {
+    applicationId: appId,
+    mode: "stripe",
+    isActiveAttempt: { $ne: false },
+    "stripe.paymentIntentId": { $exists: true, $ne: null },
+  };
+  if (ctx.tenantId) query.tenantId = ctx.tenantId;
+
+  let payment = await Payment.findOne(query)
+    .sort({ attemptNumber: -1, createdAt: -1 })
+    .lean();
+  if (!payment) return null;
+
+  try {
+    const pi = await getStripe().paymentIntents.retrieve(
+      payment.stripe.paymentIntentId,
+    );
+    await refreshPaymentFromStripe(payment, pi, ctx);
+    payment = await Payment.findById(payment._id).lean();
+  } catch (err) {
+    const logger = (await import("../config/logger.js")).default;
+    logger.warn(
+      {
+        applicationId: appId,
+        paymentId: payment._id,
+        paymentIntentId: payment.stripe?.paymentIntentId,
+        error: err.message,
+      },
+      "Unable to refresh latest application payment from Stripe",
+    );
+  }
+
+  return payment;
+}
+
+async function loadPaymentForIntent(paymentIntentId, ctx) {
+  const filter = { "stripe.paymentIntentId": paymentIntentId };
+  if (ctx?.tenantId) filter.tenantId = ctx.tenantId;
+  const payment = await Payment.findOne(filter);
+  if (!payment) {
+    throw AppError.notFound("Payment not found for PaymentIntent", {
+      paymentIntentId,
+    });
+  }
+  return payment;
+}
+
+function paymentDataFromIntent(pi) {
+  return {
+    paymentIntentId: pi.id,
+    amount: pi.amount_received || pi.amount,
+    currency: pi.currency,
+    status: normalizeStripeStatusForPayment(pi.status),
+    stripeStatus: pi.status,
+    capturedAt:
+      pi.status === "succeeded"
+        ? new Date((pi.created || Math.floor(Date.now() / 1000)) * 1000)
+        : undefined,
+    canceledAt:
+      pi.status === "canceled"
+        ? new Date((pi.canceled_at || Math.floor(Date.now() / 1000)) * 1000)
+        : undefined,
+    cancellationReason: pi.cancellation_reason || undefined,
+    failureCode:
+      pi.last_payment_error?.code ||
+      pi.last_payment_error?.decline_code ||
+      undefined,
+    failureMessage: pi.last_payment_error?.message || undefined,
+    nextAction: pi.next_action || undefined,
+    chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
+    customerId: pi.customer || undefined,
+    paymentMethodId: pi.payment_method || undefined,
+    metadata: pi.metadata || {},
+  };
+}
+
+function normalizeOptionalDate(value) {
+  if (!value) return undefined;
+  if (value instanceof Date) return value;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function resolveWebhookStatus(existingPayment, incomingStatus) {
+  const current = existingPayment?.status;
+  if (
+    ["refund_required", "manual_review"].includes(current) &&
+    incomingStatus === "succeeded"
+  ) {
+    return current;
+  }
+  if (current === "succeeded" && incomingStatus === "requires_capture") {
+    return current;
+  }
+  if (current === "canceled" && incomingStatus === "requires_capture") {
+    return current;
+  }
+  return incomingStatus;
+}
+
+function buildWebhookAuditEntry(parsed, finalStatus) {
+  const failureMessage = parsed.payment.failureMessage;
+  const cancellationReason = parsed.payment.cancellationReason;
+  const message =
+    failureMessage ||
+    (cancellationReason ? `Cancellation reason: ${cancellationReason}` : null);
+  return {
+    eventId: parsed.eventId,
+    eventType: parsed.type,
+    source: parsed.type?.startsWith("manual-")
+      ? "account-service"
+      : "stripe-webhook",
+    status: finalStatus,
+    stripeStatus: parsed.payment.stripeStatus,
+    ...(message ? { message } : {}),
+    receivedAt: new Date(),
+  };
+}
+
+function appendDefinedStripeFields(set, parsed) {
+  const capturedAt = normalizeOptionalDate(parsed.payment.capturedAt);
+  const canceledAt = normalizeOptionalDate(parsed.payment.canceledAt);
+
+  set["stripe.status"] = parsed.payment.stripeStatus || parsed.payment.status;
+  set["stripe.latestEventId"] = parsed.eventId;
+  set["stripe.latestEventType"] = parsed.type;
+
+  if (capturedAt) set["stripe.capturedAt"] = capturedAt;
+  if (canceledAt) set["stripe.canceledAt"] = canceledAt;
+  if (parsed.payment.cancellationReason) {
+    set["stripe.cancellationReason"] = parsed.payment.cancellationReason;
+  }
+  if (parsed.payment.failureCode) {
+    set["stripe.failureCode"] = parsed.payment.failureCode;
+  }
+  if (parsed.payment.failureMessage) {
+    set["stripe.failureMessage"] = parsed.payment.failureMessage;
+  }
+  if (parsed.payment.nextAction) {
+    set["stripe.nextAction"] = parsed.payment.nextAction;
+  }
+}
+
+export async function capturePaymentIntent(paymentIntentId, ctx = {}) {
+  if (!paymentIntentId) {
+    throw AppError.badRequest("paymentIntentId is required");
+  }
+
+  const stripe = getStripe();
+  const payment = await loadPaymentForIntent(paymentIntentId, ctx);
+  const current = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+  if (current.status === "succeeded") {
+    await reconcileStripeEvent(
+      {
+        eventId: `manual-capture-existing-${paymentIntentId}`,
+        type: "payment_intent.succeeded",
+        payment: paymentDataFromIntent(current),
+      },
+      ctx,
+    );
+    return {
+      ok: true,
+      captured: false,
+      alreadyCaptured: true,
+      status: "succeeded",
+      paymentIntentId,
+      paymentId: payment._id.toString(),
+    };
+  }
+
+  if (current.status !== "requires_capture") {
+    throw AppError.conflict(
+      `PaymentIntent cannot be captured from status ${current.status}`,
+      { stripeStatus: current.status, paymentIntentId },
+    );
+  }
+
+  const captured = await stripe.paymentIntents.capture(
+    paymentIntentId,
+    {},
+    {
+      idempotencyKey:
+        ctx.idempotencyKey || `capture-${paymentIntentId}-${payment._id}`,
+    },
+  );
+
+  if (captured.status !== "succeeded") {
+    await Payment.updateOne(
+      { _id: payment._id },
+      {
+        $set: {
+          status: normalizeStripeStatusForPayment(captured.status),
+          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+        },
+      },
+    );
+    throw AppError.conflict(
+      `Payment capture did not succeed. Stripe status is ${captured.status}`,
+      { stripeStatus: captured.status, paymentIntentId },
+    );
+  }
+
+  await reconcileStripeEvent(
+    {
+      eventId: `manual-capture-${paymentIntentId}`,
+      type: "payment_intent.succeeded",
+      payment: paymentDataFromIntent(captured),
+    },
+    ctx,
+  );
+
+  return {
+    ok: true,
+    captured: true,
+    status: "succeeded",
+    paymentIntentId,
+    paymentId: payment._id.toString(),
+  };
+}
+
+export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
+  if (!paymentIntentId) {
+    throw AppError.badRequest("paymentIntentId is required");
+  }
+
+  const stripe = getStripe();
+  const payment = await loadPaymentForIntent(paymentIntentId, ctx);
+  const current = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+  if (current.status === "canceled") {
+    await Payment.updateOne(
+      { _id: payment._id },
+      {
+        $set: {
+          status: "canceled",
+          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+        },
+      },
+    );
+    return {
+      ok: true,
+      canceled: false,
+      alreadyCanceled: true,
+      status: "canceled",
+      paymentIntentId,
+      paymentId: payment._id.toString(),
+    };
+  }
+
+  if (current.status === "succeeded") {
+    await Payment.updateOne(
+      { _id: payment._id },
+      {
+        $set: {
+          status: "refund_required",
+          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+        },
+      },
+    );
+    return {
+      ok: true,
+      canceled: false,
+      status: "refund_required",
+      stripeStatus: "succeeded",
+      paymentIntentId,
+      paymentId: payment._id.toString(),
+    };
+  }
+
+  if (current.status !== "requires_capture") {
+    const nextStatus =
+      current.status === "requires_payment_method"
+        ? "payment_required"
+        : normalizeStripeStatusForPayment(current.status);
+    await Payment.updateOne(
+      { _id: payment._id },
+      {
+        $set: {
+          status: nextStatus,
+          "stripe.status": current.status,
+          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+        },
+      },
+    );
+    return {
+      ok: true,
+      canceled: false,
+      status: nextStatus,
+      stripeStatus: current.status,
+      paymentIntentId,
+      paymentId: payment._id.toString(),
+    };
+  }
+
+  const canceled = await stripe.paymentIntents.cancel(
+    paymentIntentId,
+    {},
+    {
+      idempotencyKey:
+        ctx.idempotencyKey || `cancel-${paymentIntentId}-${payment._id}`,
+    },
+  );
+
+  await Payment.updateOne(
+    { _id: payment._id },
+    {
+      $set: {
+        status: normalizeStripeStatusForPayment(canceled.status),
+        "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+      },
+    },
+  );
+
+  return {
+    ok: true,
+    canceled: canceled.status === "canceled",
+    status: normalizeStripeStatusForPayment(canceled.status),
+    paymentIntentId,
+    paymentId: payment._id.toString(),
+  };
+}
+
 export async function reconcileStripeEvent(input, ctx) {
   const parsed = zReconcile.parse(input);
   ensureIntegerCents(parsed.payment.amount);
@@ -680,6 +1366,20 @@ export async function reconcileStripeEvent(input, ctx) {
     existingPayment = await Payment.findOne({
       "stripe.paymentIntentId": parsed.payment.paymentIntentId,
     }).lean();
+
+    if (existingPayment?.webhookEventIds?.includes(parsed.eventId)) {
+      const logger = (await import("../config/logger.js")).default;
+      logger.info(
+        {
+          paymentId: existingPayment._id,
+          paymentIntentId: parsed.payment.paymentIntentId,
+          eventId: parsed.eventId,
+          eventType: parsed.type,
+        },
+        "Skipping duplicate Stripe webhook event",
+      );
+      return { ok: true, duplicate: true };
+    }
 
     // If found, log tenantId comparison for debugging
     if (
@@ -749,17 +1449,29 @@ export async function reconcileStripeEvent(input, ctx) {
     );
   }
 
+  const finalStatus = resolveWebhookStatus(existingPayment, parsed.payment.status);
+  const auditEntry = buildWebhookAuditEntry(parsed, finalStatus);
+
   const update = {
     $set: {
       amount: parsed.payment.amount,
       currency: parsed.payment.currency,
-      status: parsed.payment.status,
+      status: finalStatus,
       "stripe.chargeId": parsed.payment.chargeId,
       "stripe.customerId": parsed.payment.customerId,
       "stripe.paymentMethodId": parsed.payment.paymentMethodId,
       "stripe.paymentIntentId": parsed.payment.paymentIntentId, // Ensure it's set
       metadata: metadata,
       "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+    },
+    $addToSet: {
+      webhookEventIds: parsed.eventId,
+    },
+    $push: {
+      auditHistory: {
+        $each: [auditEntry],
+        $slice: -100,
+      },
     },
     $setOnInsert: {
       tenantId: filter.tenantId, // Ensure tenantId is set on insert
@@ -768,6 +1480,8 @@ export async function reconcileStripeEvent(input, ctx) {
       "audit.createdBy": ctx.userId || ctx.memberId || "system",
     },
   };
+
+  appendDefinedStripeFields(update.$set, parsed);
 
   // Set memberId and applicationId - prioritize applicationId over memberId
   // If applicationId is present, do not set memberId (payment is for an application, not an approved member)
@@ -794,6 +1508,7 @@ export async function reconcileStripeEvent(input, ctx) {
   // If existing payment found, ensure we update the correct one
   if (existingPayment) {
     filter._id = existingPayment._id;
+    filter.webhookEventIds = { $ne: parsed.eventId };
   }
 
   const options = {
@@ -824,6 +1539,18 @@ export async function reconcileStripeEvent(input, ctx) {
       }).lean();
 
       if (retryPayment) {
+        if (retryPayment.webhookEventIds?.includes(parsed.eventId)) {
+          logger.info(
+            {
+              paymentId: retryPayment._id,
+              paymentIntentId: parsed.payment.paymentIntentId,
+              eventId: parsed.eventId,
+            },
+            "Payment webhook event was processed by another worker",
+          );
+          return { ok: true, duplicate: true };
+        }
+
         logger.info(
           {
             paymentId: retryPayment._id,
@@ -1033,30 +1760,67 @@ export async function reconcileStripeEvent(input, ctx) {
       }).lean();
 
       if (existing) {
+        if (existing.webhookEventIds?.includes(parsed.eventId)) {
+          logger.info(
+            {
+              paymentId: existing._id,
+              paymentIntentId: parsed.payment.paymentIntentId,
+              eventId: parsed.eventId,
+            },
+            "Duplicate key recovery found already-processed webhook event",
+          );
+          return { ok: true, duplicate: true };
+        }
+
         // Update the existing payment instead
         // Preserve existing memberId/applicationId if metadata doesn't have them
         const memberIdToUse = memberId || existing.memberId;
         const applicationIdToUse = applicationId || existing.applicationId;
+        const recoveryStatus = resolveWebhookStatus(
+          existing,
+          parsed.payment.status,
+        );
+        const recoveryAuditEntry = buildWebhookAuditEntry(
+          parsed,
+          recoveryStatus,
+        );
 
         const updateOnly = {
           $set: {
             amount: parsed.payment.amount,
             currency: parsed.payment.currency,
-            status: parsed.payment.status,
+            status: recoveryStatus,
             "stripe.chargeId": parsed.payment.chargeId,
             "stripe.customerId": parsed.payment.customerId,
             "stripe.paymentMethodId": parsed.payment.paymentMethodId,
+            "stripe.paymentIntentId": parsed.payment.paymentIntentId,
             metadata: metadata,
             "audit.updatedBy": ctx.userId || ctx.memberId || "system",
           },
+          $addToSet: {
+            webhookEventIds: parsed.eventId,
+          },
+          $push: {
+            auditHistory: {
+              $each: [recoveryAuditEntry],
+              $slice: -100,
+            },
+          },
         };
+        appendDefinedStripeFields(updateOnly.$set, parsed);
         if (memberIdToUse) updateOnly.$set.memberId = memberIdToUse;
         if (applicationIdToUse)
           updateOnly.$set.applicationId = applicationIdToUse;
 
-        const doc = await Payment.findByIdAndUpdate(existing._id, updateOnly, {
-          new: true,
-        });
+        const doc = await Payment.findOneAndUpdate(
+          { _id: existing._id, webhookEventIds: { $ne: parsed.eventId } },
+          updateOnly,
+          { new: true },
+        );
+
+        if (!doc) {
+          return { ok: true, duplicate: true };
+        }
 
         if (parsed.payment.status === "succeeded") {
           const GLTransactionModule =

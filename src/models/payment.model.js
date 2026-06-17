@@ -12,6 +12,15 @@ const StripeSubSchema = new Schema(
     paymentMethodId: { type: String },
     clientSecret: { type: String },
     checkoutUrl: { type: String },
+    status: { type: String },
+    latestEventId: { type: String },
+    latestEventType: { type: String },
+    capturedAt: { type: Date },
+    canceledAt: { type: Date },
+    cancellationReason: { type: String },
+    failureCode: { type: String },
+    failureMessage: { type: String },
+    nextAction: { type: Schema.Types.Mixed },
   },
   { _id: false }
 );
@@ -27,6 +36,19 @@ const AuditSubSchema = new Schema(
   {
     createdBy: { type: String },
     updatedBy: { type: String },
+  },
+  { _id: false }
+);
+
+const PaymentAuditEventSubSchema = new Schema(
+  {
+    eventId: { type: String, required: true },
+    eventType: { type: String, required: true },
+    source: { type: String, default: "stripe-webhook" },
+    status: { type: String },
+    stripeStatus: { type: String },
+    message: { type: String },
+    receivedAt: { type: Date, default: Date.now },
   },
   { _id: false }
 );
@@ -47,8 +69,14 @@ const PaymentSchema = new Schema(
       enum: [
         "created",
         "requires_action",
+        "requires_capture",
         "processing",
         "succeeded",
+        "canceled",
+        "authorization_expired",
+        "payment_required",
+        "refund_required",
+        "manual_review",
         "failed",
         "refunded",
         "partially_refunded",
@@ -58,12 +86,19 @@ const PaymentSchema = new Schema(
     applicationId: { type: String, index: true },
     invoiceId: { type: String, index: true },
     idempotencyKey: { type: String, index: true },
+    attemptNumber: { type: Number, default: 1, min: 1 },
+    isActiveAttempt: { type: Boolean, default: true, index: true },
+    supersededAt: { type: Date },
+    supersededByPaymentId: { type: Schema.Types.ObjectId, ref: "Payment" },
+    supersededReason: { type: String },
     source: { type: String, default: "portal" },
     mode: { type: String, enum: ["stripe", "external"], default: "stripe" },
     stripe: { type: StripeSubSchema, default: {} },
     external: { type: ExternalSubSchema, default: {} },
     metadata: { type: Map, of: String },
     audit: { type: AuditSubSchema, default: {} },
+    webhookEventIds: { type: [String], default: [], index: true },
+    auditHistory: { type: [PaymentAuditEventSubSchema], default: [] },
   },
   {
     timestamps: { createdAt: "createdAt", updatedAt: "updatedAt" },
@@ -78,6 +113,13 @@ PaymentSchema.index(
 );
 
 PaymentSchema.index({ tenantId: 1, memberId: 1, createdAt: -1 });
+PaymentSchema.index({
+  tenantId: 1,
+  applicationId: 1,
+  purpose: 1,
+  attemptNumber: -1,
+  createdAt: -1,
+});
 
 PaymentSchema.index(
   { tenantId: 1, idempotencyKey: 1 },
@@ -110,12 +152,25 @@ export const zReconcile = z.object({
     status: z.enum([
       "created",
       "requires_action",
+      "requires_capture",
       "processing",
       "succeeded",
+      "canceled",
+      "authorization_expired",
+      "payment_required",
+      "refund_required",
+      "manual_review",
       "failed",
       "refunded",
       "partially_refunded",
     ]),
+    stripeStatus: z.string().optional(),
+    capturedAt: z.union([z.string(), z.date()]).optional(),
+    canceledAt: z.union([z.string(), z.date()]).optional(),
+    cancellationReason: z.string().optional(),
+    failureCode: z.string().optional(),
+    failureMessage: z.string().optional(),
+    nextAction: z.any().optional(),
     metadata: z.record(z.string()).optional(),
   }),
 });

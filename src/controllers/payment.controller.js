@@ -2,7 +2,10 @@
 import {
   createIntent,
   findByStripePaymentIntent,
+  findLatestApplicationPayment,
   reconcileStripeEvent,
+  capturePaymentIntent,
+  cancelPaymentIntent,
   recordExternal,
   createRefund,
   listRefunds,
@@ -39,6 +42,58 @@ export async function getPaymentByStripeId(req, res, next) {
       return res.notFoundRecord("Payment not found");
     }
     res.success(doc);
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function getLatestApplicationPayment(req, res, next) {
+  try {
+    const doc = await findLatestApplicationPayment(
+      req.params.applicationId,
+      req.ctx,
+    );
+    if (!doc) {
+      return res.notFoundRecord("Payment not found");
+    }
+    res.success({
+      id: doc._id.toString(),
+      paymentIntentId: doc.stripe?.paymentIntentId || null,
+      clientSecret: doc.stripe?.clientSecret || null,
+      status: doc.status,
+      stripeStatus: doc.stripe?.status || null,
+      amount: doc.amount,
+      currency: doc.currency,
+      attemptNumber: doc.attemptNumber || 1,
+      isActiveAttempt: doc.isActiveAttempt !== false,
+      applicationId: doc.applicationId,
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+    });
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function captureExistingPaymentIntent(req, res, next) {
+  try {
+    const result = await capturePaymentIntent(
+      req.params.paymentIntentId,
+      req.ctx,
+    );
+    res.success(result);
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function cancelExistingPaymentIntent(req, res, next) {
+  try {
+    const result = await cancelPaymentIntent(
+      req.params.paymentIntentId,
+      req.ctx,
+    );
+    res.success(result);
   } catch (e) {
     next(e);
   }
