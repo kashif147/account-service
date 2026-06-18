@@ -331,12 +331,14 @@ export async function createIntent(input, ctx) {
 
   const memberId = parsed.memberId || memberIdFromMetadata;
   const applicationId = parsed.applicationId || applicationIdFromMetadata;
+  const isApplicationPayment = Boolean(applicationId) && !memberId;
+  const stripeCaptureMethod = isApplicationPayment ? "manual" : "automatic";
   const logger = (await import("../config/logger.js")).default;
   let attemptNumber = 1;
   let supersededPaymentId = null;
   let persistIdempotencyKey = true;
 
-  if (applicationId && !parsed.useCheckout) {
+  if (isApplicationPayment && !parsed.useCheckout) {
     const attemptDecision = await resolveReusableApplicationAttempt({
       applicationId,
       purpose: parsed.purpose,
@@ -586,7 +588,7 @@ export async function createIntent(input, ctx) {
         .digest("hex")
         .substring(0, 64);
     }
-  } else if (applicationId && !parsed.useCheckout) {
+  } else if (isApplicationPayment && !parsed.useCheckout) {
     const applicationAttemptKeyParts = [
       "application-payment",
       ctx.tenantId,
@@ -625,6 +627,7 @@ export async function createIntent(input, ctx) {
       applicationId,
       amount: parsed.amount,
       purpose: parsed.purpose,
+      captureMethod: stripeCaptureMethod,
     },
     "Creating Stripe payment intent with idempotency key",
   );
@@ -658,7 +661,7 @@ export async function createIntent(input, ctx) {
           },
         ],
         payment_intent_data: {
-          capture_method: "manual",
+          capture_method: stripeCaptureMethod,
           metadata: stripeMetadata,
         },
         success_url: `${
@@ -774,7 +777,7 @@ export async function createIntent(input, ctx) {
           amount: parsed.amount,
           currency: normalizedCurrency,
           payment_method_types: ["card"],
-          capture_method: "manual",
+          capture_method: stripeCaptureMethod,
           metadata: stripeMetadata,
         },
         { idempotencyKey: stripeIdempotencyKey },
@@ -799,7 +802,7 @@ export async function createIntent(input, ctx) {
           amount: parsed.amount,
           currency: normalizedCurrency,
           payment_method_types: ["card"],
-          capture_method: "manual",
+          capture_method: stripeCaptureMethod,
           metadata: stripeMetadata,
         });
       } else {
@@ -941,7 +944,7 @@ export async function createIntent(input, ctx) {
     }
 
     const payment = await Payment.create(paymentData);
-    if (applicationId && stripeIds.paymentIntentId) {
+    if (isApplicationPayment && stripeIds.paymentIntentId) {
       await Payment.updateMany(
         {
           tenantId: ctx.tenantId,
