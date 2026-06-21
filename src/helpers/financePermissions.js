@@ -55,3 +55,42 @@ export function collectRequestPermissions(req) {
   }
   return [...new Set(merged)];
 }
+
+const FINANCE_ACTION_ROLES = new Set([
+  "SU",
+  "SUPER USER",
+  "ASU",
+  "ASSISTANT SUPER USER",
+  "AM",
+  "ACCOUNTS MANAGER",
+  "ACCOUNT MANAGER",
+  "DAM",
+  "DEPUTY ACCOUNTS MANAGER",
+  "DEPUTY ACCOUNT MANAGER",
+]);
+
+function normalizeRoleValue(role) {
+  if (!role) return "";
+  const raw =
+    typeof role === "string"
+      ? role
+      : role.code || role.name || role.roleCode || role.roleName || "";
+  return String(raw).trim().toUpperCase();
+}
+
+export function collectRequestRoles(req) {
+  const fromUser = req.user?.roles;
+  const fromCtx = req.ctx?.roles;
+  const fromReq = req.roles;
+  const merged = [];
+  for (const src of [fromUser, fromCtx, fromReq]) {
+    if (Array.isArray(src)) merged.push(...src);
+  }
+  return [...new Set(merged.map(normalizeRoleValue).filter(Boolean))];
+}
+
+export function hasFinanceActionRole(req) {
+  return collectRequestRoles(req).some((role) =>
+    FINANCE_ACTION_ROLES.has(role),
+  );
+}

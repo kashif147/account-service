@@ -60,14 +60,19 @@ export function allocateMemberRefund1400Amounts(
   };
 }
 
-function sumOwed1400Rows(rows) {
+function sumOwed1400Rows(rows, { netAcrossRows = false } = {}) {
   let arrears = 0;
   let current = 0;
   for (const r of rows) {
     const amt = Number(r.amount) || 0;
-    const owed = amt > 0 ? amt : 0;
-    if (r.bucket === "arrears") arrears += owed;
-    else if (r.bucket === "current") current += owed;
+    const amount = netAcrossRows ? amt : amt > 0 ? amt : 0;
+    if (r.bucket === "arrears") arrears += amount;
+    else if (r.bucket === "current") current += amount;
+  }
+
+  if (netAcrossRows) {
+    arrears = Math.max(0, arrears);
+    current = Math.max(0, current);
   }
   return { arrears, current };
 }
@@ -87,7 +92,7 @@ export async function memberOwed1400AllYears(memberId) {
     bucket: { $in: ["arrears", "current"] },
   }).lean();
 
-  return sumOwed1400Rows(rows);
+  return sumOwed1400Rows(rows, { netAcrossRows: true });
 }
 
 /**

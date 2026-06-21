@@ -45,6 +45,7 @@ import {
 import validate from "../middlewares/validate.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
+import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
 
 const router = express.Router();
@@ -95,6 +96,7 @@ router.post(
   "/credit-notes",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  requireFinanceWrite,
   idempotency(),
   createCreditNoteRules,
   validate,
@@ -123,6 +125,7 @@ router.post(
   "/credit-notes/:docNo/approve",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  requireFinanceWrite,
   idempotency(),
   creditNoteDocNoParam,
   validate,
@@ -133,6 +136,7 @@ router.post(
   "/credit-notes/:docNo/cancel",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  requireFinanceWrite,
   creditNoteDocNoParam,
   validate,
   cancelCreditNoteHandler,
@@ -143,6 +147,7 @@ router.post(
   "/credit-note",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  requireFinanceWrite,
   idempotency(),
   createCreditNoteRules,
   validate,
@@ -154,6 +159,7 @@ router.post(
   "/writeoff",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  requireFinanceWrite,
   idempotency(),
   writeOffRules,
   validate,
@@ -186,6 +192,7 @@ router.post(
   "/apply-member-credit",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
+  requireFinanceWrite,
   idempotency(),
   applyMemberCreditRules,
   validate,
@@ -196,6 +203,7 @@ router.post(
   "/reverse-receipt",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  requireFinanceWrite,
   idempotency(),
   reverseReceiptRules,
   validate,
@@ -206,6 +214,7 @@ router.post(
   "/reverse-writeoff",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  requireFinanceWrite,
   idempotency(),
   reverseWriteOffRules,
   validate,
@@ -216,6 +225,7 @@ router.post(
   "/reassign-payments",
   ensureAuthenticated,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
+  requireFinanceWrite,
   idempotency(),
   reassignPaymentsRules,
   validate,

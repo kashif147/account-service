@@ -2,6 +2,7 @@ import { describe, expect, test, afterEach, jest } from "@jest/globals";
 import {
   allocateMemberReceiptAmounts,
   allocateMemberRefund1400Amounts,
+  memberOwed1400AllYears,
   member2020AdvanceCreditCents,
 } from "../helpers/paymentReceiptAllocation.js";
 import MaterializedBalance from "../models/materializedBalance.model.js";
@@ -80,5 +81,26 @@ describe("member2020AdvanceCreditCents", () => {
     await expect(
       member2020AdvanceCreditCents("M1", 2026),
     ).resolves.toBe(5000);
+  });
+});
+
+describe("memberOwed1400AllYears", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test("nets later write-off credits against older arrears rows", async () => {
+    jest.spyOn(MaterializedBalance, "find").mockReturnValue({
+      lean: jest.fn().mockResolvedValue([
+        { bucket: "arrears", amount: 12000 },
+        { bucket: "arrears", amount: -12000 },
+        { bucket: "current", amount: 3000 },
+      ]),
+    });
+
+    await expect(memberOwed1400AllYears("M1")).resolves.toEqual({
+      arrears: 0,
+      current: 3000,
+    });
   });
 });

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "@jest/globals";
 import {
-  hasFinancePermission,
   collectRequestPermissions,
+  collectRequestRoles,
+  hasFinanceActionRole,
+  hasFinancePermission,
 } from "../helpers/financePermissions.js";
 
 describe("financePermissions", () => {
@@ -27,5 +29,25 @@ describe("financePermissions", () => {
     expect(merged).toContain("payments:read");
     expect(merged).toContain("accounts.reports:read");
     expect(merged).toContain("payments:write");
+  });
+
+  test("hasFinanceActionRole allows Accounts Manager role code", () => {
+    const req = { user: { roles: ["AM"] } };
+    expect(hasFinanceActionRole(req)).toBe(true);
+  });
+
+  test("hasFinanceActionRole allows Super User roles", () => {
+    expect(hasFinanceActionRole({ user: { roles: ["SU"] } })).toBe(true);
+    expect(hasFinanceActionRole({ user: { roles: ["ASU"] } })).toBe(true);
+  });
+
+  test("hasFinanceActionRole allows Deputy Accounts Manager role name", () => {
+    const req = { ctx: { roles: [{ name: "Deputy Accounts Manager" }] } };
+    expect(hasFinanceActionRole(req)).toBe(true);
+  });
+
+  test("collectRequestRoles normalizes role objects", () => {
+    const req = { user: { roles: [{ code: "am" }] } };
+    expect(collectRequestRoles(req)).toContain("AM");
   });
 });

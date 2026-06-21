@@ -1,6 +1,7 @@
 import { AppError } from "../errors/AppError.js";
 import {
   collectRequestPermissions,
+  hasFinanceActionRole,
   hasFinancePermission,
 } from "../helpers/financePermissions.js";
 
@@ -15,7 +16,7 @@ function canFinanceRead(req) {
 
 function canFinanceWrite(req) {
   const perms = collectRequestPermissions(req);
-  return (
+  return hasFinanceActionRole(req) && (
     hasFinancePermission(perms, "payments", "write") ||
     hasFinancePermission(perms, "payments", "create") ||
     hasFinancePermission(perms, "accounts.admin", "write") ||
@@ -43,7 +44,7 @@ export function requireFinanceWrite(req, res, next) {
   if (canFinanceWrite(req)) return next();
   return next(
     AppError.forbidden(
-      "Finance write permission required (payments:write or accounts.admin:write)",
+      "Finance action access requires Accounts Manager or Deputy Accounts Manager role with finance write permission",
     ),
   );
 }

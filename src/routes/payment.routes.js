@@ -1,6 +1,7 @@
 import express from "express";
 import context from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
+import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
 import {
@@ -85,6 +86,7 @@ router.get(
 
 router.post(
   "/refunds",
+  requireFinanceWrite,
   idempotency(),
   zodValidate(zCreateRefund),
   createPaymentRefund

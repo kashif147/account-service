@@ -15,6 +15,7 @@ import GLTransaction from "../models/glTransaction.model.js";
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
+import { isNoFeeMembershipCategory } from "../helpers/noFeeMembershipCategory.js";
 
 /**
  * Maps membership category to income account code
@@ -303,6 +304,14 @@ export async function getMembershipPricing({
   let incomeCode = null;
   let product = null;
 
+  if (isNoFeeMembershipCategory(categoryName)) {
+    logger.info(
+      { categoryName, profileId, applicationId },
+      "No-fee membership category resolved; annual fee set to zero"
+    );
+    return { incomeCode: "4090", annualFee: 0 };
+  }
+
   if (!tenantId) {
     logger.warn(
       { categoryName, profileId, applicationId },
@@ -518,6 +527,8 @@ export async function getMembershipPricing({
       "General All Grades": 50000, // 500.00 in cents
       Associate: 30000, // 300.00 in cents
       Student: 0,
+      "Undergraduate Student": 0,
+      undergraduate_student: 0,
     };
     annualFee = defaultFees[categoryName] || 50000; // Default to 500.00 in cents
     logger.warn(
@@ -719,25 +730,7 @@ export async function handleMemberCreated(payload) {
       ? `INV-${year}-${applicationId}`
       : `INV-${year}-SUB-${subscriptionId}`;
 
-    // Idempotency check: Check if invoice already exists before creating
-    // Wrap in global limiter to prevent connection pool exhaustion
-    const existingInvoice = await globalDBLimiter(async () => {
-      return await GLTransaction.findOne({
-        docNo: docNo,
-      }).lean();
-    });
-
-    if (existingInvoice) {
-      logger.info(
-        {
-          applicationId,
-          memberId,
-          docNo,
-          existingInvoiceId: existingInvoice._id,
-        },
-        "Invoice already exists - skipping creation (idempotency check)"
-      );
-    } else {
+    if (annualFee === 0) {
       logger.info(
         {
           applicationId,
@@ -746,106 +739,138 @@ export async function handleMemberCreated(payload) {
           annualFee,
           incomeCode,
           docNo,
-          dateJoined,
-          processingDate: processingDateOnly ?? null,
-          invoicePostingDate,
         },
-        "Creating invoice for newly created member"
+        "Skipping invoice creation for no-fee membership category"
       );
+    } else {
+      // Idempotency check: Check if invoice already exists before creating
+      // Wrap in global limiter to prevent connection pool exhaustion
+      const existingInvoice = await globalDBLimiter(async () => {
+        return await GLTransaction.findOne({
+          docNo: docNo,
+        }).lean();
+      });
 
-      // Step 1: Create invoice
-      // annualFee is already in cents (minor units) - use directly
-      // All money is stored as integer cents throughout the system
+      if (existingInvoice) {
+        logger.info(
+          {
+            applicationId,
+            memberId,
+            docNo,
+            existingInvoiceId: existingInvoice._id,
+          },
+          "Invoice already exists - skipping creation (idempotency check)"
+        );
+      } else {
+        logger.info(
+          {
+            applicationId,
+            memberId,
+            categoryName,
+            annualFee,
+            incomeCode,
+            docNo,
+            dateJoined,
+            processingDate: processingDateOnly ?? null,
+            invoicePostingDate,
+          },
+          "Creating invoice for newly created member"
+        );
 
-      const invoiceReq = {
-        body: {
-          date: invoicePostingDate,
-          docNo,
-          memberId,
-          annualFee: annualFee, // Integer in cents
-          incomeCode,
-          categoryName,
-          periodBucket: "current",
-          joinDate: dateJoined,
-        },
-      };
+        // Step 1: Create invoice
+        // annualFee is already in cents (minor units) - use directly
+        // All money is stored as integer cents throughout the system
 
-      const invoiceRes = {
-        created: (data) => {
-          logger.info(
-            {
-              docNo,
-              memberId,
-              invoiceCount: Array.isArray(data) ? data.length : 1,
-            },
-            "Invoice created successfully for new member"
-          );
-        },
-        status: () => invoiceRes,
-        json: () => {},
-      };
+        const invoiceReq = {
+          body: {
+            date: invoicePostingDate,
+            docNo,
+            memberId,
+            annualFee: annualFee, // Integer in cents
+            incomeCode,
+            categoryName,
+            periodBucket: "current",
+            joinDate: dateJoined,
+          },
+        };
 
-      const invoiceNext = (err) => {
-        if (err) {
+        const invoiceRes = {
+          created: (data) => {
+            logger.info(
+              {
+                docNo,
+                memberId,
+                invoiceCount: Array.isArray(data) ? data.length : 1,
+              },
+              "Invoice created successfully for new member"
+            );
+          },
+          status: () => invoiceRes,
+          json: () => {},
+        };
+
+        const invoiceNext = (err) => {
+          if (err) {
+            // Check if error is due to duplicate docNo (idempotency)
+            if (
+              err.message?.includes("duplicate") ||
+              err.message?.includes("E11000") ||
+              err.code === 11000
+            ) {
+              logger.info(
+                {
+                  applicationId,
+                  memberId,
+                  docNo,
+                  error: err.message,
+                },
+                "Invoice creation failed due to duplicate - likely already exists (idempotency)"
+              );
+              // Don't throw - treat as success (idempotent operation)
+              return;
+            }
+            logger.error(
+              { error: err.message, applicationId, memberId, docNo },
+              "Failed to create invoice for new member"
+            );
+            throw err;
+          }
+        };
+
+        try {
+          // Invoice creation is already limited via postBalancedJournal wrapper
+          // No need to wrap here - postBalancedJournal handles the limiting
+          await invoice(invoiceReq, invoiceRes, invoiceNext);
+        } catch (invoiceError) {
           // Check if error is due to duplicate docNo (idempotency)
           if (
-            err.message?.includes("duplicate") ||
-            err.message?.includes("E11000") ||
-            err.code === 11000
+            invoiceError.message?.includes("duplicate") ||
+            invoiceError.message?.includes("E11000") ||
+            invoiceError.code === 11000
           ) {
             logger.info(
               {
                 applicationId,
                 memberId,
                 docNo,
-                error: err.message,
+                error: invoiceError.message,
               },
               "Invoice creation failed due to duplicate - likely already exists (idempotency)"
             );
-            // Don't throw - treat as success (idempotent operation)
+            // Continue to claim credit even if duplicate error
+          } else {
+            logger.error(
+              {
+                error: invoiceError.message,
+                applicationId,
+                memberId,
+                docNo,
+              },
+              "Failed to create invoice - will not claim credit"
+            );
+            // Don't proceed to claim credit if invoice creation failed (non-duplicate error)
             return;
           }
-          logger.error(
-            { error: err.message, applicationId, memberId, docNo },
-            "Failed to create invoice for new member"
-          );
-          throw err;
-        }
-      };
-
-      try {
-        // Invoice creation is already limited via postBalancedJournal wrapper
-        // No need to wrap here - postBalancedJournal handles the limiting
-        await invoice(invoiceReq, invoiceRes, invoiceNext);
-      } catch (invoiceError) {
-        // Check if error is due to duplicate docNo (idempotency)
-        if (
-          invoiceError.message?.includes("duplicate") ||
-          invoiceError.message?.includes("E11000") ||
-          invoiceError.code === 11000
-        ) {
-          logger.info(
-            {
-              applicationId,
-              memberId,
-              docNo,
-              error: invoiceError.message,
-            },
-            "Invoice creation failed due to duplicate - likely already exists (idempotency)"
-          );
-          // Continue to claim credit even if duplicate error
-        } else {
-          logger.error(
-            {
-              error: invoiceError.message,
-              applicationId,
-              memberId,
-              docNo,
-            },
-            "Failed to create invoice - will not claim credit"
-          );
-          // Don't proceed to claim credit if invoice creation failed (non-duplicate error)
-          return;
         }
       }
     }
