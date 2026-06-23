@@ -1,6 +1,8 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
 
+const MEMBER_CREDIT_BUCKETS = ["arrears", "current", "advance"];
+
 function normMemberId(memberId) {
   return String(memberId || "").trim();
 }
@@ -46,6 +48,26 @@ export async function sumNet1400CurrentCents(memberId) {
     sum += Number(r.amount) || 0;
   }
   return Math.round(sum);
+}
+
+/**
+ * Operational available credit for reminder eligibility across all years.
+ * Negative materialized 2020/1400 rows represent credit held for the member.
+ */
+export async function sumAvailableCreditCents(memberId) {
+  const mid = normMemberId(memberId);
+  if (!mid) return 0;
+  const rows = await MaterializedBalance.find({
+    memberId: mid,
+    accountCode: { $in: ["2020", "1400"] },
+    bucket: { $in: MEMBER_CREDIT_BUCKETS },
+  }).lean();
+  let credit = 0;
+  for (const r of rows) {
+    const amount = Number(r.amount) || 0;
+    if (amount < 0) credit += -amount;
+  }
+  return Math.round(credit);
 }
 
 /**
@@ -97,18 +119,29 @@ export async function findLastMemberReceipt(memberId, asOf) {
 export async function getReminderEligibilitySnapshot(memberId, asOf) {
   const mid = normMemberId(memberId);
   const asOfDate = asDate(asOf);
-  const [net1400ArrearsCents, net1400CurrentCents, receipt] =
+  const [net1400ArrearsCents, net1400CurrentCents, availableCreditCents, receipt] =
     await Promise.all([
       sumNet1400ArrearsCents(mid),
       sumNet1400CurrentCents(mid),
+      sumAvailableCreditCents(mid),
       findLastMemberReceipt(mid, asOfDate),
     ]);
+  const gross1400OwedCents = Math.max(
+    0,
+    net1400ArrearsCents + net1400CurrentCents,
+  );
 
   return {
     memberId: mid,
     balanceAsOf: asOfDate.toISOString(),
     net1400ArrearsCents,
     net1400CurrentCents,
+    gross1400OwedCents,
+    availableCreditCents,
+    netOutstandingAfterCreditCents: Math.max(
+      0,
+      gross1400OwedCents - availableCreditCents,
+    ),
     lastReceiptGlDate: receipt.lastReceiptGlDate,
     lastReceiptDocNo: receipt.lastReceiptDocNo,
     allocationPolicy: "payment_arrears_current_advance_refund_advance_1400",
