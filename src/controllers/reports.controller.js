@@ -59,6 +59,31 @@ function applyPortalMemberStatementLabels(txns) {
   });
 }
 
+function positiveCents(value) {
+  const n = Math.round(Number(value) || 0);
+  return n > 0 ? n : 0;
+}
+
+function creditCents(value) {
+  const n = Math.round(Number(value) || 0);
+  return n < 0 ? -n : 0;
+}
+
+function financeTotalsFromMatBuckets(byBucket = {}) {
+  const arrears = positiveCents(byBucket["1400:arrears"]);
+  const current = positiveCents(byBucket["1400:current"]);
+  const availableCredit = Object.entries(byBucket).reduce((sum, [key, amount]) => {
+    if (!key.startsWith("2020:") && !key.startsWith("1400:")) return sum;
+    return sum + creditCents(amount);
+  }, 0);
+
+  return {
+    outstandingBalance: arrears + current,
+    availableCredit,
+    refundableBalance: availableCredit,
+  };
+}
+
 /** After `paymentIntentId` is resolved, use it as `reference` so the row is not labeled only as CLAIM-{uuid}. */
 function attachClaimLedgerReference(items) {
   if (!Array.isArray(items)) return items;
@@ -928,6 +953,18 @@ export async function memberSummaryBatch(req, res, next) {
     const enrichedItems = await Promise.all(
       items.map((row) =>
         financeLimit(async () => {
+          if (effectiveYear == null) {
+            const totals = financeTotalsFromMatBuckets(
+              matByMember.get(row.memberId)?.byBucket,
+            );
+            return {
+              ...row,
+              outstandingBalance: totals.outstandingBalance,
+              availableCredit: totals.availableCredit,
+              refundableBalance: totals.refundableBalance,
+            };
+          }
+
           try {
             const fs = await computeMemberFinanceSummary(row.memberId, financeYear);
             return {

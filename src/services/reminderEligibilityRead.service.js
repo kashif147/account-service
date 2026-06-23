@@ -1,5 +1,6 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
+import { memberPaymentCreditCents } from "../helpers/memberLastPayment.js";
 
 const MEMBER_CREDIT_BUCKETS = ["arrears", "current", "advance"];
 
@@ -75,7 +76,13 @@ export async function sumAvailableCreditCents(memberId) {
  */
 export async function findLastMemberReceipt(memberId, asOf) {
   const mid = normMemberId(memberId);
-  if (!mid) return { lastReceiptGlDate: null, lastReceiptDocNo: null };
+  if (!mid) {
+    return {
+      lastReceiptGlDate: null,
+      lastReceiptDocNo: null,
+      lastReceiptAmountCents: null,
+    };
+  }
   const end = asDate(asOf);
 
   const doc = await GLTransaction.findOne({
@@ -103,13 +110,20 @@ export async function findLastMemberReceipt(memberId, asOf) {
     ],
   })
     .sort({ date: -1, createdAt: -1 })
-    .select({ date: 1, docNo: 1 })
+    .select({ date: 1, docNo: 1, entries: 1 })
     .lean();
 
-  if (!doc) return { lastReceiptGlDate: null, lastReceiptDocNo: null };
+  if (!doc) {
+    return {
+      lastReceiptGlDate: null,
+      lastReceiptDocNo: null,
+      lastReceiptAmountCents: null,
+    };
+  }
   return {
     lastReceiptGlDate: doc.date ? new Date(doc.date).toISOString() : null,
     lastReceiptDocNo: doc.docNo || null,
+    lastReceiptAmountCents: memberPaymentCreditCents(mid, doc),
   };
 }
 
@@ -144,6 +158,7 @@ export async function getReminderEligibilitySnapshot(memberId, asOf) {
     ),
     lastReceiptGlDate: receipt.lastReceiptGlDate,
     lastReceiptDocNo: receipt.lastReceiptDocNo,
+    lastReceiptAmountCents: receipt.lastReceiptAmountCents,
     allocationPolicy: "payment_arrears_current_advance_refund_advance_1400",
   };
 }
