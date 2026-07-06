@@ -6,6 +6,7 @@ import Payment, {
 import Refund, { zCreateRefund } from "../models/refund.model.js";
 import { AppError } from "../errors/AppError.js";
 import { getStripe } from "../lib/stripe.js";
+import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
 import {
   assertRefundWithinCredit,
   getClaimRecipientMemberIdForApplication,
@@ -1153,6 +1154,57 @@ function buildWebhookAuditEntry(parsed, finalStatus) {
   };
 }
 
+async function publishApplicationPaymentUpdate(payment, parsed, ctx = {}) {
+  const metadata = parsed?.payment?.metadata || {};
+  const applicationId =
+    payment?.applicationId || metadata.applicationId || metadata.application_id;
+  const memberIdFromMetadata = metadata.memberId || metadata.member_id;
+  const memberId = applicationId ? memberIdFromMetadata : payment?.memberId;
+
+  if (!applicationId || memberId) return;
+
+  const payload = {
+    applicationId,
+    status: parsed.payment.status,
+    paymentIntentId: parsed.payment.paymentIntentId,
+    amount: parsed.payment.amount,
+    currency: parsed.payment.currency,
+    tenantId:
+      payment?.tenantId || ctx.tenantId || metadata.tenantId || metadata.tenant_id,
+  };
+
+  try {
+    await publishDomainEvent(APPLICATION_EVENTS.STATUS_UPDATED, payload, {
+      source: parsed.type?.startsWith("manual-")
+        ? "account-service"
+        : "stripe-webhook",
+      eventId: parsed.eventId,
+      tenantId: payload.tenantId,
+    });
+    const logger = (await import("../config/logger.js")).default;
+    logger.info(
+      {
+        applicationId: payload.applicationId,
+        paymentIntentId: payload.paymentIntentId,
+        tenantId: payload.tenantId,
+        status: payload.status,
+      },
+      "Published application payment update event",
+    );
+  } catch (error) {
+    const logger = (await import("../config/logger.js")).default;
+    logger.error(
+      {
+        error: error.message,
+        applicationId: payload.applicationId,
+        paymentIntentId: payload.paymentIntentId,
+        tenantId: payload.tenantId,
+      },
+      "Failed to publish application payment update event",
+    );
+  }
+}
+
 function appendDefinedStripeFields(set, parsed) {
   const capturedAt = normalizeOptionalDate(parsed.payment.capturedAt);
   const canceledAt = normalizeOptionalDate(parsed.payment.canceledAt);
@@ -1381,6 +1433,7 @@ export async function reconcileStripeEvent(input, ctx) {
         },
         "Skipping duplicate Stripe webhook event",
       );
+      await publishApplicationPaymentUpdate(existingPayment, parsed, ctx);
       return { ok: true, duplicate: true };
     }
 
@@ -1551,6 +1604,7 @@ export async function reconcileStripeEvent(input, ctx) {
             },
             "Payment webhook event was processed by another worker",
           );
+          await publishApplicationPaymentUpdate(retryPayment, parsed, ctx);
           return { ok: true, duplicate: true };
         }
 
@@ -1603,6 +1657,7 @@ export async function reconcileStripeEvent(input, ctx) {
           }
         }
 
+        await publishApplicationPaymentUpdate(retryPayment, parsed, ctx);
         return { ok: true };
       }
 
@@ -1681,6 +1736,7 @@ export async function reconcileStripeEvent(input, ctx) {
       }
     }
 
+    await publishApplicationPaymentUpdate(doc, parsed, ctx);
     return { ok: true };
   } catch (error) {
     const logger = (await import("../config/logger.js")).default;
@@ -1752,6 +1808,7 @@ export async function reconcileStripeEvent(input, ctx) {
         }
       }
 
+      await publishApplicationPaymentUpdate(existingPayment, parsed, ctx);
       return { ok: true };
     }
 
@@ -1883,6 +1940,7 @@ export async function reconcileStripeEvent(input, ctx) {
           }
         }
 
+        await publishApplicationPaymentUpdate(doc, parsed, ctx);
         return { ok: true };
       }
     }
@@ -1941,6 +1999,7 @@ export async function reconcileStripeEvent(input, ctx) {
         }
 
         // Return success even if original update failed - payment exists and journal is handled
+        await publishApplicationPaymentUpdate(finalRetry, parsed, ctx);
         return { ok: true };
       }
     }

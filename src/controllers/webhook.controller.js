@@ -1,43 +1,8 @@
 // src/controllers/webhook.controller.js
 import stripe from "../lib/stripe.js";
 import { reconcileStripeEvent } from "../services/payments.service.js";
-import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
 import bizLogger from "../config/bizLogger.js";
-
-async function publishApplicationPaymentEvent(eventPayload, event) {
-  if (!eventPayload) return;
-
-  try {
-    await publishDomainEvent(
-      APPLICATION_EVENTS.STATUS_UPDATED,
-      eventPayload,
-      {
-        source: "stripe-webhook",
-        eventId: event.id,
-      }
-    );
-    logger.info(
-      {
-        applicationId: eventPayload.applicationId,
-        paymentIntentId: eventPayload.paymentIntentId,
-        tenantId: eventPayload.tenantId,
-        status: eventPayload.status,
-      },
-      "Published application payment update event to portal-service"
-    );
-  } catch (error) {
-    logger.error(
-      {
-        error: error.message,
-        applicationId: eventPayload.applicationId,
-        paymentIntentId: eventPayload.paymentIntentId,
-        tenantId: eventPayload.tenantId,
-      },
-      "Failed to publish application payment update event"
-    );
-  }
-}
 
 export async function handleStripeWebhook(req, res) {
   const sig = req.headers["stripe-signature"];
@@ -99,7 +64,6 @@ async function processStripeEvent(event) {
   }
 
   let paymentData = {};
-  let applicationEventPayload = null;
   switch (event.type) {
     case "payment_intent.amount_capturable_updated": {
       const pi = obj;
@@ -126,16 +90,6 @@ async function processStripeEvent(event) {
         correlationId: metadata.correlationId || event.id,
       });
 
-      if (applicationId && !memberId) {
-        applicationEventPayload = {
-          applicationId,
-          status: "requires_capture",
-          paymentIntentId: pi.id,
-          amount: pi.amount,
-          currency: pi.currency,
-          tenantId,
-        };
-      }
       break;
     }
     case "payment_intent.succeeded": {
@@ -166,16 +120,7 @@ async function processStripeEvent(event) {
         correlationId: metadata.correlationId || event.id,
       });
 
-      if (applicationId && !memberId) {
-        applicationEventPayload = {
-          applicationId,
-          status: "submitted",
-          paymentIntentId: pi.id,
-          amount: pi.amount_received || pi.amount,
-          currency: pi.currency,
-          tenantId,
-        };
-      } else if (memberId) {
+      if (memberId) {
         logger.info(
           {
             memberId,
@@ -276,16 +221,6 @@ async function processStripeEvent(event) {
         paymentMethodId: pi.payment_method || undefined,
         metadata: pi.metadata || {},
       };
-      if (applicationId && !memberId) {
-        applicationEventPayload = {
-          applicationId,
-          status: "failed",
-          paymentIntentId: pi.id,
-          amount: pi.amount,
-          currency: pi.currency,
-          tenantId,
-        };
-      }
       break;
     }
     case "payment_intent.requires_action": {
@@ -305,16 +240,6 @@ async function processStripeEvent(event) {
         nextAction: pi.next_action || undefined,
         metadata: pi.metadata || {},
       };
-      if (applicationId && !memberId) {
-        applicationEventPayload = {
-          applicationId,
-          status: "requires_action",
-          paymentIntentId: pi.id,
-          amount: pi.amount,
-          currency: pi.currency,
-          tenantId,
-        };
-      }
       break;
     }
     case "payment_intent.canceled": {
@@ -340,16 +265,6 @@ async function processStripeEvent(event) {
         paymentMethodId: pi.payment_method || undefined,
         metadata: pi.metadata || {},
       };
-      if (applicationId && !memberId) {
-        applicationEventPayload = {
-          applicationId,
-          status,
-          paymentIntentId: pi.id,
-          amount: pi.amount,
-          currency: pi.currency,
-          tenantId,
-        };
-      }
       break;
     }
     default: {
@@ -360,7 +275,7 @@ async function processStripeEvent(event) {
 
   // Only reconcile if paymentData was set (not all cases set it)
   if (paymentData && paymentData.paymentIntentId) {
-    const reconcileResult = await reconcileStripeEvent(
+    await reconcileStripeEvent(
       {
         eventId: event.id,
         type: event.type,
@@ -368,8 +283,5 @@ async function processStripeEvent(event) {
       },
       { tenantId }
     );
-    if (!reconcileResult?.duplicate) {
-      await publishApplicationPaymentEvent(applicationEventPayload, event);
-    }
   }
 }
