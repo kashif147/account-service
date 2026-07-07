@@ -4,6 +4,8 @@ import { jest } from "@jest/globals";
 // Ensure API key check passes
 process.env.ACCOUNTS_API_KEY = process.env.ACCOUNTS_API_KEY || "test-key";
 
+const publishDomainEventMock = jest.fn().mockResolvedValue(true);
+
 // Mock Stripe client before importing app/services
 await jest.unstable_mockModule("../lib/stripe.js", () => {
   const stripeMock = {
@@ -32,7 +34,22 @@ await jest.unstable_mockModule("../lib/stripe.js", () => {
 await jest.unstable_mockModule("../rabbitMQ/events.js", () => ({
   APPLICATION_EVENTS: {},
   EVENT_TYPES: {},
-  publishDomainEvent: jest.fn().mockResolvedValue(true),
+  publishDomainEvent: publishDomainEventMock,
+  initEventSystem: jest.fn().mockResolvedValue(undefined),
+  setupConsumers: jest.fn().mockResolvedValue(undefined),
+  shutdownEventSystem: jest.fn().mockResolvedValue(undefined),
+  init: jest.fn(),
+  publisher: {},
+  consumer: {},
+  shutdown: jest.fn(),
+}));
+
+await jest.unstable_mockModule("../rabbitMQ/index.js", () => ({
+  APPLICATION_EVENTS: {
+    STATUS_UPDATED: "application.status.submitted",
+  },
+  EVENT_TYPES: {},
+  publishDomainEvent: publishDomainEventMock,
   initEventSystem: jest.fn().mockResolvedValue(undefined),
   setupConsumers: jest.fn().mockResolvedValue(undefined),
   shutdownEventSystem: jest.fn().mockResolvedValue(undefined),
@@ -136,6 +153,17 @@ describe("Payments API", () => {
           stripe: { paymentIntentId: "pi_test_123" },
         });
       }
+      if (filter["stripe.paymentIntentId"] === "pi_app_member_meta") {
+        return chainFindOne({
+          ...base,
+          _id: { toString: () => "pay_app_member_meta" },
+          tenantId: "demo-tenant",
+          memberId: null,
+          applicationId: "app-1",
+          mode: "stripe",
+          stripe: { paymentIntentId: "pi_app_member_meta" },
+        });
+      }
       if (filter._id) {
         const idStr = String(filter._id);
         const isExternalOid = idStr === OID;
@@ -236,6 +264,43 @@ describe("Payments API", () => {
         },
       });
     expect(res.status).toBe(200);
+  });
+
+  test("publishes application payment update when metadata has memberId but payment is application-linked", async () => {
+    publishDomainEventMock.mockClear();
+
+    const res = await request(app)
+      .post("/api/payments/reconcile")
+      .set(headers)
+      .send({
+        eventId: "evt_app_member_meta",
+        type: "payment_intent.succeeded",
+        payment: {
+          paymentIntentId: "pi_app_member_meta",
+          amount: 500,
+          currency: "eur",
+          status: "succeeded",
+          metadata: {
+            applicationId: "app-1",
+            memberId: "portal-user-id",
+            tenantId: "demo-tenant",
+          },
+        },
+      });
+
+    expect(res.status).toBe(200);
+    expect(publishDomainEventMock).toHaveBeenCalledWith(
+      "application.status.submitted",
+      expect.objectContaining({
+        applicationId: "app-1",
+        status: "succeeded",
+        paymentIntentId: "pi_app_member_meta",
+        tenantId: "demo-tenant",
+      }),
+      expect.objectContaining({
+        tenantId: "demo-tenant",
+      }),
+    );
   });
 
   test("POST /api/payments/record-external in", async () => {

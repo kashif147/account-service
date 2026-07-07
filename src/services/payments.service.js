@@ -80,6 +80,12 @@ function paymentIntentStatusToDomain(pi) {
   return normalizeStripeStatusForPayment(pi?.status);
 }
 
+function isApplicationPaymentRequest({ purpose, applicationId, memberId }) {
+  if (!applicationId) return false;
+  if (purpose === "applicationFee") return true;
+  return !memberId;
+}
+
 function stripeDetailsFromIntent(pi) {
   if (!pi) return {};
   return {
@@ -332,7 +338,11 @@ export async function createIntent(input, ctx) {
 
   const memberId = parsed.memberId || memberIdFromMetadata;
   const applicationId = parsed.applicationId || applicationIdFromMetadata;
-  const isApplicationPayment = Boolean(applicationId) && !memberId;
+  const isApplicationPayment = isApplicationPaymentRequest({
+    purpose: parsed.purpose,
+    applicationId,
+    memberId,
+  });
   const stripeCaptureMethod = isApplicationPayment ? "manual" : "automatic";
   const logger = (await import("../config/logger.js")).default;
   let attemptNumber = 1;
@@ -1159,7 +1169,8 @@ async function publishApplicationPaymentUpdate(payment, parsed, ctx = {}) {
   const applicationId =
     payment?.applicationId || metadata.applicationId || metadata.application_id;
   const memberIdFromMetadata = metadata.memberId || metadata.member_id;
-  const memberId = applicationId ? memberIdFromMetadata : payment?.memberId;
+  const memberId =
+    payment?.memberId || (!applicationId ? memberIdFromMetadata : null);
 
   if (!applicationId || memberId) return;
 
