@@ -107,8 +107,8 @@ async function processStripeEvent(event) {
         metadata: pi.metadata || {},
       };
 
-      // Publish portal event to update application status to submitted
-      // Only publish if there's an applicationId and no memberId in metadata
+      // Application status events are published from reconcileStripeEvent after
+      // the payment document is persisted and classified as an application payment.
       const applicationId = metadata.applicationId || metadata.application_id;
       const memberId = metadata.memberId || metadata.member_id;
 
@@ -128,6 +128,15 @@ async function processStripeEvent(event) {
             tenantId,
           },
           "Skipping portal event publishing for member payment (memberId present)"
+        );
+      } else if (applicationId) {
+        logger.info(
+          {
+            applicationId,
+            paymentIntentId: pi.id,
+            tenantId,
+          },
+          "Application payment succeeded; status event will be published by reconciliation"
         );
       } else {
         logger.info(
