@@ -1062,8 +1062,14 @@ export async function findLatestApplicationPayment(applicationId, ctx = {}) {
     const pi = await getStripe().paymentIntents.retrieve(
       payment.stripe.paymentIntentId,
     );
+    const previousStatus = payment.status;
     await refreshPaymentFromStripe(payment, pi, ctx);
     payment = await Payment.findById(payment._id).lean();
+    await publishApplicationPaymentRefreshUpdate(
+      { ...payment, status: previousStatus },
+      pi,
+      ctx,
+    );
   } catch (err) {
     const logger = (await import("../config/logger.js")).default;
     logger.warn(
@@ -1172,7 +1178,7 @@ async function publishApplicationPaymentUpdate(payment, parsed, ctx = {}) {
   const memberId =
     payment?.memberId || (!applicationId ? memberIdFromMetadata : null);
 
-  if (!applicationId || memberId) return;
+  if (!applicationId || memberId) return false;
 
   const payload = {
     applicationId,
@@ -1202,6 +1208,7 @@ async function publishApplicationPaymentUpdate(payment, parsed, ctx = {}) {
       },
       "Published application payment update event",
     );
+    return true;
   } catch (error) {
     const logger = (await import("../config/logger.js")).default;
     logger.error(
@@ -1212,6 +1219,44 @@ async function publishApplicationPaymentUpdate(payment, parsed, ctx = {}) {
         tenantId: payload.tenantId,
       },
       "Failed to publish application payment update event",
+    );
+    return false;
+  }
+}
+
+async function publishApplicationPaymentRefreshUpdate(payment, pi, ctx = {}) {
+  if (!payment?.applicationId || payment?.memberId || !pi?.id) return;
+
+  const refreshedPayment = paymentDataFromIntent(pi);
+  if (!["requires_capture", "succeeded"].includes(refreshedPayment.status)) {
+    return;
+  }
+
+  const syntheticEventId = `stripe-refresh-${pi.id}-${refreshedPayment.status}`;
+  const hasPriorEvent =
+    Array.isArray(payment.webhookEventIds) && payment.webhookEventIds.length > 0;
+  const alreadyPublished =
+    Array.isArray(payment.webhookEventIds) &&
+    payment.webhookEventIds.includes(syntheticEventId);
+  const statusWasAlreadyObserved =
+    payment.status === refreshedPayment.status && hasPriorEvent;
+
+  if (alreadyPublished || statusWasAlreadyObserved) return;
+
+  const published = await publishApplicationPaymentUpdate(
+    payment,
+    {
+      eventId: syntheticEventId,
+      type: `stripe-refresh.${refreshedPayment.status}`,
+      payment: refreshedPayment,
+    },
+    ctx,
+  );
+
+  if (published) {
+    await Payment.updateOne(
+      { _id: payment._id },
+      { $addToSet: { webhookEventIds: syntheticEventId } },
     );
   }
 }

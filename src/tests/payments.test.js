@@ -15,6 +15,19 @@ await jest.unstable_mockModule("../lib/stripe.js", () => {
         status: "requires_action",
         client_secret: "secret",
       }),
+      retrieve: async (paymentIntentId) => ({
+        id: paymentIntentId,
+        status: "requires_capture",
+        amount: 500,
+        currency: "eur",
+        latest_charge: "ch_refresh",
+        customer: "cus_refresh",
+        payment_method: "pm_refresh",
+        metadata: {
+          applicationId: "app-refresh",
+          tenantId: "demo-tenant",
+        },
+      }),
     },
     checkout: {
       sessions: {
@@ -164,6 +177,19 @@ describe("Payments API", () => {
           stripe: { paymentIntentId: "pi_app_member_meta" },
         });
       }
+      if (filter.applicationId === "app-refresh") {
+        return chainFindOne({
+          ...base,
+          _id: { toString: () => "pay_app_refresh" },
+          tenantId: "demo-tenant",
+          memberId: null,
+          applicationId: "app-refresh",
+          mode: "stripe",
+          status: "requires_action",
+          webhookEventIds: [],
+          stripe: { paymentIntentId: "pi_app_refresh" },
+        });
+      }
       if (filter._id) {
         const idStr = String(filter._id);
         const isExternalOid = idStr === OID;
@@ -181,6 +207,26 @@ describe("Payments API", () => {
     jest
       .spyOn(Payment, "updateOne")
       .mockResolvedValue({ acknowledged: true, modifiedCount: 1 });
+    jest.spyOn(Payment, "findById").mockImplementation((id) => ({
+      lean: jest.fn().mockResolvedValue({
+        _id: id,
+        tenantId: "demo-tenant",
+        amount: 500,
+        currency: "eur",
+        memberId: null,
+        applicationId: "app-refresh",
+        mode: "stripe",
+        status: "requires_capture",
+        webhookEventIds: [],
+        stripe: {
+          paymentIntentId: "pi_app_refresh",
+          status: "requires_capture",
+          chargeId: "ch_refresh",
+          customerId: "cus_refresh",
+          paymentMethodId: "pm_refresh",
+        },
+      }),
+    }));
     jest.spyOn(Payment, "find").mockReturnValue({
       distinct: jest.fn().mockResolvedValue([OID]),
     });
@@ -300,6 +346,37 @@ describe("Payments API", () => {
       expect.objectContaining({
         tenantId: "demo-tenant",
       }),
+    );
+  });
+
+  test("publishes application payment update when latest lookup refreshes to requires_capture", async () => {
+    publishDomainEventMock.mockClear();
+
+    const res = await request(app)
+      .get("/api/payments/applications/app-refresh/latest")
+      .set(headers);
+
+    expect(res.status).toBe(200);
+    expect(publishDomainEventMock).toHaveBeenCalledWith(
+      "application.status.submitted",
+      expect.objectContaining({
+        applicationId: "app-refresh",
+        status: "requires_capture",
+        paymentIntentId: "pi_app_refresh",
+        tenantId: "demo-tenant",
+      }),
+      expect.objectContaining({
+        eventId: "stripe-refresh-pi_app_refresh-requires_capture",
+        tenantId: "demo-tenant",
+      }),
+    );
+    expect(Payment.updateOne).toHaveBeenCalledWith(
+      { _id: expect.anything() },
+      {
+        $addToSet: {
+          webhookEventIds: "stripe-refresh-pi_app_refresh-requires_capture",
+        },
+      },
     );
   });
 
