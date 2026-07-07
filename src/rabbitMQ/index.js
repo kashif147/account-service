@@ -77,11 +77,32 @@ export async function publishDomainEvent(eventType, data, metadata = {}) {
   });
 
   if (result.success) {
+    bizLogger.business("RabbitMQ domain event published", {
+      eventType,
+      eventId: result.eventId,
+      correlationId: result.payload?.correlationId || metadata.correlationId || null,
+      tenantId: metadata.tenantId || null,
+      applicationId: data?.applicationId || null,
+      membershipId: data?.memberId || data?.membershipId || null,
+      exchange: result.payload ? publisher.getExchangeForEvent?.(eventType) : null,
+      routingKey: eventType,
+      sourceService: "account-service",
+    });
     logger.info(
       { eventType, eventId: result.eventId },
       "Domain event published"
     );
   } else {
+    bizLogger.error("RabbitMQ domain event publish failed", {
+      eventType,
+      error: result.error,
+      correlationId: metadata.correlationId || null,
+      tenantId: metadata.tenantId || null,
+      applicationId: data?.applicationId || null,
+      membershipId: data?.memberId || data?.membershipId || null,
+      routingKey: eventType,
+      sourceService: "account-service",
+    });
     logger.error(
       { eventType, error: result.error },
       "Failed to publish domain event"
