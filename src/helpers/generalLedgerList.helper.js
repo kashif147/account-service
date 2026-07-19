@@ -1,5 +1,5 @@
 import GL from "../models/glTransaction.model.js";
-import CoA from "../models/coa.model.js";
+import { getMemberTrackedAccountCodes } from "./coaAccountCodes.helper.js";
 import { simplifyMemberLedgerPresentations } from "./memberLedgerPresentation.js";
 import { attachPaymentIntentIdsToLedgerItems } from "./memberLedgerPaymentIntent.js";
 import { attachTxTypesToLedgerItems } from "./glTransactionTxType.js";
@@ -74,11 +74,6 @@ function consolidateCategoryChanges(transactions) {
     consolidated.push(normalizeLedgerGlTxn(txn));
   }
   return consolidated;
-}
-
-async function getMemberTrackedAccountCodes() {
-  const rows = await CoA.find({ isMemberTracked: true }).select("code").lean();
-  return rows.map((r) => r.code).filter(Boolean);
 }
 
 /** Member this GL row belongs to (claims, profile:/app: keys, applicationId). */
@@ -259,6 +254,7 @@ export async function buildGeneralLedgerList({
   tenantId,
   maxDocuments = DEFAULT_MAX_GL_DOCUMENTS,
   includeDrafts = true,
+  ledgerDomain,
   req,
 }) {
   const filterMember = String(memberId || "").trim();
@@ -269,6 +265,19 @@ export async function buildGeneralLedgerList({
     to,
     req,
   });
+  if (ledgerDomain === "events") {
+    q["entries.ledgerDomain"] = "events";
+  } else if (ledgerDomain === "membership") {
+    q.$and = [
+      ...(q.$and || []),
+      {
+        $or: [
+          { "entries.ledgerDomain": "membership" },
+          { "entries.ledgerDomain": { $exists: false } },
+        ],
+      },
+    ];
+  }
   const { rawItems, totalGlDocuments, truncated } = await fetchAllMemberFacingGl(
     q,
     maxDocuments,

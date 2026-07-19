@@ -47,8 +47,24 @@ import { ensureAuthenticated } from "../middlewares/auth.js";
 import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
+import { forwardedInternalContext } from "../middlewares/context.js";
+import { AppError } from "../errors/AppError.js";
+import { postManualEventPaymentHandler } from "../controllers/eventJournal.controller.js";
 
 const router = express.Router();
+
+// Same pattern as internal.routes.js: forwarded JWT/gateway headers (the
+// normal case - events-service forwards the original caller's auth) or, if
+// there's no originating user request, x-internal-request + x-tenant-id.
+function internalOrAuthenticated(req, res, next) {
+  if (req.headers.authorization || req.headers["x-jwt-verified"]) {
+    return ensureAuthenticated(req, res, next);
+  }
+  if (req.header("x-internal-request") === "true") {
+    return forwardedInternalContext(req, res, next);
+  }
+  return res.appError(AppError.unauthorized("Authorization header required"));
+}
 
 // Journals - list; single consolidated route with minimum AI role
 router.get(
@@ -241,6 +257,16 @@ router.post(
   claimApplicationCreditRules,
   validate,
   claimApplicationCredit
+);
+
+// Events/courses manual (comp/manual/invoice) payment posting - called by
+// events-service, forwarding the original caller's gateway headers (same
+// pattern as internal.routes.js and profile-service's account.service.client.js)
+router.post(
+  "/events/manual-payment",
+  internalOrAuthenticated,
+  idempotency(),
+  postManualEventPaymentHandler,
 );
 
 // Online payment processing - allows MEMBER role for portal users

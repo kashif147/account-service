@@ -96,6 +96,7 @@ async function upsertProduct(data) {
     updatedBy,
     createdAt,
     updatedAt,
+    incomeAccountCode,
   } = data;
 
   const pid = normalizeRefId(productId, "productId");
@@ -131,6 +132,7 @@ async function upsertProduct(data) {
         updatedBy: normalizeRefId(updatedBy, "updatedBy"),
         createdAt: parseDate(createdAt),
         updatedAt: parseDate(updatedAt),
+        incomeAccountCode: incomeAccountCode || null,
       },
     },
     { upsert: true }

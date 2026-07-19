@@ -59,8 +59,30 @@ const PaymentSchema = new Schema(
     purpose: {
       type: String,
       required: true,
-      enum: ["applicationFee", "subscriptionFee"],
+      enum: [
+        "applicationFee",
+        "subscriptionFee",
+        "eventRegistration",
+        "courseRegistration",
+      ],
     },
+    // Segregates events/courses money from membership money in the ledger -
+    // see coaAccountCodes.helper.js and eventRegistration.approval.listener.js.
+    ledgerDomain: {
+      type: String,
+      enum: ["membership", "events"],
+      default: "membership",
+      index: true,
+    },
+    registrationId: { type: String, index: true }, // events-service Registration._id, parallel to applicationId
+    // Person-level link that works whether or not the payer holds a membership
+    // number (profile-service Profile._id). memberId stays the membershipNumber-
+    // based key used across membership; profileId is the generic alternative
+    // for events/courses attendees who may not be members. If an events/courses
+    // attendee IS also a member, both profileId and memberId are set so the
+    // entry still surfaces in per-member reporting.
+    profileId: { type: String, index: true },
+    productCode: { type: String }, // Product.code, used to resolve the events/courses income account
     amount: { type: Number, required: true, min: 0 },
     currency: { type: String, required: true, default: "eur" },
     status: {
@@ -121,6 +143,14 @@ PaymentSchema.index({
   createdAt: -1,
 });
 
+PaymentSchema.index({
+  tenantId: 1,
+  registrationId: 1,
+  purpose: 1,
+  attemptNumber: -1,
+  createdAt: -1,
+});
+
 PaymentSchema.index(
   { tenantId: 1, idempotencyKey: 1 },
   { unique: true, sparse: true }
@@ -128,7 +158,16 @@ PaymentSchema.index(
 
 // Zod DTOs
 export const zCreateIntent = z.object({
-  purpose: z.enum(["applicationFee", "subscriptionFee"]),
+  purpose: z.enum([
+    "applicationFee",
+    "subscriptionFee",
+    "eventRegistration",
+    "courseRegistration",
+  ]),
+  ledgerDomain: z.enum(["membership", "events"]).optional(),
+  registrationId: z.string().optional(),
+  profileId: z.string().optional(),
+  productCode: z.string().optional(),
   amount: z.number().int().nonnegative(),
   currency: z.string().default("eur"),
   memberId: z.string().optional(),

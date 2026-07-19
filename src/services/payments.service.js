@@ -80,6 +80,12 @@ function paymentIntentStatusToDomain(pi) {
   return normalizeStripeStatusForPayment(pi?.status);
 }
 
+function ledgerDomainForPurpose(purpose) {
+  return purpose === "eventRegistration" || purpose === "courseRegistration"
+    ? "events"
+    : "membership";
+}
+
 function isApplicationPaymentRequest({ purpose, applicationId, memberId }) {
   if (!applicationId) return false;
   if (purpose === "applicationFee") return true;
@@ -335,9 +341,15 @@ export async function createIntent(input, ctx) {
     metadata.memberId || metadata.member_id || undefined; // Do not use userId as memberId
   const applicationIdFromMetadata =
     metadata.applicationId || metadata.application_id;
+  const registrationIdFromMetadata =
+    metadata.registrationId || metadata.registration_id;
 
   const memberId = parsed.memberId || memberIdFromMetadata;
   const applicationId = parsed.applicationId || applicationIdFromMetadata;
+  const registrationId = parsed.registrationId || registrationIdFromMetadata;
+  const profileId = parsed.profileId || metadata.profileId || metadata.profile_id;
+  const productCode = parsed.productCode || metadata.productCode || metadata.product_code;
+  const ledgerDomain = parsed.ledgerDomain || ledgerDomainForPurpose(parsed.purpose);
   const isApplicationPayment = isApplicationPaymentRequest({
     purpose: parsed.purpose,
     applicationId,
@@ -931,6 +943,7 @@ export async function createIntent(input, ctx) {
     const paymentData = {
       tenantId: ctx.tenantId,
       purpose: parsed.purpose,
+      ledgerDomain,
       amount: parsed.amount,
       currency: normalizedCurrency,
       status,
@@ -938,6 +951,9 @@ export async function createIntent(input, ctx) {
       isActiveAttempt: true,
       // Only set memberId if applicationId is not present
       ...(applicationId ? { applicationId } : memberId ? { memberId } : {}),
+      ...(registrationId ? { registrationId } : {}),
+      ...(profileId ? { profileId } : {}),
+      ...(productCode ? { productCode } : {}),
       invoiceId: parsed.invoiceId,
       source: "portal",
       mode,
@@ -2557,6 +2573,17 @@ function paymentJournalCtx(payment, ctx = {}) {
 
 export async function postJournalForPayment(payment, ctx) {
   const journalCtx = paymentJournalCtx(payment, ctx);
+
+  // Events/courses payments post to a segregated set of CoA codes via a
+  // separate function (see eventRegistration.approval.listener.js) rather
+  // than sharing this function's membership-specific 1400/2020 logic below.
+  if (payment.ledgerDomain === "events") {
+    const { postJournalForEventPayment } = await import(
+      "../handlers/eventRegistration.approval.listener.js"
+    );
+    return postJournalForEventPayment(payment, journalCtx);
+  }
+
   // Import required modules
   const { postBalancedJournal } =
     await import("../controllers/journal.controller.js");

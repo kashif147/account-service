@@ -26,6 +26,14 @@ const productSchema = new mongoose.Schema(
     status: {
       type: String,
     },
+    // CoA income code to credit when this product is sold (e.g. events/courses
+    // registration products); optional, set by finance admins in user-service
+    // and synced through the same product.events pipeline as the rest of this
+    // document.
+    incomeAccountCode: {
+      type: String,
+      default: null,
+    },
     isActive: {
       type: Boolean,
       default: true,

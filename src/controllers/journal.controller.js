@@ -15,6 +15,7 @@ import {
   prorataForPeriod,
 } from "../helpers/prorata.js";
 import { buildCategoryChangeJournalPayload } from "../helpers/categoryChangeJournal.js";
+import { getMemberTrackedAccountCodes } from "../helpers/coaAccountCodes.helper.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { notifyMemberFinanceUpdated } from "../services/memberFinanceRealtimeNotify.service.js";
@@ -329,9 +330,13 @@ export async function postBalancedJournal({
         { accountCode: "1200", docType }
       );
     }
-    // - require memberId OR applicationId and periodBucket on member-tracked accounts (1400, 2020)
+    // - require memberId/applicationId/registrationId and periodBucket on
+    //   member-tracked accounts - driven by CoA.isMemberTracked (not a
+    //   hardcoded "1400"/"2020" list) so newly-seeded codes (e.g. events/
+    //   courses AR/POA) get the same guardrail automatically.
+    const memberTrackedCodes = new Set(await getMemberTrackedAccountCodes());
     for (const e of enriched) {
-      if (e.accountCode === "1400" || e.accountCode === "2020") {
+      if (memberTrackedCodes.has(e.accountCode)) {
         if (!e.periodBucket) {
           throw AppError.badRequest(
             `periodBucket required on ${e.accountCode}`,
@@ -341,13 +346,15 @@ export async function postBalancedJournal({
             }
           );
         }
-        if (!e.memberId && !e.applicationId) {
+        if (!e.memberId && !e.applicationId && !e.registrationId && !e.profileId) {
           throw AppError.badRequest(
-            `memberId or applicationId required on ${e.accountCode}`,
+            `memberId, applicationId, registrationId or profileId required on ${e.accountCode}`,
             {
               accountCode: e.accountCode,
               memberId: e.memberId,
               applicationId: e.applicationId,
+              registrationId: e.registrationId,
+              profileId: e.profileId,
             }
           );
         }

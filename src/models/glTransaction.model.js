@@ -7,10 +7,15 @@ const EntrySchema = new mongoose.Schema(
     amount: { type: Number, required: true },
     memberId: { type: String }, // required for 1400/2020 lines
     applicationId: { type: String }, // used before memberId exists
+    registrationId: { type: String }, // events-service Registration._id, used before memberId exists (events domain)
+    profileId: { type: String }, // generic person link when there is no membershipNumber (events/courses attendees)
     periodBucket: { type: String, enum: ["arrears", "current", "advance"] },
     revenueSubType: { type: String }, // e.g. "fee", "Fee Increase", "Fee Decrease"
     adjSubType: { type: String }, // "prorata", "discount", etc.
     categoryName: { type: String }, // for descriptions/reports
+    // Segregates events/courses entries from membership entries for reporting;
+    // does not replace account-code-based posting - see coaAccountCodes.helper.js.
+    ledgerDomain: { type: String, enum: ["membership", "events"], default: "membership" },
   },
   { _id: false }
 );

@@ -13,6 +13,7 @@ import {
   attachTxTypesToLedgerItems,
   resolveTxTypeAccountCode,
 } from "../helpers/glTransactionTxType.js";
+import { getMemberTrackedAccountCodes } from "../helpers/coaAccountCodes.helper.js";
 import ReportSnapshot from "../models/reportSnapshot.model.js";
 import { AppError } from "../errors/AppError.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
@@ -194,11 +195,6 @@ function normalizeDateRange(from, to) {
     if (!Number.isNaN(toDate.getTime())) date.$lte = toDate;
   }
   return Object.keys(date).length ? date : null;
-}
-
-async function getMemberTrackedAccountCodes() {
-  const rows = await CoA.find({ isMemberTracked: true }).select("code").lean();
-  return rows.map((r) => r.code).filter(Boolean);
 }
 
 export async function refundsList(req, res, next) {
@@ -1139,6 +1135,11 @@ export async function generalLedgerTransactions(req, res, next) {
     const includeDrafts =
       String(req.query.includeDrafts ?? "true").toLowerCase() !== "false";
 
+    const ledgerDomain =
+      req.query.ledgerDomain === "membership" || req.query.ledgerDomain === "events"
+        ? req.query.ledgerDomain
+        : undefined;
+
     const result = await buildGeneralLedgerList({
       memberId,
       docType,
@@ -1147,6 +1148,7 @@ export async function generalLedgerTransactions(req, res, next) {
       tenantId: req.tenantId || req.ctx?.tenantId,
       maxDocuments,
       includeDrafts,
+      ledgerDomain,
       req,
     });
 
@@ -1178,10 +1180,26 @@ export async function memberCreditNotes(req, res, next) {
 export async function memberLedger(req, res, next) {
   try {
     const { memberId } = req.params;
-    const { accountCode } = req.query;
+    const { accountCode, ledgerDomain } = req.query;
 
     const q = await buildMemberFacingGlQuery({ memberId, req });
     if (accountCode) q["entries.accountCode"] = accountCode;
+    if (ledgerDomain === "events") {
+      // All events/courses entries always have this field explicitly set.
+      q["entries.ledgerDomain"] = "events";
+    } else if (ledgerDomain === "membership") {
+      // Entries created before this field existed have no ledgerDomain at all
+      // and were always membership transactions - treat missing as membership.
+      q.$and = [
+        ...(q.$and || []),
+        {
+          $or: [
+            { "entries.ledgerDomain": "membership" },
+            { "entries.ledgerDomain": { $exists: false } },
+          ],
+        },
+      ];
+    }
 
     const allItems = await GL.find(q)
       .sort({ date: 1, createdAt: 1 })

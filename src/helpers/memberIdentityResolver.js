@@ -236,7 +236,15 @@ export async function buildMemberFacingGlQuery({
 
   if (memberId) {
     const mid = String(memberId).trim();
-    const memberOr = [{ "entries.memberId": mid }, { claimMemberId: mid }];
+    // mid may be a membershipNumber OR (for non-member events/courses
+    // attendees, who have no membershipNumber) a profile-service profileId -
+    // match entries.profileId too so the same :memberId route param works for
+    // both, without the caller needing to know which kind of id it has.
+    const memberOr = [
+      { "entries.memberId": mid },
+      { claimMemberId: mid },
+      { "entries.profileId": mid },
+    ];
     const profileKeys = await profileKeysLinkedToMember(mid, req);
     for (const pk of profileKeys) {
       memberOr.push({ "entries.memberId": pk });
@@ -255,6 +263,7 @@ export async function buildMemberFacingGlQuery({
       { claimMemberId: { $exists: true, $nin: [null, ""] } },
       { "entries.applicationId": { $exists: true, $nin: [null, ""] } },
       { sourceApplicationId: { $exists: true, $nin: [null, ""] } },
+      { "entries.profileId": { $exists: true, $nin: [null, ""] } },
     ];
   }
 
