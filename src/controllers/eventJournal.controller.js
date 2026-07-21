@@ -6,8 +6,16 @@ const ALLOWED_METHODS = ["manual", "comp", "invoice"];
 export async function postManualEventPaymentHandler(req, res, next) {
   try {
     const tenantId = req.ctx?.tenantId || req.tenantId;
-    const { registrationId, profileId, memberId, productCode, amount, currency, method } =
-      req.body || {};
+    const {
+      registrationId,
+      profileId,
+      memberId,
+      productCode,
+      eventCategoryCode,
+      amount,
+      currency,
+      method,
+    } = req.body || {};
 
     if (!tenantId) return next(AppError.badRequest("tenantId is required"));
     if (!registrationId) return next(AppError.badRequest("registrationId is required"));
@@ -23,6 +31,7 @@ export async function postManualEventPaymentHandler(req, res, next) {
       profileId,
       memberId,
       productCode,
+      eventCategoryCode,
       amount,
       currency,
       method,

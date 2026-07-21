@@ -349,6 +349,8 @@ export async function createIntent(input, ctx) {
   const registrationId = parsed.registrationId || registrationIdFromMetadata;
   const profileId = parsed.profileId || metadata.profileId || metadata.profile_id;
   const productCode = parsed.productCode || metadata.productCode || metadata.product_code;
+  const eventCategoryCode =
+    parsed.eventCategoryCode || metadata.eventCategoryCode || metadata.event_category_code;
   const ledgerDomain = parsed.ledgerDomain || ledgerDomainForPurpose(parsed.purpose);
   const isApplicationPayment = isApplicationPaymentRequest({
     purpose: parsed.purpose,
@@ -954,6 +956,7 @@ export async function createIntent(input, ctx) {
       ...(registrationId ? { registrationId } : {}),
       ...(profileId ? { profileId } : {}),
       ...(productCode ? { productCode } : {}),
+      ...(eventCategoryCode ? { eventCategoryCode } : {}),
       invoiceId: parsed.invoiceId,
       source: "portal",
       mode,

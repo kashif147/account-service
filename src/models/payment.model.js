@@ -83,6 +83,10 @@ const PaymentSchema = new Schema(
     // entry still surfaces in per-member reporting.
     profileId: { type: String, index: true },
     productCode: { type: String }, // Product.code, used to resolve the events/courses income account
+    // user-service Lookup "Event Category" code (CPD | EVENT) - resolves the
+    // GL income account directly (see eventRegistration.approval.listener.js's
+    // resolveEventIncomeCode()), decoupled from the synced Product record.
+    eventCategoryCode: { type: String, default: null },
     amount: { type: Number, required: true, min: 0 },
     currency: { type: String, required: true, default: "eur" },
     status: {
@@ -168,6 +172,7 @@ export const zCreateIntent = z.object({
   registrationId: z.string().optional(),
   profileId: z.string().optional(),
   productCode: z.string().optional(),
+  eventCategoryCode: z.string().optional(),
   amount: z.number().int().nonnegative(),
   currency: z.string().default("eur"),
   memberId: z.string().optional(),

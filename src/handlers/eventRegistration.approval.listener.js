@@ -6,7 +6,6 @@
 // introduced (4500, since 4000-4090 is reserved for membership categories).
 // Segregation for reporting comes from the ledgerDomain field on Payment and
 // on every GLTransaction entry, not from separate account codes.
-import Product from "../models/product.model.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publisher } from "../rabbitMQ/index.js";
@@ -19,16 +18,14 @@ const EVENTS_AR_CODE = "1400";
 const EVENTS_POA_CODE = "2020";
 const EVENTS_CONTRA_INCOME_CODE = "4900";
 
-async function getIncomeCodeForEventProduct(productCode, tenantId) {
-  if (productCode) {
-    const product = await Product.findOne({
-      tenantId,
-      code: String(productCode).toUpperCase(),
-      isDeleted: { $ne: true },
-    }).lean();
-    if (product?.incomeAccountCode) return product.incomeAccountCode;
-  }
-  return DEFAULT_EVENTS_INCOME_CODE;
+// user-service Lookup "Event Category" codes (LookupType EVTCAT) -> GL income
+// account. Replaces the old Product.incomeAccountCode lookup entirely -
+// account-service no longer needs the RabbitMQ-synced Product record to post
+// events/courses revenue to the correct account.
+const EVENT_INCOME_CODE_BY_CATEGORY = { CPD: "4510", EVENT: "4520" };
+
+function resolveEventIncomeCode(eventCategoryCode) {
+  return EVENT_INCOME_CODE_BY_CATEGORY[eventCategoryCode] || DEFAULT_EVENTS_INCOME_CODE;
 }
 
 async function publishPaymentStatusUpdated({ tenantId, paymentId, registrationId, status }) {
@@ -74,7 +71,7 @@ export async function postJournalForEventPayment(payment, ctx) {
 
   const amount = payment.amount;
   const clearingCode = payment.mode === "stripe" ? EVENTS_CLEARING_CODE_STRIPE : EVENTS_CLEARING_CODE_MANUAL;
-  const incomeCode = await getIncomeCodeForEventProduct(payment.productCode, payment.tenantId);
+  const incomeCode = resolveEventIncomeCode(payment.eventCategoryCode);
   const base = baseEntryFields(payment);
   const date = new Date().toISOString().split("T")[0];
 
@@ -151,6 +148,7 @@ export async function postManualEventPayment({
   profileId,
   memberId,
   productCode,
+  eventCategoryCode,
   amount,
   currency,
   method,
@@ -167,6 +165,7 @@ export async function postManualEventPayment({
     profileId,
     ...(memberId ? { memberId } : {}),
     productCode,
+    eventCategoryCode,
     amount,
     currency: currency || "eur",
     status: method === "invoice" ? "payment_required" : "succeeded",
@@ -182,7 +181,7 @@ export async function postManualEventPayment({
     return { paymentId: payment._id.toString() };
   }
 
-  const incomeCode = await getIncomeCodeForEventProduct(productCode, tenantId);
+  const incomeCode = resolveEventIncomeCode(eventCategoryCode);
   const base = {
     registrationId,
     profileId: profileId || undefined,
