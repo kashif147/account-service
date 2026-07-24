@@ -440,6 +440,14 @@ export async function createIntent(input, ctx) {
     if (applicationId) {
       duplicateCheck.applicationId = applicationId;
     }
+    // Scope to the same registration attempt when one is present (events
+    // domain) - without this, two different event registrations for the
+    // same member with the same ticket price within the window would match
+    // each other here and the second registration would silently reuse the
+    // first one's payment/PaymentIntent instead of getting its own.
+    if (registrationId) {
+      duplicateCheck.registrationId = registrationId;
+    }
 
     const existingDuplicate = await Payment.findOne(duplicateCheck)
       .select("stripe status _id memberId applicationId isActiveAttempt")
@@ -525,6 +533,9 @@ export async function createIntent(input, ctx) {
     }
     if (applicationId) {
       lastSecondCheck.applicationId = applicationId;
+    }
+    if (registrationId) {
+      lastSecondCheck.registrationId = registrationId;
     }
 
     const recentPayment = await Payment.findOne(lastSecondCheck)
