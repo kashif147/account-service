@@ -8,7 +8,8 @@ const VALID_WRITE_OFF_BUCKETS = new Set(["arrears", "current"]);
 
 /**
  * GET /api/internal/members/:memberId/reminder-eligibility?asOf=ISO
- * Requires x-tenant-id + x-api-key (see context middleware).
+ * Gated by internal.routes.js's internalAuth: gateway/JWT auth, or x-internal-request: true
+ * with forwardedInternalContext (x-tenant-id + forwarded user headers).
  */
 export const reminderEligibility = asyncHandler(async (req, res) => {
   const { memberId } = req.params;

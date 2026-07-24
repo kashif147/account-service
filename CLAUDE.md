@@ -1,6 +1,17 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## What this service is
+
+`account-service` owns finance/GL for the platform: double-entry accounting, Stripe payments, SEPA
+Direct Debit, credit notes, reconciliation, and batch payment processing. Runtime is Node.js ES
+modules (`"type": "module"` — all imports need `.js` extensions). Entry point: `bin/account-service.js`
+→ `src/app.js`, which sets up Express and also starts the batch-processing and direct-debit-prepare
+cron jobs at module load time, wiring `SIGTERM`/`SIGINT` to stop them and shut down the event system.
+
+The two things most worth knowing before making a change: the request pipeline mounts the Stripe
+webhook route *before* the JSON body parser to preserve the raw signature buffer (see
+`request-pipeline.md`), and there's no single global auth middleware for `/api/*` — identity and
+authorization are two separate layers applied per-route (see `auth-and-authorization.md`).
 
 ## Commands
 
@@ -15,113 +26,63 @@ npm run unittest         # Run all Jest tests (requires --experimental-vm-module
 npm run unittest -- --testPathPattern=payments  # Run a single test file by pattern
 npm run test:rabbitmq    # Manual RabbitMQ event testing via scripts/
 
+# Data / maintenance scripts (see scripts/)
+node scripts/rebuild-materialized-balances.js
+node scripts/migrate-money-to-cents.js
+node scripts/relink-refund-gl-for-application.js
+node scripts/seed-events-income-coa.js / seed-cpd-events-income-coa.js
+node scripts/seed-grid-system-default-template.js
+
 # Production
 npm start                # node bin/account-service.js
 ```
 
-Tests live in `src/tests/` and match `**/*.test.js`. The project uses ES modules with Jest's experimental VM modules flag.
+Tests live in `src/tests/` and match `**/*.test.js`. There is no lint script configured despite
+`eslint` being a devDependency — don't assume `npm run lint` exists.
 
-## Architecture
+**Jest config is `jest.config.cjs`, not `.js`** — it must stay CommonJS. This service is
+`"type": "module"`, and the installed `jest@25.5.4` crashes at startup
+(`TypeError: Cannot add property rootDir, object is not extensible` in `jest-config`) if the
+config file is `jest.config.js` and gets loaded as an ES module. Renaming it to `.cjs` fixes that
+specific crash — don't rename it back to `.js`.
 
-**Runtime**: Node.js ES modules (`"type": "module"`) — all imports must use `.js` extensions.
+**15 of 20 test suites still fail even with that fix**, all with the same shape:
+`ENOENT: no such file or directory, open 'fs'` (or `'async_hooks'`, etc.) from inside a
+dependency's own `require("node:fs")` call (seen via `mongoose` and, transitively, `supertest` →
+`superagent` → `formidable`). This jest version's module resolver (`jest-resolve@25.5.1`, an
+exact version `jest@25.5.4` itself depends on — not a stray/mismatched install) doesn't handle
+the `node:`-scheme prefix for core modules under `--experimental-vm-modules`. A `moduleNameMapper`
+entry mapping `^node:(.*)$` → `$1` was tried and confirmed to make **no difference** (identical
+15-failed/5-passed result with or without it) — don't re-attempt that as a fix. The 5 suites that
+don't import `mongoose` or `supertest` (24 tests) run and pass fine. A real fix needs either a
+Jest major-version upgrade (bigger, riskier change — get sign-off first, this touches every test
+file) or pinning `supertest`/`mongoose` to versions old enough to avoid `node:`-prefixed
+`require()` calls (fragile, moving target). Not attempted in this session.
 
-**Entry point**: `bin/account-service.js` → `src/app.js` sets up Express, then starts the HTTP server.
+## Request pipeline and route structure
+@.claude/rules/request-pipeline.md
 
-### Request pipeline (in order)
+## Authentication / authorization
+@.claude/rules/auth-and-authorization.md
 
-1. `pino-http` logging (health routes excluded)
-2. Security headers (`helmet`, `securityHeaders`)
-3. Raw body capture for `/api/webhook/stripe` (before compression — Stripe needs raw buffer for signature verification)
-4. Compression (skipped for `/api/webhook/*`)
-5. Webhook routes mounted before JSON parser
-6. `bodyParser.json` (1mb limit)
-7. `requestId` middleware (adds `x-request-id` correlation header)
-8. `loggerMiddleware`, `responseMiddleware` (adds helpers to `res`)
-9. Global rate limiter
-10. Health routes (`/health`, `/ready`, `/health/*`)
-11. Swagger at `/api/docs`
-12. API routes at `/api`
+## Idempotency
+@.claude/rules/idempotency.md
 
-### Route structure
+## RabbitMQ / Event system
+@.claude/rules/rabbitmq-events.md
 
-```
-/api
-  /admin      → admin.routes.js → admin.controller.js
-  /journal    → journal.routes.js → journal.controller.js
-  /reports    → reports.routes.js → reports.controller.js
-  /payments   → payment.routes.js → payment.controller.js
-/api/webhook/stripe  → webhook.routes.js → webhook.controller.js
-```
+## Database concurrency and background cron jobs
+@.claude/rules/background-jobs.md
 
-### Authentication / context
+## Finance domain (GL, SEPA Direct Debit, reconciliation, key models)
+@.claude/rules/finance-domain.md
 
-All `/api/*` routes go through `context.js` middleware which:
-- Requires `x-tenant-id` header → sets `req.ctx.tenantId`
-- Requires `x-api-key` header matching `process.env.ACCOUNTS_API_KEY`
-- Optionally captures `x-idempotency-key` → `req.ctx.idempotencyKey`
+## Environment variables and shared packages
+@.claude/rules/environment-variables.md
 
-### Response helpers (added by `response.mw.js`)
+## Related skills
 
-Use `res.success(data)`, `res.created(data)`, `res.appError(err)`, `res.fail(msg)`, etc. rather than raw `res.json()`. These produce a consistent `{ status, message, data, timestamp }` envelope.
-
-### Error handling
-
-Throw or return `AppError` instances for all domain errors. Static factories: `AppError.notFound()`, `AppError.badRequest()`, `AppError.unauthorized()`, `AppError.conflict()`, `AppError.forbidden()`, `AppError.internalServerError()`. The `errorHandler` middleware catches these and calls `res.appError()`.
-
-Wrap all async route handlers with `asyncHandler` from `src/helpers/asyncHandler.js`.
-
-### Idempotency
-
-In-memory cache (5-minute TTL). Applied via `idempotency()` middleware using the `Idempotency-Key` header (8–128 chars). The context middleware reads `x-idempotency-key` into `req.ctx`; the idempotency middleware reads `Idempotency-Key`. These are two separate header names — be aware when adding new endpoints.
-
-### RabbitMQ / Event system
-
-Uses shared `@projectShell/rabbitmq-middleware` package (GitHub: `kashif147/rabbitmq-middleware#gateway`). Initialized on startup in `src/rabbitMQ/index.js`.
-
-Consumed queues and their exchanges:
-| Queue | Exchange | Routing keys |
-|-------|----------|-------------|
-| `accounts.user.events` | `user.events` | `user.crm.created.v1`, `user.crm.updated.v1` |
-| `accounts.application.events` | `application.events` | `applications.review.processed.v1` |
-| `accounts.product.events` | `product.events` | `product.*.*.v1`, `pricing.*.v1` |
-| `accounts.membership.events` | `membership.events` | `members.subscription.current.updated.v1` |
-
-Publish events via `publishDomainEvent(eventType, data, metadata)` from `src/rabbitMQ/index.js`.
-
-### Database concurrency
-
-`src/config/globalLimiter.js` exports a `p-limit` instance (`globalDBLimiter`) shared across all DB operations. Default 120 concurrent ops (80% of 150-connection MongoDB pool). Use `withGlobalLimit(fn)` to wrap any heavy DB operation. This is critical for batch operations (application approvals up to 500, payment batch processing up to 5000).
-
-### Key models
-
-- `payment.model.js`, `refund.model.js` — Stripe payment tracking
-- `journal.model.js`, `glTransaction.model.js`, `balance.model.js`, `materializedBalance.model.js` — double-entry accounting / GL
-- `coa.model.js` — Chart of Accounts
-- `user.model.js` — CRM user sync (from user.events)
-- `product.model.js`, `productType.model.js`, `pricing.model.js` — synced from product-service via events
-- `reportSnapshot.model.js` — pre-computed report snapshots
-
-### Shared packages (GitHub dependencies)
-
-- `@membership/policy-middleware` — `kashif147/policy-middleware#gateway`
-- `@membership/shared-constants` — `kashif147/membership-shared-constants#v1.0.0`
-- `@projectShell/rabbitmq-middleware` — `kashif147/rabbitmq-middleware#gateway`
-
-After changing any of these in `package.json`, run `npm install` to re-fetch from GitHub.
-
-## Environment variables
-
-| Variable | Purpose |
-|----------|---------|
-| `MONGODB_URI` | MongoDB connection string |
-| `RABBIT_URL` | RabbitMQ connection URL (optional — service starts without it) |
-| `ACCOUNTS_API_KEY` | Shared API key required on all `/api/*` requests |
-| `STRIPE_SECRET_KEY` | Stripe secret key |
-| `PORTAL_BASE_URL` | Base URL for Stripe checkout success/cancel redirects |
-| `MONGODB_MAX_POOL_SIZE` | Max connections (default: 150) |
-| `MONGODB_MIN_POOL_SIZE` | Min connections (default: 20) |
-| `GLOBAL_DB_OPERATIONS_LIMIT` | Global p-limit concurrency (default: 120) |
-| `APPLICATION_EVENTS_PREFETCH` | RabbitMQ prefetch for application queue (default: 50) |
-| `MEMBERSHIP_EVENTS_PREFETCH` | RabbitMQ prefetch for membership queue (default: 50) |
-
-Uses `dotenv-flow` — create `.env.development`, `.env.staging`, `.env.production` as needed.
+Check for a matching skill before implementing from scratch: `membership-finance-processing`
+(finance policy/refactor rules), `aib-sepa-pain-files` (SEPA PAIN.008/PAIN.002),
+`cross-service-auth` (forwarding JWT/gateway headers instead of API keys), `no-cross-db-mongo`
+(never connect to another service's MongoDB directly — use its HTTP API).

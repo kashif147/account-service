@@ -1,9 +1,6 @@
 import request from "supertest";
 import { jest } from "@jest/globals";
 
-// Ensure API key check passes
-process.env.ACCOUNTS_API_KEY = process.env.ACCOUNTS_API_KEY || "test-key";
-
 const publishDomainEventMock = jest.fn().mockResolvedValue(true);
 
 // Mock Stripe client before importing app/services
@@ -83,9 +80,14 @@ const { default: GLTransaction } = await import(
 );
 const { default: CoA } = await import("../models/coa.model.js");
 
+// internalAuth path (payment.routes.js): no Authorization/x-jwt-verified header present, so this
+// routes through forwardedInternalContext, gated on x-internal-request: true. Roles/permissions
+// are set so the requireFinanceWrite-gated /refunds POST tests still pass.
 const headers = {
   "x-tenant-id": "demo-tenant",
-  "x-api-key": process.env.ACCOUNTS_API_KEY,
+  "x-internal-request": "true",
+  "x-user-roles": JSON.stringify(["AM"]),
+  "x-user-permissions": JSON.stringify(["payments:write"]),
 };
 
 const OID = "507f1f77bcf86cd799439011";

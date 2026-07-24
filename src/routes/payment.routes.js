@@ -1,7 +1,8 @@
 import express from "express";
-import context from "../middlewares/context.js";
+import { forwardedInternalContext } from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
+import { AppError } from "../errors/AppError.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
 import {
@@ -27,11 +28,18 @@ import { zCreateRefund, zListRefundsQuery } from "../models/refund.model.js";
 
 const router = express.Router();
 
-// Accept either API key context or JWT auth
-router.use((req, res, next) => {
-  if (req.headers["x-api-key"]) return context(req, res, next);
-  return ensureAuthenticated(req, res, next);
-});
+// Same internalAuth pattern as internal.routes.js: gateway/JWT identity for user-originated
+// calls, or forwarded internal-request headers for genuine service-to-service calls.
+function internalAuth(req, res, next) {
+  if (req.headers.authorization || req.headers["x-jwt-verified"]) {
+    return ensureAuthenticated(req, res, next);
+  }
+  if (req.header("x-internal-request") === "true") {
+    return forwardedInternalContext(req, res, next);
+  }
+  return res.appError(AppError.unauthorized("Authorization header required"));
+}
+router.use(internalAuth);
 
 router.post(
   "/intents",
