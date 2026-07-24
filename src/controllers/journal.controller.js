@@ -19,7 +19,6 @@ import { getMemberTrackedAccountCodes } from "../helpers/coaAccountCodes.helper.
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 import { notifyMemberFinanceUpdated } from "../services/memberFinanceRealtimeNotify.service.js";
-import { publishMemberCreditReportingEvent } from "../services/memberCreditReportingPublish.service.js";
 import { notifyMemberPaymentReceiptPosted } from "../services/memberReceiptReminderNotify.service.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 import { randomUUID } from "crypto";
@@ -480,13 +479,6 @@ export async function postBalancedJournal({
         memberId,
         docType: txn.docType,
         docNo: txn.docNo,
-      }).catch(() => {});
-      publishMemberCreditReportingEvent({
-        tenantId: resolvedTenantId,
-        memberId,
-        docType: txn.docType,
-        docNo: txn.docNo,
-        correlationId: req.headers?.["x-correlation-id"],
       }).catch(() => {});
     }
 
