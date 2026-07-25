@@ -92,6 +92,15 @@ function isApplicationPaymentRequest({ purpose, applicationId, memberId }) {
   return !memberId;
 }
 
+// Event/course registrations always authorize-then-capture now (deferred to
+// CRM approval, same reason as application payments - see events-service's
+// registration-flow.md) - independent of isApplicationPaymentRequest, which
+// also gates the applicationId-specific reusable-attempt logic below and
+// must not be widened to include registrationId-keyed payments.
+function isEventRegistrationPaymentRequest(purpose) {
+  return purpose === "eventRegistration" || purpose === "courseRegistration";
+}
+
 function stripeDetailsFromIntent(pi) {
   if (!pi) return {};
   return {
@@ -357,7 +366,9 @@ export async function createIntent(input, ctx) {
     applicationId,
     memberId,
   });
-  const stripeCaptureMethod = isApplicationPayment ? "manual" : "automatic";
+  const isEventRegistrationPayment = isEventRegistrationPaymentRequest(parsed.purpose);
+  const stripeCaptureMethod =
+    isApplicationPayment || isEventRegistrationPayment ? "manual" : "automatic";
   const logger = (await import("../config/logger.js")).default;
   let attemptNumber = 1;
   let supersededPaymentId = null;
@@ -1315,13 +1326,31 @@ function appendDefinedStripeFields(set, parsed) {
   }
 }
 
-export async function capturePaymentIntent(paymentIntentId, ctx = {}) {
+export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields = {}) {
   if (!paymentIntentId) {
     throw AppError.badRequest("paymentIntentId is required");
   }
 
   const stripe = getStripe();
   const payment = await loadPaymentForIntent(paymentIntentId, ctx);
+
+  // Callers resolving profileId/memberId only at approval (e.g. events-service
+  // linking a just-created/linked attendee Profile) can attach it here,
+  // immediately before capture - reconcileStripeEvent below re-reads the
+  // Payment doc fresh from the DB, so this is picked up by GL posting
+  // (postJournalForPayment) without any separate reassignment step.
+  if (linkFields.profileId || linkFields.memberId) {
+    await Payment.updateOne(
+      { _id: payment._id },
+      {
+        $set: {
+          ...(linkFields.profileId ? { profileId: linkFields.profileId } : {}),
+          ...(linkFields.memberId ? { memberId: linkFields.memberId } : {}),
+        },
+      },
+    );
+  }
+
   const current = await stripe.paymentIntents.retrieve(paymentIntentId);
 
   if (current.status === "succeeded") {
@@ -1820,6 +1849,22 @@ export async function reconcileStripeEvent(input, ctx) {
           "Journal entry already exists for payment",
         );
       }
+    } else if (parsed.payment.status === "requires_capture" && doc.ledgerDomain === "events" && doc.registrationId) {
+      // Manual-capture events/course registration payment has been
+      // authorized (funds held, not yet captured) - let events-service know
+      // so it can surface "payment authorized, awaiting CRM approval"
+      // instead of leaving the registration looking untouched. No GL entry
+      // is posted here - that only happens on capture (status "succeeded"
+      // above), at CRM approval time.
+      const { publishPaymentStatusUpdated } = await import(
+        "../handlers/eventRegistration.approval.listener.js"
+      );
+      await publishPaymentStatusUpdated({
+        tenantId: ctx?.tenantId || doc.tenantId,
+        paymentId: String(doc._id),
+        registrationId: doc.registrationId,
+        status: "requires_capture",
+      });
     }
 
     await publishApplicationPaymentUpdate(doc, parsed, ctx);

@@ -77,9 +77,11 @@ export async function getLatestApplicationPayment(req, res, next) {
 
 export async function captureExistingPaymentIntent(req, res, next) {
   try {
+    const { profileId, memberId } = req.body || {};
     const result = await capturePaymentIntent(
       req.params.paymentIntentId,
       req.ctx,
+      { profileId, memberId },
     );
     res.success(result);
   } catch (e) {

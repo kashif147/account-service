@@ -28,7 +28,7 @@ function resolveEventIncomeCode(eventCategoryCode) {
   return EVENT_INCOME_CODE_BY_CATEGORY[eventCategoryCode] || DEFAULT_EVENTS_INCOME_CODE;
 }
 
-async function publishPaymentStatusUpdated({ tenantId, paymentId, registrationId, status }) {
+export async function publishPaymentStatusUpdated({ tenantId, paymentId, registrationId, status }) {
   const result = await publisher.publish(
     "payments.events.status.updated.v1",
     { tenantId, paymentId, registrationId, status, ledgerDomain: "events" },
@@ -137,50 +137,10 @@ export async function postJournalForEventPayment(payment, ctx) {
   return { ok: true };
 }
 
-/**
- * Posts a manual (comp/manual/invoice) events/courses payment directly to the
- * GL, without a Stripe charge. Called from the /api/journal/events/manual-payment
- * endpoint (registration.controller.js in events-service).
- */
-export async function postManualEventPayment({
-  tenantId,
-  registrationId,
-  profileId,
-  memberId,
-  productCode,
-  eventCategoryCode,
-  amount,
-  currency,
-  method,
-  userId,
-}) {
-  const Payment = (await import("../models/payment.model.js")).default;
-
-  const purpose = "eventRegistration";
-  const payment = await Payment.create({
-    tenantId,
-    purpose,
-    ledgerDomain: "events",
-    registrationId,
-    profileId,
-    ...(memberId ? { memberId } : {}),
-    productCode,
-    eventCategoryCode,
-    amount,
-    currency: currency || "eur",
-    status: method === "invoice" ? "payment_required" : "succeeded",
-    mode: "external",
-    source: "events-service",
-    external: { externalRef: `manual-${method}-${registrationId}` },
-    audit: { createdBy: userId || "system", updatedBy: userId || "system" },
-  });
-
-  if (amount <= 0) {
-    // Nothing to post - events-service already confirms manual/comp/invoice
-    // registrations synchronously, without waiting for a payment-status event.
-    return { paymentId: payment._id.toString() };
-  }
-
+/** Shared per-method GL posting, used by both the (legacy) immediate-post path
+ * and the deferred post-at-approval path below - `payment` must already have
+ * its final profileId/memberId set. */
+async function postManualEventJournalEntries(payment, { tenantId, registrationId, method, amount, eventCategoryCode, profileId, memberId }) {
   const incomeCode = resolveEventIncomeCode(eventCategoryCode);
   const base = {
     registrationId,
@@ -253,9 +213,135 @@ export async function postManualEventPayment({
       operation: "events_comp_writeoff_posted",
     });
   }
+}
+
+/**
+ * Records a manual (comp/manual/invoice) events/courses payment. Called from
+ * the /api/journal/events/manual-payment endpoint (events-service). By
+ * default (deferPosting: true, the new normal path since registrations are
+ * approval-gated) this only creates the Payment doc - no GL entry, no
+ * profileId required yet. Pass deferPosting: false for the old
+ * immediate-post behavior (kept for any caller that still wants it).
+ */
+export async function postManualEventPayment({
+  tenantId,
+  registrationId,
+  profileId,
+  memberId,
+  productCode,
+  eventCategoryCode,
+  amount,
+  currency,
+  method,
+  userId,
+  deferPosting = true,
+}) {
+  const Payment = (await import("../models/payment.model.js")).default;
+
+  const purpose = "eventRegistration";
+  const payment = await Payment.create({
+    tenantId,
+    purpose,
+    ledgerDomain: "events",
+    registrationId,
+    ...(profileId ? { profileId } : {}),
+    ...(memberId ? { memberId } : {}),
+    productCode,
+    eventCategoryCode,
+    amount,
+    currency: currency || "eur",
+    // "manual_review" when posting is deferred to approval - nothing has
+    // been recognized in the GL yet, regardless of method (Payment.status
+    // has no plain "pending" value; "manual_review" is the closest existing
+    // enum member and is semantically accurate here - this Payment is
+    // awaiting the CRM approval step before anything posts).
+    status: deferPosting ? "manual_review" : method === "invoice" ? "payment_required" : "succeeded",
+    mode: "external",
+    source: "events-service",
+    external: { externalRef: `manual-${method}-${registrationId}` },
+    audit: { createdBy: userId || "system", updatedBy: userId || "system" },
+  });
+
+  if (deferPosting || amount <= 0) {
+    // Nothing to post yet - either GL posting happens later at CRM approval
+    // (postManualEventPaymentPost below), or there's genuinely nothing to
+    // post (comp/zero-amount already-approved case).
+    return { paymentId: payment._id.toString() };
+  }
+
+  await postManualEventJournalEntries(payment, {
+    tenantId, registrationId, method, amount, eventCategoryCode, profileId, memberId,
+  });
 
   // No payments.events.status.updated.v1 publish here - events-service already
   // confirms manual/comp/invoice registrations synchronously when it makes this
   // call; that event is only needed for the async Stripe webhook path above.
   return { paymentId: payment._id.toString() };
+}
+
+/**
+ * Posts a previously-recorded (deferPosting:true) manual events/courses
+ * payment to the GL, at CRM approval time, once profileId is resolved.
+ * Idempotent: a Payment that's already been posted (status no longer
+ * "manual_review") is a no-op rather than double-posting.
+ */
+export async function postManualEventPaymentPost({ tenantId, paymentId, method, profileId, memberId, userId }) {
+  const Payment = (await import("../models/payment.model.js")).default;
+
+  const payment = await Payment.findOne({ _id: paymentId, tenantId });
+  if (!payment) {
+    const { AppError } = await import("../errors/AppError.js");
+    throw AppError.notFound("Payment not found", { paymentId });
+  }
+  if (payment.status !== "manual_review") {
+    // Already posted (or in a terminal state) - nothing to do.
+    return { paymentId: payment._id.toString(), alreadyPosted: true };
+  }
+
+  payment.profileId = profileId || payment.profileId;
+  if (memberId) payment.memberId = memberId;
+  payment.audit = { ...(payment.audit || {}), updatedBy: userId || "system" };
+  await payment.save();
+
+  if (payment.amount > 0) {
+    await postManualEventJournalEntries(payment, {
+      tenantId,
+      registrationId: payment.registrationId,
+      method,
+      amount: payment.amount,
+      eventCategoryCode: payment.eventCategoryCode,
+      profileId: payment.profileId,
+      memberId: payment.memberId,
+    });
+  }
+
+  payment.status = method === "invoice" ? "payment_required" : "succeeded";
+  await payment.save();
+
+  return { paymentId: payment._id.toString() };
+}
+
+/**
+ * Voids a recorded-but-not-yet-posted manual/comp/invoice event payment, on
+ * CRM rejection. Nothing was ever posted to the GL for a "manual_review"
+ * Payment, so this is a plain status flip - no reversal needed. A no-op if
+ * the payment was already posted or voided.
+ */
+export async function voidManualEventPayment({ tenantId, paymentId, userId }) {
+  const Payment = (await import("../models/payment.model.js")).default;
+
+  const payment = await Payment.findOne({ _id: paymentId, tenantId });
+  if (!payment) {
+    const { AppError } = await import("../errors/AppError.js");
+    throw AppError.notFound("Payment not found", { paymentId });
+  }
+  if (payment.status !== "manual_review") {
+    return { paymentId: payment._id.toString(), voided: false };
+  }
+
+  payment.status = "canceled";
+  payment.audit = { ...(payment.audit || {}), updatedBy: userId || "system" };
+  await payment.save();
+
+  return { paymentId: payment._id.toString(), voided: true };
 }

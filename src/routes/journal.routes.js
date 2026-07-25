@@ -49,7 +49,11 @@ import { requireFinanceWrite } from "../middlewares/financePermission.middleware
 import { idempotency } from "../middlewares/idempotency.js";
 import { forwardedInternalContext } from "../middlewares/context.js";
 import { AppError } from "../errors/AppError.js";
-import { postManualEventPaymentHandler } from "../controllers/eventJournal.controller.js";
+import {
+  postManualEventPaymentHandler,
+  postManualEventPaymentPostHandler,
+  voidManualEventPaymentHandler,
+} from "../controllers/eventJournal.controller.js";
 
 const router = express.Router();
 
@@ -267,6 +271,25 @@ router.post(
   internalOrAuthenticated,
   idempotency(),
   postManualEventPaymentHandler,
+);
+
+// Posts a previously-recorded (deferPosting:true) manual event payment to the
+// GL at CRM approval time, once profileId is resolved - see
+// events-service's /registrations/:id/approve.
+router.post(
+  "/events/manual-payment/post",
+  internalOrAuthenticated,
+  idempotency(),
+  postManualEventPaymentPostHandler,
+);
+
+// Voids a recorded-but-unposted manual event payment on CRM rejection - see
+// events-service's /registrations/:id/reject.
+router.post(
+  "/events/manual-payment/void",
+  internalOrAuthenticated,
+  idempotency(),
+  voidManualEventPaymentHandler,
 );
 
 // Online payment processing - allows MEMBER role for portal users
