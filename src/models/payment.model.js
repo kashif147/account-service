@@ -133,9 +133,17 @@ const PaymentSchema = new Schema(
 );
 
 // Compound indexes
+//
+// partialFilterExpression, not just sparse: true, on both indexes below.
+// Sparse only excludes documents where the field is entirely MISSING - a
+// document with the field explicitly set to null still gets indexed, so
+// multiple payments that all end up with e.g. idempotencyKey: null collide
+// on that shared null value under a plain sparse unique index. A partial
+// filter requiring the field to actually be a string fixes this properly
+// (same pattern applied to events-service's Registration.profileId index).
 PaymentSchema.index(
   { tenantId: 1, "stripe.paymentIntentId": 1 },
-  { unique: true, sparse: true }
+  { unique: true, partialFilterExpression: { "stripe.paymentIntentId": { $type: "string" } } }
 );
 
 PaymentSchema.index({ tenantId: 1, memberId: 1, createdAt: -1 });
@@ -157,7 +165,7 @@ PaymentSchema.index({
 
 PaymentSchema.index(
   { tenantId: 1, idempotencyKey: 1 },
-  { unique: true, sparse: true }
+  { unique: true, partialFilterExpression: { idempotencyKey: { $type: "string" } } }
 );
 
 // Zod DTOs
