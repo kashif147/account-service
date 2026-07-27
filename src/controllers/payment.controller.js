@@ -6,6 +6,7 @@ import {
   reconcileStripeEvent,
   capturePaymentIntent,
   cancelPaymentIntent,
+  attachRegistrationToPaymentIntent,
   recordExternal,
   createRefund,
   listRefunds,
@@ -94,6 +95,20 @@ export async function cancelExistingPaymentIntent(req, res, next) {
     const result = await cancelPaymentIntent(
       req.params.paymentIntentId,
       req.ctx,
+    );
+    res.success(result);
+  } catch (e) {
+    next(e);
+  }
+}
+
+export async function attachRegistrationToExistingIntent(req, res, next) {
+  try {
+    const { registrationId, productCode, eventCategoryCode, profileId, memberId } = req.body || {};
+    const result = await attachRegistrationToPaymentIntent(
+      req.params.paymentIntentId,
+      req.ctx,
+      { registrationId, productCode, eventCategoryCode, profileId, memberId },
     );
     res.success(result);
   } catch (e) {

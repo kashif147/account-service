@@ -434,7 +434,16 @@ export async function createIntent(input, ctx) {
   // This prevents duplicates even when different idempotency keys are used
   // Check for payments created in the last 10 minutes (increased window for race conditions)
   // Include ALL statuses to catch any recent payment attempt
-  if (memberId || applicationId) {
+  //
+  // registrationId alone must also trigger this (not just memberId/
+  // applicationId) - an event/course attendee with no resolved membership
+  // number has neither, so without this the whole block was silently
+  // skipped for every non-member event/course registration, meaning a
+  // retried createRegistrationPaymentIntent call (network retry, proxy
+  // retry, anything re-sending the same registrationId) always created a
+  // brand new, unrelated Stripe PaymentIntent instead of reusing the one
+  // already created for that registration.
+  if (memberId || applicationId || registrationId) {
     const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
     const duplicateCheck = {
       tenantId: ctx.tenantId,
@@ -528,7 +537,9 @@ export async function createIntent(input, ctx) {
   // Final duplicate check right before Stripe API call to catch race conditions
   // This is the last chance to prevent duplicate Stripe payment intents
   // Check for ANY recent payment with same parameters (not just in-progress)
-  if (memberId || applicationId) {
+  // registrationId alone must also trigger this - see the comment on the
+  // matching gate above.
+  if (memberId || applicationId || registrationId) {
     const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000); // Check last 2 minutes
     const lastSecondCheck = {
       tenantId: ctx.tenantId,
@@ -753,7 +764,16 @@ export async function createIntent(input, ctx) {
     // Check if we already have a payment with a paymentIntentId before creating a new one
     // This prevents creating duplicate payment intents if two requests come in simultaneously
     // We check by looking for any recent payment with same parameters that might have a paymentIntentId
-    if (memberId || applicationId) {
+    // registrationId alone must also trigger this - this is the block that
+    // actually runs for events-service's calls (useCheckout is never true
+    // for event/course registrations), and a non-member attendee has
+    // neither memberId nor applicationId, so without this the block - and
+    // the registrationId scoping in its query below - never ran at all for
+    // events/courses, meaning a retried createRegistrationPaymentIntent call
+    // (network retry, proxy retry, etc.) always created a brand new,
+    // unrelated Stripe PaymentIntent instead of reusing the one already
+    // created for that registration.
+    if (memberId || applicationId || registrationId) {
       const recentCheck = {
         tenantId: ctx.tenantId,
         purpose: parsed.purpose,
@@ -764,6 +784,7 @@ export async function createIntent(input, ctx) {
       };
       if (memberId) recentCheck.memberId = memberId;
       if (applicationId) recentCheck.applicationId = applicationId;
+      if (registrationId) recentCheck.registrationId = registrationId;
 
       const recentWithIntent = await Payment.findOne(recentCheck)
         .select("stripe status _id memberId applicationId isActiveAttempt")
@@ -1324,6 +1345,48 @@ function appendDefinedStripeFields(set, parsed) {
   if (parsed.payment.nextAction) {
     set["stripe.nextAction"] = parsed.payment.nextAction;
   }
+}
+
+/**
+ * Attaches registration/product identifiers to a Payment whose PaymentIntent
+ * was created directly against this endpoint by portal/mobile BEFORE the
+ * events-service Registration existed - registrationId/productCode/
+ * eventCategoryCode couldn't be included in that original /intents call
+ * since nothing had been created yet. Called by events-service's
+ * createRegistration right after creating the Registration, instead of
+ * creating a second, separate PaymentIntent for a payment the payer already
+ * authorized - see events-service's registration-flow.md. Returns the
+ * PaymentIntent's current live Stripe status so the caller can trust it
+ * rather than assuming.
+ */
+export async function attachRegistrationToPaymentIntent(paymentIntentId, ctx = {}, fields = {}) {
+  if (!paymentIntentId) {
+    throw AppError.badRequest("paymentIntentId is required");
+  }
+  const payment = await loadPaymentForIntent(paymentIntentId, ctx);
+
+  const set = {};
+  if (fields.registrationId) set.registrationId = fields.registrationId;
+  if (fields.productCode) set.productCode = fields.productCode;
+  if (fields.eventCategoryCode) set.eventCategoryCode = fields.eventCategoryCode;
+  if (fields.profileId) set.profileId = fields.profileId;
+  if (fields.memberId) set.memberId = fields.memberId;
+  if (Object.keys(set).length) {
+    set["audit.updatedBy"] = ctx.userId || ctx.memberId || "system";
+    await Payment.updateOne({ _id: payment._id }, { $set: set });
+  }
+
+  const stripe = getStripe();
+  const current = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+  return {
+    ok: true,
+    paymentId: payment._id.toString(),
+    status: normalizeStripeStatusForPayment(current.status),
+    stripeStatus: current.status,
+    amount: current.amount,
+    currency: current.currency,
+  };
 }
 
 export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields = {}) {

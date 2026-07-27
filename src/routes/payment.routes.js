@@ -9,6 +9,7 @@ import {
   createPaymentIntent,
   captureExistingPaymentIntent,
   cancelExistingPaymentIntent,
+  attachRegistrationToExistingIntent,
   getLatestApplicationPayment,
   reconcilePayment,
   getPaymentByStripeId,
@@ -68,6 +69,16 @@ router.post(
   "/intents/:paymentIntentId/cancel",
   idempotency(),
   cancelExistingPaymentIntent
+);
+
+// Attaches registrationId/productCode/eventCategoryCode to a Payment whose
+// PaymentIntent was created directly against POST /intents by portal/mobile
+// BEFORE the events-service Registration existed - see the comment on
+// attachRegistrationToPaymentIntent in payments.service.js.
+router.post(
+  "/intents/:paymentIntentId/attach-registration",
+  idempotency(),
+  attachRegistrationToExistingIntent
 );
 
 // Gateway aggregation: list payments by member IDs (subscription service)
