@@ -22,3 +22,6 @@ code,description,type,isCash,isClearing,isMemberTracked,isRevenue,isContraRevenu
 4900,"Adjustments (adjSubType: prorata-fee-adjustment, manual-discount, category-upgrade-unused-credit, category-downgrade-unused-credit, category-change-prorata-credit, fee-decrease-adjustment, fee-increase-adjustment)",ContraIncome,false,false,false,false,true,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
 5100,"Payment processing fees (e.g. Stripe, bank charges)",Expense,false,false,false,false,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
 5200,Bad debt / Write-offs,Expense,false,false,false,false,false,0,2025-09-04T21:36:26.111Z,2025-09-04T21:36:26.111Z
+4500,Events & Courses registration income,Income,FALSE,FALSE,FALSE,FALSE,TRUE,0,2026-07-18T17:24:39.773Z,2026-07-28T07:44:25.304Z
+4510,CPD registration income,Income,FALSE,FALSE,FALSE,FALSE,TRUE,0,2026-07-28T07:45:25.921Z,2026-07-28T07:45:25.921Z
+4520,Professional Events registration income,Income,FALSE,FALSE,FALSE,FALSE,TRUE,0,2026-07-28T07:45:26.075Z,2026-07-28T07:45:26.075Z

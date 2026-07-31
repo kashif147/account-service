@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Account Service API",
-    "description": "Account-service routes. Authenticated CRM/API flows use Bearer {{authToken}}. Payment routes also accept x-api-key + x-tenant-id (see payment.controller). POST routes that use idempotency() accept optional Idempotency-Key (8–128 chars). Internal reminder eligibility: folder \"Internal — reminder eligibility\" (x-api-key + x-tenant-id, used by subscription-service build).",
+    "description": "Account-service routes. Authenticated CRM/API flows use Bearer {{authToken}}. Payment routes use the internalAuth pattern: gateway/Bearer JWT for user-originated calls, or x-internal-request:true + forwarded x-tenant-id/x-user-* headers for genuine service-to-service calls (no x-api-key here anymore - the accountsApiKey variable/disabled x-api-key headers below are legacy and no longer accepted, kept disabled for reference only). POST routes that use idempotency() accept optional Idempotency-Key (8–128 chars). Internal reminder eligibility: folder \"Internal — reminder eligibility\" (x-api-key + x-tenant-id, used by subscription-service build) - that folder's own internal auth is separate from payment routes.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -10,6 +10,7 @@
     { "key": "memberId", "value": "", "type": "string" },
     { "key": "coaId", "value": "", "type": "string" },
     { "key": "paymentIntentId", "value": "", "type": "string" },
+    { "key": "registrationId", "value": "", "type": "string" },
     { "key": "applicationId", "value": "", "type": "string" },
     { "key": "batchDetailId", "value": "", "type": "string" },
     { "key": "tenantId", "value": "", "type": "string" },
@@ -496,6 +497,71 @@
               { "key": "x-api-key", "value": "{{accountsApiKey}}", "disabled": true }
             ],
             "url": { "raw": "{{baseUrl}}/api/payments/by-stripe/{{paymentIntentId}}", "host": ["{{baseUrl}}"], "path": ["api", "payments", "by-stripe", "{{paymentIntentId}}"] }
+          }
+        },
+        {
+          "name": "Capture Existing Payment Intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/payments/intents/{{paymentIntentId}}/capture",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "payments", "intents", "{{paymentIntentId}}", "capture"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"profileId\": \"\",\n  \"memberId\": \"{{memberId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Captures a manual-capture PaymentIntent currently at requires_capture. profileId/memberId are optional - if supplied, they're attached to the Payment immediately before capture so the resulting GL entry is attributed correctly (used by events-service at registration approval, and by application-payment approval)."
+          }
+        },
+        {
+          "name": "Cancel Existing Payment Intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/payments/intents/{{paymentIntentId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "payments", "intents", "{{paymentIntentId}}", "cancel"]
+            },
+            "body": { "mode": "raw", "raw": "{}", "options": { "raw": { "language": "json" } } },
+            "description": "Releases the authorization hold on a PaymentIntent (requires_capture -> canceled) - no refund, since nothing was captured. If it's already succeeded instead, this just flags the Payment as refund_required rather than cancelling (a real refund needs POST /api/payments/refunds)."
+          }
+        },
+        {
+          "name": "Attach Registration To Payment Intent",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{authToken}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-tenant-id", "value": "{{tenantId}}", "disabled": true },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}", "disabled": true }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/payments/intents/{{paymentIntentId}}/attach-registration",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "payments", "intents", "{{paymentIntentId}}", "attach-registration"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"registrationId\": \"{{registrationId}}\",\n  \"productCode\": \"\",\n  \"eventCategoryCode\": \"\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "description": "Backfills registrationId/productCode/eventCategoryCode onto a Payment whose PaymentIntent was created directly against POST /payments/intents (purpose=eventRegistration|courseRegistration) BEFORE the events-service Registration existed - the portal/mobile flow, which authorizes payment first and only calls events-service's POST /registrations afterward. events-service calls this internally right after creating the Registration; it's exposed here mainly for manual testing/inspection. Returns the PaymentIntent's live Stripe status (status/stripeStatus/amount/currency) so the caller can verify it rather than assume."
           }
         },
         {

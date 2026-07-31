@@ -248,6 +248,13 @@ export async function buildMemberFacingGlQuery({
     const profileKeys = await profileKeysLinkedToMember(mid, req);
     for (const pk of profileKeys) {
       memberOr.push({ "entries.memberId": pk });
+      if (pk.startsWith("profile:")) {
+        // Events/courses GL entries store the raw profile-service _id in
+        // entries.profileId (not the "profile:<id>"-prefixed entries.memberId
+        // convention), so a membership-number lookup needs this extra match
+        // to find the member's own event/course payments.
+        memberOr.push({ "entries.profileId": pk.slice(8) });
+      }
     }
     const appIds = await applicationIdsLinkedToMember(mid);
     if (appIds.length) {
