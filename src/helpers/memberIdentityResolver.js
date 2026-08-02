@@ -55,6 +55,26 @@ export async function profileKeysLinkedToMember(memberId, req) {
   return [];
 }
 
+/**
+ * MaterializedBalance.memberId keys to search for a given caller-supplied id, which may be a
+ * membershipNumber or (for events/courses attendees with no membership) a raw profile-service
+ * profileId. Always includes the plain id and its `profile:` form (matches rollupMemberBalances'
+ * fallback identifier for profile-only GL entries) with no HTTP call needed - covers the common
+ * non-member case directly. When `req` is supplied, also resolves the membershipNumber's linked
+ * profile key(s) so a member's own event/course activity (posted under a distinct profileId)
+ * rolls into their summary too.
+ */
+export async function resolveMemberBalanceKeys(memberId, req) {
+  const mid = String(memberId || "").trim();
+  if (!mid) return [];
+  const keys = new Set([mid, `profile:${mid}`]);
+  if (req) {
+    const linked = await profileKeysLinkedToMember(mid, req);
+    for (const pk of linked) keys.add(pk);
+  }
+  return [...keys];
+}
+
 export async function applicationIdsLinkedToMember(memberId) {
   const mid = String(memberId || "").trim();
   if (!mid) return [];

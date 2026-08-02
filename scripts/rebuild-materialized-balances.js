@@ -34,18 +34,27 @@ function normalizeDateYear(dateValue) {
   return d.getFullYear();
 }
 
-function buildRollupKey(memberId, accountCode, bucket, year) {
-  return `${memberId}|${accountCode}|${bucket}|${year}`;
+function buildRollupKey(memberId, accountCode, bucket, year, ledgerDomain) {
+  return `${memberId}|${accountCode}|${bucket}|${year}|${ledgerDomain}`;
 }
 
+// Mirrors rollupMemberBalances in src/controllers/journal.controller.js - keep both in sync.
 function shouldIncludeEntry(entry) {
-  return !!entry?.periodBucket && (!!entry?.memberId || !!entry?.applicationId);
+  return (
+    !!entry?.periodBucket &&
+    (!!entry?.memberId || !!entry?.applicationId || !!entry?.profileId)
+  );
 }
 
 function entryMemberIdentifier(entry) {
   if (entry.memberId) return String(entry.memberId).trim();
   if (entry.applicationId) return `app:${String(entry.applicationId).trim()}`;
+  if (entry.profileId) return `profile:${String(entry.profileId).trim()}`;
   return null;
+}
+
+function entryLedgerDomain(entry) {
+  return entry?.ledgerDomain || "membership";
 }
 
 async function main() {
@@ -76,7 +85,13 @@ async function main() {
         const signed = entry.dc === "D" ? Number(entry.amount) || 0 : -(Number(entry.amount) || 0);
         if (!signed) continue;
 
-        const key = buildRollupKey(identifier, entry.accountCode, entry.periodBucket, year);
+        const key = buildRollupKey(
+          identifier,
+          entry.accountCode,
+          entry.periodBucket,
+          year,
+          entryLedgerDomain(entry),
+        );
         totals.set(key, (totals.get(key) || 0) + signed);
       }
     }
@@ -97,6 +112,12 @@ async function main() {
       return;
     }
 
+    // Replaces the old {memberId, accountCode, bucket, year} unique index with one that also
+    // includes ledgerDomain (see materializedBalance.model.js) - drops the stale index and
+    // creates the new one. Must run before the rebuild below, otherwise the old index would
+    // reject two docs that differ only by ledgerDomain.
+    await MaterializedBalance.syncIndexes();
+
     const deleteQuery = {};
     if (yearFilter != null) deleteQuery.year = yearFilter;
     if (memberIdFilter) deleteQuery.memberId = memberIdFilter;
@@ -104,7 +125,7 @@ async function main() {
 
     const ops = [];
     for (const [key, amount] of totals.entries()) {
-      const [memberId, accountCode, bucket, yearRaw] = key.split("|");
+      const [memberId, accountCode, bucket, yearRaw, ledgerDomain] = key.split("|");
       ops.push({
         updateOne: {
           filter: {
@@ -112,6 +133,7 @@ async function main() {
             accountCode,
             bucket,
             year: Number.parseInt(yearRaw, 10),
+            ledgerDomain,
           },
           update: {
             $set: {

@@ -98,12 +98,13 @@ function applicationIdForClaimLookup(payment, resolved) {
  * @param {number} year - calendar year
  * @returns {Promise<number>}
  */
-export async function getAvailableCredit2020ForKey(memberKey, year) {
+export async function getAvailableCredit2020ForKey(memberKey, year, ledgerDomain = "membership") {
   const rows = await MaterializedBalance.find({
     memberId: memberKey,
     accountCode: "2020",
     year,
     bucket: { $in: BUCKETS },
+    ledgerDomain,
   }).lean();
   const sum = rows.reduce((s, r) => s + r.amount, 0);
   if (sum < 0) return -sum;
@@ -114,14 +115,18 @@ export async function getAvailableCredit2020ForKey(memberKey, year) {
  * Member credit stored as negative materialized balances on 2020 / 1400 (cents).
  * @param {string} memberKey
  * @param {number} year
+ * @param {string} [ledgerDomain] - "membership" (default) or "events"; keeps credit figures
+ *   from blending membership and events/courses money now that MaterializedBalance splits
+ *   rows by domain (see materializedBalance.model.js).
  */
-export async function getMemberStoredCreditCents(memberKey, year) {
+export async function getMemberStoredCreditCents(memberKey, year, ledgerDomain = "membership") {
   if (String(memberKey).startsWith("app:")) return 0;
   const rows = await MaterializedBalance.find({
     memberId: memberKey,
     year,
     accountCode: { $in: ["2020", "1400"] },
     bucket: { $in: BUCKETS },
+    ledgerDomain,
   }).lean();
   let cred = 0;
   for (const r of rows) {
@@ -135,17 +140,18 @@ export async function getMemberStoredCreditCents(memberKey, year) {
  * Operational refundable balance for a member (cents) — same cap as refund validation.
  * @param {string} memberId
  * @param {number} [year]
+ * @param {string} [ledgerDomain] - "membership" (default) or "events"
  */
-export async function getRefundableBalanceForMember(memberId, year) {
+export async function getRefundableBalanceForMember(memberId, year, ledgerDomain = "membership") {
   const mid = String(memberId || "").trim();
   if (!mid || mid.toLowerCase().startsWith("app:")) return 0;
   const effectiveYear =
     Number.isFinite(year) && year > 0 ? year : new Date().getFullYear();
 
-  let available = await getAvailableCredit2020ForKey(mid, effectiveYear);
+  let available = await getAvailableCredit2020ForKey(mid, effectiveYear, ledgerDomain);
   available = Math.max(
     available,
-    await getMemberStoredCreditCents(mid, effectiveYear),
+    await getMemberStoredCreditCents(mid, effectiveYear, ledgerDomain),
   );
   return Math.max(0, available);
 }

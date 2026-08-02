@@ -1,4 +1,5 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
+import { resolveMemberBalanceKeys } from "./memberIdentityResolver.js";
 
 /**
  * Split a member cash receipt (cents) across 1400 buckets then 2020 advance.
@@ -80,16 +81,22 @@ function sumOwed1400Rows(rows, { netAcrossRows = false } = {}) {
 /**
  * Sum owed 1400 across **all calendar years** (matches reminder eligibility snapshot).
  * @param {string} memberId
+ * @param {{ req?: object, ledgerDomain?: "membership"|"events" }} [options] - `ledgerDomain`
+ *   (default "membership") keeps this from summing events/courses 1400 activity into a
+ *   membership arrears/current figure now that MaterializedBalance splits rows by domain.
  * @returns {Promise<{ arrears: number, current: number }>}
  */
-export async function memberOwed1400AllYears(memberId) {
+export async function memberOwed1400AllYears(memberId, options = {}) {
+  const { req, ledgerDomain = "membership" } = options;
   const mid = String(memberId || "").trim();
   if (!mid) return { arrears: 0, current: 0 };
 
+  const balanceKeys = await resolveMemberBalanceKeys(mid, req);
   const rows = await MaterializedBalance.find({
-    memberId: mid,
+    memberId: { $in: balanceKeys },
     accountCode: "1400",
     bucket: { $in: ["arrears", "current"] },
+    ledgerDomain,
   }).lean();
 
   return sumOwed1400Rows(rows, { netAcrossRows: true });
@@ -98,18 +105,22 @@ export async function memberOwed1400AllYears(memberId) {
 /**
  * @param {string} memberId
  * @param {number} year
+ * @param {{ req?: object, ledgerDomain?: "membership"|"events" }} [options]
  * @returns {Promise<{ arrears: number, current: number }>}
  */
-export async function memberOwed1400ByBucket(memberId, year) {
+export async function memberOwed1400ByBucket(memberId, year, options = {}) {
+  const { req, ledgerDomain = "membership" } = options;
   const mid = String(memberId || "").trim();
   if (!mid || !Number.isFinite(year))
     return { arrears: 0, current: 0 };
 
+  const balanceKeys = await resolveMemberBalanceKeys(mid, req);
   const rows = await MaterializedBalance.find({
-    memberId: mid,
+    memberId: { $in: balanceKeys },
     accountCode: "1400",
     year,
     bucket: { $in: ["arrears", "current"] },
+    ledgerDomain,
   }).lean();
 
   return sumOwed1400Rows(rows);
@@ -234,11 +245,15 @@ export async function buildMemberApplyCreditEntries(
 export async function member2020AdvanceCreditCents(memberId, year) {
   const mid = String(memberId || "").trim();
   if (!mid || !Number.isFinite(year)) return 0;
+  // Always membership: this backs buildMemberApplyCreditEntries/buildMemberRefundDebitEntries,
+  // membership-only flows - must not pull in a member-attendee's events/courses 2020 credit now
+  // that MaterializedBalance splits rows by ledgerDomain (see materializedBalance.model.js).
   const rows = await MaterializedBalance.find({
     memberId: mid,
     accountCode: "2020",
     bucket: "advance",
     year,
+    ledgerDomain: "membership",
   }).lean();
   let credit = 0;
   for (const r of rows) {

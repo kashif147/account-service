@@ -6,16 +6,52 @@ import {
   getRefundableBalanceForMember,
 } from "./refundCredit.service.js";
 import { memberOwed1400ByBucket } from "../helpers/paymentReceiptAllocation.js";
+import {
+  resolveMemberBalanceKeys,
+  buildMemberFacingGlQuery,
+} from "../helpers/memberIdentityResolver.js";
 
 const CLEARING_CODES = ["1210", "1220", "1230", "1240", "1250"];
 const DEFERRED_CODE = "2030";
+
+/** Same missing-field-means-membership convention memberLedger uses (reports.controller.js). */
+function ledgerDomainGlFilter(ledgerDomain) {
+  if (ledgerDomain === "events") return { "entries.ledgerDomain": "events" };
+  return {
+    $or: [
+      { "entries.ledgerDomain": "membership" },
+      { "entries.ledgerDomain": { $exists: false } },
+    ],
+  };
+}
+
+/** Raw (unprefixed) profile ids this identity resolves to, for matching entry.profileId directly. */
+function rawProfileIdsFromBalanceKeys(mid, balanceKeys) {
+  const ids = new Set([mid]);
+  for (const k of balanceKeys) {
+    if (k.startsWith("profile:")) ids.add(k.slice(8));
+  }
+  return ids;
+}
+
+/** Does this GL entry belong to the resolved identity (membershipNumber or profileId)? */
+function entryBelongsToIdentity(entry, mid, rawProfileIds) {
+  if (entry?.memberId === mid) return true;
+  if (entry?.profileId && rawProfileIds.has(String(entry.profileId))) return true;
+  return false;
+}
 
 /**
  * First-class member finance summary (cents). Internal matbal remains source; this is the operational view.
  * @param {string} memberId
  * @param {number} [year] calendar year; defaults to current year
+ * @param {{ req?: object, ledgerDomain?: "membership"|"events" }} [options] - `req` enables
+ *   resolving a member's linked profile-service id for events/courses activity posted under a
+ *   different id; `ledgerDomain` (default "membership") keeps membership and events/courses
+ *   money from being blended into one figure now that both post to shared account codes.
  */
-export async function computeMemberFinanceSummary(memberId, year) {
+export async function computeMemberFinanceSummary(memberId, year, options = {}) {
+  const { req, ledgerDomain = "membership" } = options;
   const mid = String(memberId || "").trim();
   if (!mid) {
     throw new Error("memberId required");
@@ -23,21 +59,35 @@ export async function computeMemberFinanceSummary(memberId, year) {
   const effectiveYear =
     Number.isFinite(year) && year > 0 ? year : new Date().getFullYear();
 
+  const balanceKeys = await resolveMemberBalanceKeys(mid, req);
+
   const matRows = await MaterializedBalance.find({
-    memberId: mid,
+    memberId: { $in: balanceKeys },
     year: effectiveYear,
+    ledgerDomain,
   }).lean();
 
-  const { arrears, current } = await memberOwed1400ByBucket(mid, effectiveYear);
-  const outstandingBalance = Math.max(0, arrears) + Math.max(0, current);
-
-  const available2020 = await getAvailableCredit2020ForKey(mid, effectiveYear);
-  const storedCredit = await getMemberStoredCreditCents(mid, effectiveYear);
-  const availableCredit = Math.max(available2020, storedCredit);
-  const refundableBalance = await getRefundableBalanceForMember(
+  const { arrears, current } = await memberOwed1400ByBucket(
     mid,
     effectiveYear,
+    { req, ledgerDomain },
   );
+  const outstandingBalance = Math.max(0, arrears) + Math.max(0, current);
+
+  let availableCredit = 0;
+  for (const key of balanceKeys) {
+    const available2020 = await getAvailableCredit2020ForKey(key, effectiveYear, ledgerDomain);
+    const storedCredit = await getMemberStoredCreditCents(key, effectiveYear, ledgerDomain);
+    availableCredit = Math.max(availableCredit, available2020, storedCredit);
+  }
+
+  let refundableBalance = 0;
+  for (const key of balanceKeys) {
+    refundableBalance = Math.max(
+      refundableBalance,
+      await getRefundableBalanceForMember(key, effectiveYear, ledgerDomain),
+    );
+  }
 
   let deferredIncomeBalance = 0;
   for (const r of matRows) {
@@ -46,10 +96,14 @@ export async function computeMemberFinanceSummary(memberId, year) {
     }
   }
 
+  const glMemberQuery = await buildMemberFacingGlQuery({ memberId: mid, req });
+  const domainFilter = ledgerDomainGlFilter(ledgerDomain);
+  const rawProfileIds = rawProfileIdsFromBalanceKeys(mid, balanceKeys);
+
   let writtenOffBalance = 0;
   const writeOffTxns = await GL.find({
+    $and: [glMemberQuery, domainFilter],
     docType: "WriteOff",
-    "entries.memberId": mid,
     date: {
       $gte: new Date(`${effectiveYear}-01-01`),
       $lte: new Date(`${effectiveYear}-12-31T23:59:59.999Z`),
@@ -57,7 +111,11 @@ export async function computeMemberFinanceSummary(memberId, year) {
   }).lean();
   for (const txn of writeOffTxns) {
     for (const e of txn.entries || []) {
-      if (e.memberId === mid && e.accountCode === "1400" && e.dc === "C") {
+      if (
+        entryBelongsToIdentity(e, mid, rawProfileIds) &&
+        e.accountCode === "1400" &&
+        e.dc === "C"
+      ) {
         writtenOffBalance += Number(e.amount) || 0;
       }
     }
@@ -65,8 +123,8 @@ export async function computeMemberFinanceSummary(memberId, year) {
 
   let unreconciledClearingBalance = 0;
   const clearingTxns = await GL.find({
+    $and: [glMemberQuery, domainFilter],
     docType: { $in: ["Receipt", "Refund"] },
-    "entries.memberId": mid,
     "settlement.status": "PENDING",
     date: {
       $gte: new Date(`${effectiveYear}-01-01`),
@@ -76,6 +134,7 @@ export async function computeMemberFinanceSummary(memberId, year) {
   for (const txn of clearingTxns) {
     for (const e of txn.entries || []) {
       if (
+        entryBelongsToIdentity(e, mid, rawProfileIds) &&
         CLEARING_CODES.includes(e.accountCode) &&
         (e.dc === "D" || e.dc === "C")
       ) {

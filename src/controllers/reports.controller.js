@@ -29,7 +29,10 @@ import {
   pickLastMemberPayment,
 } from "../helpers/memberLastPayment.js";
 import { buildGeneralLedgerList } from "../helpers/generalLedgerList.helper.js";
-import { buildMemberFacingGlQuery } from "../helpers/memberIdentityResolver.js";
+import {
+  buildMemberFacingGlQuery,
+  resolveMemberBalanceKeys,
+} from "../helpers/memberIdentityResolver.js";
 import { computeMemberBalanceFromGl } from "../helpers/memberCreditorBalance.helper.js";
 
 /** Portal members (gateway x-user-type MEMBER / PORTAL) — not CRM. */
@@ -168,14 +171,16 @@ function getMapValue(mapLike, key) {
   return null;
 }
 
-function memberNetAr1400Cents(txn, memberId) {
+function memberNetAr1400Cents(txn, memberId, rawProfileIds) {
   const normalizedMemberId = String(memberId || "").trim().toLowerCase();
   let debit = 0;
   let credit = 0;
   for (const entry of txn?.entries || []) {
-    if (String(entry.memberId || "").trim().toLowerCase() !== normalizedMemberId) {
-      continue;
-    }
+    const matchesMember =
+      String(entry.memberId || "").trim().toLowerCase() === normalizedMemberId;
+    const matchesProfile =
+      rawProfileIds && entry.profileId && rawProfileIds.has(String(entry.profileId));
+    if (!matchesMember && !matchesProfile) continue;
     if (entry.accountCode !== "1400") continue;
     const amount = Number(entry.amount) || 0;
     if (entry.dc === "D") debit += amount;
@@ -601,8 +606,14 @@ export async function memberSummary(req, res, next) {
   try {
     const { memberId } = req.params;
     const { year, scope } = req.query;
+    // Default absent ledgerDomain to "membership" here (unlike memberLedger, which blends
+    // everything when absent - safe for a line-item list where each row is still individually
+    // labeled by domain). This endpoint returns single aggregate numbers, where blending would
+    // recreate the membership/events money-mixing bug this domain awareness exists to prevent.
+    const ledgerDomain = req.query.ledgerDomain === "events" ? "events" : "membership";
     const memberTrackedCodes = await getMemberTrackedAccountCodes();
-    const query = { memberId };
+    const balanceKeys = await resolveMemberBalanceKeys(memberId, req);
+    const query = { memberId: { $in: balanceKeys }, ledgerDomain };
     if (memberTrackedCodes.length) {
       query.accountCode = { $in: memberTrackedCodes };
     }
@@ -622,17 +633,33 @@ export async function memberSummary(req, res, next) {
       query.year = effectiveYear;
     }
 
+    const glMemberQuery = await buildMemberFacingGlQuery({ memberId, req });
+    const glDomainFilter =
+      ledgerDomain === "events"
+        ? { "entries.ledgerDomain": "events" }
+        : {
+            $or: [
+              { "entries.ledgerDomain": "membership" },
+              { "entries.ledgerDomain": { $exists: false } },
+            ],
+          };
+    const rawProfileIds = new Set(
+      [memberId, ...balanceKeys]
+        .map((k) => (String(k).startsWith("profile:") ? String(k).slice(8) : String(k)))
+        .filter(Boolean),
+    );
+
     const [matBalRows, receiptCandidates, latestInvoiceTxn] = await Promise.all([
       MatBal.find(query).lean(),
       GL.find({
-        "entries.memberId": memberId,
+        $and: [glMemberQuery, glDomainFilter],
         docType: { $in: ["Receipt", "Claim"] },
       })
         .sort({ date: -1, createdAt: -1 })
         .limit(150)
         .lean(),
       GL.findOne({
-        "entries.memberId": memberId,
+        $and: [glMemberQuery, glDomainFilter],
         docType: "Invoice",
       })
         .sort({ date: -1, createdAt: -1 })
@@ -649,12 +676,12 @@ export async function memberSummary(req, res, next) {
       byBucket[key] = (byBucket[key] || 0) + r.amount;
     }
 
-    const lastPaymentTxn = pickLastMemberPayment(memberId, receiptCandidates);
-    const lastPayment = buildMemberLastPayment(memberId, lastPaymentTxn);
+    const lastPaymentTxn = pickLastMemberPayment(memberId, receiptCandidates, rawProfileIds);
+    const lastPayment = buildMemberLastPayment(memberId, lastPaymentTxn, rawProfileIds);
 
     let latestInvoice = null;
     if (latestInvoiceTxn) {
-      const amount = memberNetAr1400Cents(latestInvoiceTxn, memberId);
+      const amount = memberNetAr1400Cents(latestInvoiceTxn, memberId, rawProfileIds);
       latestInvoice = {
         docNo: latestInvoiceTxn.docNo,
         docType: latestInvoiceTxn.docType,
@@ -667,12 +694,14 @@ export async function memberSummary(req, res, next) {
     const financeSummary = await computeMemberFinanceSummary(
       memberId,
       effectiveYear ?? new Date().getFullYear(),
+      { req, ledgerDomain },
     );
 
     res.success({
       memberId,
       year: effectiveYear,
       scope: effectiveYear == null ? "all" : "year",
+      ledgerDomain,
       accountCodesUsed: memberTrackedCodes,
       net,
       accounts: Object.entries(byAccount).map(([accountCode, amount]) => ({

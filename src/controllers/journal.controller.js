@@ -89,12 +89,20 @@ export function rollupMemberBalances({ date, entries }) {
 
   for (const e of entries) {
     if (!e.periodBucket) continue;
-    // Use memberId if present, otherwise use applicationId (prefixed with "app:")
+    // Use memberId if present, otherwise applicationId (prefixed "app:"), otherwise
+    // profileId (prefixed "profile:") for events/courses attendees who have no
+    // membershipNumber/applicationId - see memberIdentityResolver.js's profileKeysLinkedToMember.
     const identifier =
-      e.memberId || (e.applicationId ? `app:${e.applicationId}` : null);
+      e.memberId ||
+      (e.applicationId ? `app:${e.applicationId}` : null) ||
+      (e.profileId ? `profile:${e.profileId}` : null);
     if (!identifier) continue;
     const signed = e.dc === "D" ? e.amount : -e.amount;
-    const key = `${identifier}|${e.accountCode}|${e.periodBucket}|${year}`;
+    // ledgerDomain keeps membership and events/courses money in separate MaterializedBalance
+    // rows even though both domains post to the same account codes (1400/2020) - see
+    // materializedBalance.model.js.
+    const ledgerDomain = e.ledgerDomain || "membership";
+    const key = `${identifier}|${e.accountCode}|${e.periodBucket}|${year}|${ledgerDomain}`;
     totals.set(key, (totals.get(key) || 0) + signed);
   }
 
@@ -123,10 +131,10 @@ async function bulkWriteMaterializedRollup(year, totals, sign = 1) {
   for (const [key, amount] of totals.entries()) {
     const delta = sign * amount;
     if (!delta) continue;
-    const [memberId, accountCode, bucket] = key.split("|");
+    const [memberId, accountCode, bucket, , ledgerDomain] = key.split("|");
     ops.push({
       updateOne: {
-        filter: { memberId, accountCode, bucket, year },
+        filter: { memberId, accountCode, bucket, year, ledgerDomain },
         update: {
           $inc: { amount: delta },
           $set: { updatedAt: new Date() },
