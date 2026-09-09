@@ -95,8 +95,13 @@ function isApplicationPaymentRequest({ purpose, applicationId, memberId }) {
 // Event/course registrations always authorize-then-capture now (deferred to
 // CRM approval, same reason as application payments - see events-service's
 // registration-flow.md) - independent of isApplicationPaymentRequest, which
-// also gates the applicationId-specific reusable-attempt logic below and
-// must not be widened to include registrationId-keyed payments.
+// gates only the applicationId-specific isApplicationPayment branches
+// (useCheckout, application-attempt idempotency keys) elsewhere in this file.
+// resolveReusablePaymentAttempt() below DOES cover both applicationId- and
+// registrationId-keyed payments - that reuse/supersede behavior is what lets
+// events-service's retry-payment endpoint recover a registration whose
+// PaymentIntent got stuck at requires_payment_method (the payer's card
+// confirm never completed) instead of it being permanently uncapturable.
 function isEventRegistrationPaymentRequest(purpose) {
   return purpose === "eventRegistration" || purpose === "courseRegistration";
 }
@@ -207,8 +212,23 @@ async function markPaymentAttemptSuperseded(payment, reason, ctx = {}) {
   );
 }
 
-async function resolveReusableApplicationAttempt({
+/**
+ * Finds the latest Stripe attempt for a given applicationId or registrationId
+ * and either hands back its clientSecret for reuse (still-confirmable status,
+ * same amount/currency) or marks it superseded so a fresh PaymentIntent gets
+ * created below. Originally application-only; generalized to registrationId
+ * so a repeated createIntent call for the same registration - e.g.
+ * events-service's retry-payment endpoint, called when the CRM's
+ * confirmCardPayment never completed and capture then fails with "cannot be
+ * captured when its status is requires_payment_method" - recovers the SAME
+ * PaymentIntent (requires_payment_method is itself in
+ * canReuseStripePaymentIntentStatus) instead of that registration being stuck
+ * forever, or silently accumulating disconnected duplicate PaymentIntents.
+ * Exactly one of applicationId/registrationId should be provided.
+ */
+async function resolveReusablePaymentAttempt({
   applicationId,
+  registrationId,
   purpose,
   amount,
   currency,
@@ -216,13 +236,19 @@ async function resolveReusableApplicationAttempt({
   stripe,
   logger,
 }) {
-  if (!applicationId) {
+  const matchField = applicationId
+    ? "applicationId"
+    : registrationId
+      ? "registrationId"
+      : null;
+  const matchValue = applicationId || registrationId;
+  if (!matchField) {
     return { reusablePayment: null, attemptNumber: 1 };
   }
 
   const latestAttempt = await Payment.findOne({
     tenantId: ctx.tenantId,
-    applicationId,
+    [matchField]: matchValue,
     purpose,
     mode: "stripe",
     "stripe.paymentIntentId": { $exists: true, $ne: null },
@@ -244,11 +270,11 @@ async function resolveReusableApplicationAttempt({
     logger.warn(
       {
         paymentId: latestAttempt._id,
-        applicationId,
+        [matchField]: matchValue,
         paymentIntentId: latestAttempt.stripe.paymentIntentId,
         error: err.message,
       },
-      "Unable to retrieve latest application PaymentIntent; creating replacement attempt",
+      "Unable to retrieve latest PaymentIntent; creating replacement attempt",
     );
     await markPaymentAttemptSuperseded(
       latestAttempt,
@@ -276,12 +302,12 @@ async function resolveReusableApplicationAttempt({
     logger.info(
       {
         paymentId: latestAttempt._id,
-        applicationId,
+        [matchField]: matchValue,
         paymentIntentId: latestAttempt.stripe.paymentIntentId,
         stripeStatus: pi.status,
         attemptNumber: latestAttempt.attemptNumber || 1,
       },
-      "Reusing latest application PaymentIntent",
+      "Reusing latest PaymentIntent",
     );
     if (latestAttempt.isActiveAttempt === false) {
       await Payment.updateOne(
@@ -314,14 +340,14 @@ async function resolveReusableApplicationAttempt({
   logger.info(
     {
       paymentId: latestAttempt._id,
-      applicationId,
+      [matchField]: matchValue,
       paymentIntentId: latestAttempt.stripe.paymentIntentId,
       stripeStatus: pi.status,
       sameAmount,
       sameCurrency,
       nextAttemptNumber,
     },
-    "Latest application PaymentIntent is not reusable; creating replacement attempt",
+    "Latest PaymentIntent is not reusable; creating replacement attempt",
   );
   return {
     reusablePayment: null,
@@ -374,9 +400,10 @@ export async function createIntent(input, ctx) {
   let supersededPaymentId = null;
   let persistIdempotencyKey = true;
 
-  if (isApplicationPayment && !parsed.useCheckout) {
-    const attemptDecision = await resolveReusableApplicationAttempt({
-      applicationId,
+  if ((isApplicationPayment || isEventRegistrationPayment) && !parsed.useCheckout) {
+    const attemptDecision = await resolveReusablePaymentAttempt({
+      applicationId: isApplicationPayment ? applicationId : undefined,
+      registrationId: isEventRegistrationPayment ? registrationId : undefined,
       purpose: parsed.purpose,
       amount: parsed.amount,
       currency: normalizedCurrency,
@@ -1017,11 +1044,11 @@ export async function createIntent(input, ctx) {
     }
 
     const payment = await Payment.create(paymentData);
-    if (isApplicationPayment && stripeIds.paymentIntentId) {
+    if ((isApplicationPayment || isEventRegistrationPayment) && stripeIds.paymentIntentId) {
       await Payment.updateMany(
         {
           tenantId: ctx.tenantId,
-          applicationId,
+          ...(isApplicationPayment ? { applicationId } : { registrationId }),
           purpose: parsed.purpose,
           _id: { $ne: payment._id },
           isActiveAttempt: { $ne: false },
