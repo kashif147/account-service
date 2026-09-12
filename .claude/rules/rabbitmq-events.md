@@ -13,6 +13,15 @@ is unset, same as every other service in this platform.
 | `accounts.product.events` | `product.events` | `product.*.*.v1`, `pricing.*.v1` |
 | `accounts.membership.events` | `membership.events` | `members.subscription.current.updated.v1` |
 | `accounts.batch.process` | `batch.events` | batch process trigger/completion events |
+| `accounts.events.events` | `events.events` (owned by events-service, asserted not declared) | `events.event.cancelled.v1` |
+
+`events.event.cancelled.v1` drives `services/eventCancellationRefund.service.js`'s
+`processEventCancellationRefunds()` — automatic, no-approval-gate refunds when events-service
+cancels a whole event. Deliberately does **not** reuse `payments.service.js`'s `createRefund()`/
+`assertRefundWithinCredit()` (that caps refunds against a member's credit balance — unrelated to
+reimbursing a real captured payment on the organizer's decision) or its `postJournalForRefund()`
+(membership-oriented debit lines — events/courses payments post to a different segregated set of
+accounts, see `handlers/eventRegistration.approval.listener.js`). See the finance-domain doc.
 
 ## Publishing
 

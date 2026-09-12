@@ -39,6 +39,7 @@ import {
   handleMemberCreated,
 } from "../handlers/application.approval.listener.js";
 import { handleSubscriptionCategoryChanged } from "./listeners/subscription.category.change.listener.js";
+import { processEventCancellationRefunds } from "../services/eventCancellationRefund.service.js";
 
 // Re-export for convenience
 export { APPLICATION_EVENTS, BATCH_PROCESS_EVENTS };
@@ -435,6 +436,42 @@ export async function setupConsumers() {
       logger.error(
         { error: error.message, queue: MEMBERSHIP_QUEUE },
         "Failed to set up membership events consumer, continuing without it"
+      );
+    }
+
+    // Events lifecycle events (events.events exchange - owned by events-service,
+    // not this service, so it's asserted defensively rather than declared in
+    // initEventSystem's own exchanges list, same pattern as user.events/
+    // application.events/product.events/membership.events above).
+    const EVENTS_QUEUE = "accounts.events.events";
+    logger.info("Creating events lifecycle queue...", {
+      queue: EVENTS_QUEUE,
+      exchange: "events.events",
+      routingKeys: ["events.event.cancelled.v1"],
+    });
+
+    await consumer.createQueue(EVENTS_QUEUE, { durable: true, messageTtl: 3600000 });
+
+    try {
+      const consumerChannel = await connectionManager.getNamedChannel("consumer", 10);
+      await consumerChannel.assertExchange("events.events", "topic", { durable: true });
+    } catch (error) {
+      logger.warn({ error: error.message }, "Failed to assert events.events exchange, will attempt binding anyway");
+    }
+
+    try {
+      await consumer.bindQueue(EVENTS_QUEUE, "events.events", ["events.event.cancelled.v1"]);
+
+      consumer.registerHandler("events.event.cancelled.v1", async (payload) => {
+        await processEventCancellationRefunds(payload);
+      });
+
+      await consumer.consume(EVENTS_QUEUE, { prefetch: 10 });
+      logger.info("Events lifecycle consumer ready", { queue: EVENTS_QUEUE });
+    } catch (error) {
+      logger.error(
+        { error: error.message, queue: EVENTS_QUEUE },
+        "Failed to set up events lifecycle consumer, continuing without it",
       );
     }
 

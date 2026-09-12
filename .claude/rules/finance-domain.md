@@ -10,6 +10,19 @@ adjustments (draft → approved workflow, like credit notes). See the `membershi
 skill for the full finance policy/workflow reference and `JOURNAL_ENTRIES_GUIDE.md` in this repo for
 worked posting examples.
 
+# Events/courses cancellation refunds
+
+`services/eventCancellationRefund.service.js`, driven by `events.event.cancelled.v1` (see
+`rabbitmq-events.md`), automatically refunds every paid registration when events-service cancels
+a whole event — full amount, no finance-approval gate. It mirrors
+`handlers/eventRegistration.approval.listener.js`'s `postJournalForEventPayment()` GL structure
+in reverse (net effect DR income code / CR clearing code, since that's the net effect of the
+original Receipt→Invoice→Claim triple), rather than `payments.service.js`'s membership-oriented
+`postJournalForRefund()` (DR member 2020 bucket) — the two payment domains use structurally
+different accounts, so one function cannot correctly reverse the other's postings. Idempotency
+guard: `Refund.findOne({tenantId, paymentId, "metadata.reason":"event_cancellation"})` before
+creating anything, so a redelivered RabbitMQ message is a safe no-op.
+
 # SEPA Direct Debit
 
 `directDebitRun.service.js` drives the run lifecycle (`directDebitRun.model.js`,
