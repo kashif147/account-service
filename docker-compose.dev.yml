@@ -1,0 +1,38 @@
+name: dev-account-service
+
+services:
+  account-service:
+    build: .
+    container_name: dev-account-service
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    env_file:
+      - ${ENV_COMMON_PATH:-../../config/.env.common}
+      - .env.staging
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+    expose:
+      - "4000"
+
+    volumes:
+      - ../../logs:/var/log/projectshell
+
+    restart: always
+
+    networks:
+      - gateway_dev-net
+
+networks:
+  gateway_dev-net:
+    external: true
