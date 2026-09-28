@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import { AppError } from "../errors/AppError.js";
 import * as gatewaySecurity from "@membership/policy-middleware/security";
+import { tenantContextMiddleware } from "@membership/policy-middleware";
 const { validateGatewayRequest } = gatewaySecurity;
 
 function decodeBase64Json(value) {
@@ -299,3 +300,34 @@ export function addTenantMatch(tenantId) {
 
 // Alias to mirror other services
 export const authenticate = ensureAuthenticated;
+
+/**
+ * Phase 1A canonical tenant-context guard — WARN MODE ONLY (non-blocking).
+ *
+ * Runs AFTER `ensureAuthenticated`, so it observes the tenant already
+ * established on req.ctx/req.user/req.tenantId. In "warn" mode it re-pins
+ * req.tenantId to that tenant and LOGS any caller-supplied (body/query/params)
+ * tenantId that disagrees, as a non-blocking TenantContextMismatch event — it
+ * never returns 403.
+ *
+ * SECURITY NOTE (EasyAuth): WARN mode does NOT make any auth path trusted that
+ * was not already. In particular the Azure EasyAuth `x-ms-client-principal`
+ * path in `ensureAuthenticated` establishes the tenant from an UNVERIFIED
+ * base64 header; tenantContextWarn only observes/re-pins whatever
+ * `ensureAuthenticated` produced. Do NOT read that as cryptographic trust — the
+ * EasyAuth (and forwarded-internal) tenant source remains an ENFORCE-mode
+ * blocker to be resolved before switching mode away from "warn".
+ */
+export const tenantContextWarn = tenantContextMiddleware({ mode: "warn" });
+
+/**
+ * Smallest composed authenticated chain for adopting the WARN guard on a route:
+ *   router.get("/x", ...ensureAuthenticatedWithTenantContext, requirePermission(...), handler)
+ * Guarantees ordering: authenticate -> tenantContextWarn -> authorization/controller.
+ * Use ONLY on routes that already establish a trusted user via `ensureAuthenticated`
+ * — never on internal/S2S (`internalOrAuthenticated`/`forwardedInternalContext`) routes.
+ */
+export const ensureAuthenticatedWithTenantContext = [
+  ensureAuthenticated,
+  tenantContextWarn,
+];

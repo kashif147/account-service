@@ -15,9 +15,9 @@
   },
   "dependencies": {
     "@azure/storage-blob": "^12.26.0",
-    "@membership/policy-middleware": "git+https://github.com/kashif147/policy-middleware.git#gateway",
+    "@membership/policy-middleware": "git+https://github.com/kashif147/policy-middleware.git#1d4a3b991c6bb3374e424e220f745b48d41e3ee7",
     "@membership/shared-constants": "git+https://github.com/kashif147/membership-shared-constants.git#v1.0.0",
-    "@projectShell/logging-lib": "git+https://github.com/kashif147/logging-lib.git#main",
+    "@projectShell/logging-lib": "git+https://github.com/kashif147/logging-lib.git#5fd251bde4ad08ba71cf9844656b5bc126e13b43",
     "@projectShell/rabbitmq-middleware": "git+https://github.com/kashif147/rabbitmq-middleware.git#main",
     "amqplib": "^0.10.9",
     "compression": "^1.7.4",

@@ -43,7 +43,10 @@ import {
   listCreditNotesHandler,
 } from "../controllers/creditNote.controller.js";
 import validate from "../middlewares/validate.js";
-import { ensureAuthenticated } from "../middlewares/auth.js";
+import {
+  ensureAuthenticated,
+  ensureAuthenticatedWithTenantContext,
+} from "../middlewares/auth.js";
 import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
@@ -73,7 +76,7 @@ function internalOrAuthenticated(req, res, next) {
 // Journals - list; single consolidated route with minimum AI role
 router.get(
   "/",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listJournalsRules,
   listJournals
@@ -82,7 +85,7 @@ router.get(
 // Stripe receipts - list by settlement status
 router.get(
   "/stripe-payments",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listStripePaymentsRules,
   listStripePayments
@@ -92,7 +95,7 @@ router.get(
 // Invoice creation - requires minimum Accounts Assistant level
 router.post(
   "/invoice",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   invoiceRules,
@@ -103,7 +106,7 @@ router.post(
 // Receipt processing - requires minimum Accounts Assistant level
 router.post(
   "/receipt",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   receiptRules,
@@ -114,7 +117,7 @@ router.post(
 // Credit notes — Draft on create; GL posts on approve
 router.post(
   "/credit-notes",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   requireFinanceWrite,
   idempotency(),
@@ -125,7 +128,7 @@ router.post(
 
 router.get(
   "/credit-notes",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listCreditNotesRules,
   validate,
@@ -134,7 +137,7 @@ router.get(
 
 router.get(
   "/credit-notes/:docNo",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   creditNoteDocNoParam,
   validate,
@@ -143,7 +146,7 @@ router.get(
 
 router.post(
   "/credit-notes/:docNo/approve",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   requireFinanceWrite,
   idempotency(),
@@ -154,7 +157,7 @@ router.post(
 
 router.post(
   "/credit-notes/:docNo/cancel",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   requireFinanceWrite,
   creditNoteDocNoParam,
@@ -165,7 +168,7 @@ router.post(
 /** @deprecated Use POST /credit-notes (draft) + POST /credit-notes/:docNo/approve */
 router.post(
   "/credit-note",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   requireFinanceWrite,
   idempotency(),
@@ -177,7 +180,7 @@ router.post(
 // Write-off operations - requires minimum Accounts Manager level (sensitive operation)
 router.post(
   "/writeoff",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   requireFinanceWrite,
   idempotency(),
@@ -189,7 +192,7 @@ router.post(
 // Category changes - requires minimum Accounts Manager level (sensitive operation)
 router.post(
   "/change-category",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   idempotency(),
   changeCategoryRules,
@@ -200,7 +203,7 @@ router.post(
 // Process batch - called by profile-service with body { paymentDate, batchPayments }; creates GL Receipts for each row
 router.post(
   "/process-batch",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   processDeductionBatchRules,
@@ -210,7 +213,7 @@ router.post(
 
 router.post(
   "/apply-member-credit",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   requireFinanceWrite,
   idempotency(),
@@ -221,7 +224,7 @@ router.post(
 
 router.post(
   "/reverse-receipt",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   requireFinanceWrite,
   idempotency(),
@@ -232,7 +235,7 @@ router.post(
 
 router.post(
   "/reverse-writeoff",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   requireFinanceWrite,
   idempotency(),
@@ -243,7 +246,7 @@ router.post(
 
 router.post(
   "/reassign-payments",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   requireFinanceWrite,
   idempotency(),
@@ -255,7 +258,7 @@ router.post(
 // Claim application credit - requires minimum Membership Officer level
 router.post(
   "/claim-credit",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "write"),
   idempotency(),
   claimApplicationCreditRules,
@@ -295,7 +298,7 @@ router.post(
 // Online payment processing - allows MEMBER role for portal users
 router.post(
   "/online-payment",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   receiptRules, // Using receipt rules for payment processing
