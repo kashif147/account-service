@@ -1,5 +1,5 @@
 import express from "express";
-import { ensureAuthenticated } from "../middlewares/auth.js";
+import { ensureAuthenticated, tenantContextWarn } from "../middlewares/auth.js";
 import {
   requireFinanceRead,
   requireFinanceWrite,
@@ -35,7 +35,7 @@ import {
 
 const router = express.Router();
 
-router.use(ensureAuthenticated);
+router.use(ensureAuthenticated, tenantContextWarn);
 
 router.post(
   "/",

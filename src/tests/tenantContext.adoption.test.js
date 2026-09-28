@@ -159,9 +159,17 @@ test("10 manual-payment S2S routes remain excluded (internalOrAuthenticated, no 
   }
   assert.equal((jr.match(/\n\s*internalOrAuthenticated,/g) || []).length, 3);
 });
-test("11 only the journal + reports routers reference the guard; no other router changed", () => {
+test("11 only adopted routers reference the guard; no other router changed", () => {
   const dir = path.join(__dirname, "..", "routes");
-  const adopted = new Set(["journal.routes.js", "reports.routes.js"]);
+  const adopted = new Set([
+    "journal.routes.js",
+    "reports.routes.js",
+    "finance.routes.js",
+    "directDebitRun.routes.js",
+    "grid.filter.template.routes.js",
+    "admin.routes.js",
+    "batch.detail.routes.js",
+  ]);
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith(".routes.js") || adopted.has(f)) continue;
     const src = fs.readFileSync(path.join(dir, f), "utf8");
@@ -201,4 +209,63 @@ test("15 journal pilot unchanged (19 guarded routes, 3 S2S excluded)", () => {
   const jr = read(path.join("routes", "journal.routes.js"));
   assert.equal((jr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 19);
   assert.equal((jr.match(/\n\s*internalOrAuthenticated,/g) || []).length, 3);
+});
+
+// ---- grouped remaining-router adoption ----
+test("16 finance: exactly 11 guarded external routes; guard precedes finance authz", () => {
+  const fr = read(path.join("routes", "finance.routes.js"));
+  assert.equal((fr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 11);
+  // ordering: at least one route has the spread immediately followed by requireFinance*
+  assert.match(
+    fr,
+    /\.\.\.ensureAuthenticatedWithTenantContext,\s*\n\s*requireFinance(Read|Write),/
+  );
+});
+test("17 finance /internal/profile-merge remains excluded (bare ensureAuthenticated, no guard)", () => {
+  const fr = read(path.join("routes", "finance.routes.js"));
+  const i = fr.indexOf('"/internal/profile-merge"');
+  assert.ok(i > -1, "profile-merge route present");
+  const block = fr.slice(i, i + 140);
+  assert.match(block, /\n\s*ensureAuthenticated,/);
+  assert.ok(!block.includes("ensureAuthenticatedWithTenantContext"), "profile-merge must NOT carry the guard");
+});
+test("18 direct-debit uses router.use(ensureAuthenticated, tenantContextWarn) covering all routes", () => {
+  const dr = read(path.join("routes", "directDebitRun.routes.js"));
+  assert.match(dr, /router\.use\(\s*ensureAuthenticated\s*,\s*tenantContextWarn\s*\)/);
+  assert.match(dr, /import\s*\{\s*ensureAuthenticated\s*,\s*tenantContextWarn\s*\}/);
+  // 14 routes present, none individually converted (single router.use boundary)
+  const routes = (dr.match(/^router\.(get|post|put|patch|delete)\(/gm) || []).length;
+  assert.equal(routes, 14);
+  assert.equal((dr.match(/ensureAuthenticatedWithTenantContext/g) || []).length, 0);
+});
+test("19 templates: exactly 6 guarded routes", () => {
+  const tr = read(path.join("routes", "grid.filter.template.routes.js"));
+  assert.match(tr, /import\s*\{\s*ensureAuthenticatedWithTenantContext\s*\}/);
+  assert.ok(!/\bensureAuthenticated\b(?!WithTenantContext)/.test(tr), "no bare ensureAuthenticated");
+  assert.equal((tr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 6);
+});
+test("20 admin: exactly 3 guarded CoA routes; permissions preserved; no tenantId added to CoA", () => {
+  const ar = read(path.join("routes", "admin.routes.js"));
+  assert.equal((ar.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 3);
+  assert.equal((ar.match(/requirePermission\("accounts\.admin"/g) || []).length, 3);
+});
+test("21 batch-details uses router.use(ensureAuthenticated, tenantContextWarn) covering all 9 routes", () => {
+  const br = read(path.join("routes", "batch.detail.routes.js"));
+  assert.match(br, /router\.use\(\s*ensureAuthenticated\s*,\s*tenantContextWarn\s*\)/);
+  assert.match(br, /import\s*\{\s*ensureAuthenticated\s*,\s*tenantContextWarn\s*\}/);
+  const routes = (br.match(/^router\.(get|post|put|patch|delete)\(/gm) || []).length;
+  assert.equal(routes, 9);
+  assert.equal((br.match(/ensureAuthenticatedWithTenantContext/g) || []).length, 0);
+});
+test("22 reports pilot unchanged (15 guarded)", () => {
+  const rr = read(path.join("routes", "reports.routes.js"));
+  assert.equal((rr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 15);
+});
+test("23 create-batch in app.js is NOT adopted (no guard reference)", () => {
+  const app = read("app.js");
+  assert.ok(app.indexOf("/api/create-batch") > -1, "create-batch route present");
+  assert.ok(
+    !app.includes("tenantContextWarn") && !app.includes("ensureAuthenticatedWithTenantContext"),
+    "app.js must not reference the tenant guard"
+  );
 });

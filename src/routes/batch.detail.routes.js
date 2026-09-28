@@ -1,5 +1,5 @@
 import express from "express";
-import { ensureAuthenticated } from "../middlewares/auth.js";
+import { ensureAuthenticated, tenantContextWarn } from "../middlewares/auth.js";
 import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { uploadSingleOptional } from "../middlewares/upload.mw.js";
 import {
@@ -16,7 +16,7 @@ import {
 
 const router = express.Router();
 
-router.use(ensureAuthenticated);
+router.use(ensureAuthenticated, tenantContextWarn);
 
 function requireCrm(req, res, next) {
   if (req.user?.userType !== "CRM") {

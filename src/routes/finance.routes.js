@@ -1,5 +1,8 @@
 import express from "express";
-import { ensureAuthenticated } from "../middlewares/auth.js";
+import {
+  ensureAuthenticated,
+  ensureAuthenticatedWithTenantContext,
+} from "../middlewares/auth.js";
 import {
   requireFinanceRead,
   requireFinanceWrite,
@@ -37,7 +40,7 @@ const router = express.Router();
 
 router.post(
   "/journal-adjustments",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   idempotency(),
   createJournalAdjustmentRules,
@@ -47,7 +50,7 @@ router.post(
 
 router.post(
   "/journal-adjustments/:docNo/approve",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   idempotency(),
   journalAdjustmentDocNoParam,
@@ -57,7 +60,7 @@ router.post(
 
 router.get(
   "/journal-adjustments",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceRead,
   listJournalAdjustmentRules,
   validate,
@@ -66,21 +69,21 @@ router.get(
 
 router.get(
   "/reconciliation/dashboard",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceRead,
   reconciliationDashboardHandler,
 );
 
 router.get(
   "/reconciliation",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceRead,
   listReconciliationHandler,
 );
 
 router.post(
   "/reconciliation/seed",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   idempotency(),
   reconciliationSeedRules,
@@ -90,7 +93,7 @@ router.post(
 
 router.post(
   "/reconciliation/import",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   idempotency(),
   reconciliationImportRules,
@@ -100,7 +103,7 @@ router.post(
 
 router.post(
   "/reconciliation/auto-match",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   idempotency(),
   reconciliationAutoMatchRules,
@@ -110,7 +113,7 @@ router.post(
 
 router.post(
   "/reconciliation/match",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   reconciliationMatchRules,
   validate,
@@ -119,7 +122,7 @@ router.post(
 
 router.post(
   "/reconciliation/suspense",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   reconciliationSuspenseRules,
   validate,
@@ -128,7 +131,7 @@ router.post(
 
 router.post(
   "/reconciliation/:recordId/settle",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   settleReconciliationHandler,
 );

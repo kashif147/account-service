@@ -1,5 +1,5 @@
 import express from "express";
-import { ensureAuthenticated } from "../middlewares/auth.js";
+import { ensureAuthenticatedWithTenantContext } from "../middlewares/auth.js";
 import {
   requireFinanceRead,
   requireFinanceWrite,
@@ -15,29 +15,29 @@ import {
 
 const router = express.Router();
 
-router.post("/", ensureAuthenticated, requireFinanceWrite, createTemplate);
-router.get("/", ensureAuthenticated, requireFinanceRead, getUserTemplates);
+router.post("/", ...ensureAuthenticatedWithTenantContext, requireFinanceWrite, createTemplate);
+router.get("/", ...ensureAuthenticatedWithTenantContext, requireFinanceRead, getUserTemplates);
 router.get(
   "/default",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceRead,
   getDefaultTemplate,
 );
 router.get(
   "/:templateId",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceRead,
   getTemplateById,
 );
 router.put(
   "/:templateId",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   updateTemplate,
 );
 router.delete(
   "/:templateId",
-  ensureAuthenticated,
+  ...ensureAuthenticatedWithTenantContext,
   requireFinanceWrite,
   deleteTemplate,
 );
