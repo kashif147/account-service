@@ -159,10 +159,11 @@ test("10 manual-payment S2S routes remain excluded (internalOrAuthenticated, no 
   }
   assert.equal((jr.match(/\n\s*internalOrAuthenticated,/g) || []).length, 3);
 });
-test("11 no non-journal router was modified (none reference the guard)", () => {
+test("11 only the journal + reports routers reference the guard; no other router changed", () => {
   const dir = path.join(__dirname, "..", "routes");
+  const adopted = new Set(["journal.routes.js", "reports.routes.js"]);
   for (const f of fs.readdirSync(dir)) {
-    if (!f.endsWith(".routes.js") || f === "journal.routes.js") continue;
+    if (!f.endsWith(".routes.js") || adopted.has(f)) continue;
     const src = fs.readFileSync(path.join(dir, f), "utf8");
     assert.ok(
       !src.includes("tenantContextWarn") && !src.includes("ensureAuthenticatedWithTenantContext"),
@@ -174,4 +175,30 @@ test("12 mode remains warn", () => {
   const auth = read(path.join("middlewares", "auth.js"));
   assert.match(auth, /tenantContextMiddleware\(\{\s*mode:\s*"warn"\s*\}\)/);
   assert.ok(!/mode:\s*"enforce"/.test(auth), "no enforce mode");
+});
+
+// ---- reports-router pilot ----
+test("13 reports authenticated routes run authenticate -> tenantContextWarn -> authorization", () => {
+  const rr = read(path.join("routes", "reports.routes.js"));
+  // import swapped to the composed guard; bare ensureAuthenticated no longer used
+  assert.match(rr, /import\s*\{\s*ensureAuthenticatedWithTenantContext\s*\}\s*from\s*"\.\.\/middlewares\/auth\.js"/);
+  assert.ok(!/\bensureAuthenticated\b(?!WithTenantContext)/.test(rr), "no bare ensureAuthenticated left");
+  // every reports route spreads the guard BEFORE requirePermission
+  const idxChain = rr.indexOf("...ensureAuthenticatedWithTenantContext,");
+  const idxPerm = rr.indexOf('requirePermission("accounts.reports"');
+  assert.ok(idxChain > -1 && idxPerm > idxChain);
+  // 15 authenticated report routes adopted
+  const spreads = (rr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length;
+  assert.equal(spreads, 15);
+});
+test("14 reports router has no internal/S2S/webhook routes (nothing to exclude)", () => {
+  const rr = read(path.join("routes", "reports.routes.js"));
+  for (const bad of ["internalOrAuthenticated", "internalAuth", "forwardedInternalContext", "webhook"]) {
+    assert.ok(!rr.includes(bad), `reports router must not contain ${bad}`);
+  }
+});
+test("15 journal pilot unchanged (19 guarded routes, 3 S2S excluded)", () => {
+  const jr = read(path.join("routes", "journal.routes.js"));
+  assert.equal((jr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 19);
+  assert.equal((jr.match(/\n\s*internalOrAuthenticated,/g) || []).length, 3);
 });
