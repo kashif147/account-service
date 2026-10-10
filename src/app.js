@@ -285,38 +285,6 @@ app.get("/health/rabbitmq", async (req, res) => {
   }
 });
 
-// Test event publishing endpoint (for development/testing)
-app.post("/test/publish-event", async (req, res) => {
-  try {
-    const { eventType, data, metadata } = req.body;
-
-    if (!eventType) {
-      return res.badRequest("eventType is required");
-    }
-
-    const { publishDomainEvent } = await import("./rabbitMQ/events.js");
-
-    const success = await publishDomainEvent(eventType, data || {}, {
-      source: "test-endpoint",
-      ...metadata,
-    });
-
-    res.success({
-      published: success,
-      eventType,
-      data,
-      metadata,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    res.status(500).success({
-      published: false,
-      error: error.message,
-      timestamp: new Date().toISOString(),
-    });
-  }
-});
-
 // root route
 app.get("/", (req, res) => {
   res.success({
