@@ -48,3 +48,42 @@ export function requireFinanceWrite(req, res, next) {
     ),
   );
 }
+
+/**
+ * True only for a genuine service-to-service call: internalAuth routed it through
+ * forwardedInternalContext (x-internal-request: true and NO user JWT/gateway identity).
+ * ensureAuthenticated never sets ctx.internalRequest, so a user token plus a spoofed
+ * x-internal-request header does not qualify.
+ */
+function isTrustedInternalCall(req) {
+  return req.ctx?.internalRequest === true;
+}
+
+/**
+ * Strict finance read for user-originated calls: no "empty permission claims" bypass and
+ * never a PORTAL (member) user.
+ */
+export function requireFinanceReadStrict(req, res, next) {
+  const userType = String(req.user?.userType || "").toUpperCase();
+  if (userType === "PORTAL") {
+    return next(AppError.forbidden("Finance read permission required"));
+  }
+  if (canFinanceRead(req)) return next();
+  return next(
+    AppError.forbidden(
+      "Finance read permission required (payments:read, accounts.admin:read or accounts.reports:read)",
+    ),
+  );
+}
+
+/** Internal S2S call, or authenticated user with finance write (role + permission). */
+export function requireInternalOrFinanceWrite(req, res, next) {
+  if (isTrustedInternalCall(req)) return next();
+  return requireFinanceWrite(req, res, next);
+}
+
+/** Internal S2S call, or authenticated non-portal user with a finance read permission. */
+export function requireInternalOrFinanceRead(req, res, next) {
+  if (isTrustedInternalCall(req)) return next();
+  return requireFinanceReadStrict(req, res, next);
+}

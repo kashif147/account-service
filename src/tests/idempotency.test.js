@@ -12,7 +12,13 @@ describe("Idempotency Middleware", () => {
   });
 
   it("should process first request with idempotency key", () => {
+    // Phase 2B: the cache is scoped to the trusted tenant + user + route, so the request
+    // needs an authenticated context; responses are cached only for 2xx.
     const mockRequest = {
+      method: "POST",
+      baseUrl: "/api/payments",
+      path: "/intents",
+      ctx: { tenantId: "tenant-A", userId: "user-1" },
       header: (name) => {
         if (name === "Idempotency-Key") return "test-key-123";
         return null;
@@ -20,6 +26,7 @@ describe("Idempotency Middleware", () => {
     };
 
     const mockResponse = {
+      statusCode: 200,
       status: (code) => mockResponse,
       json: (body) => {
         return mockResponse;
@@ -36,7 +43,13 @@ describe("Idempotency Middleware", () => {
   });
 
   it("should handle duplicate requests with same idempotency key", () => {
+    // Phase 2B: the cache is scoped to the trusted tenant + user + route, so the request
+    // needs an authenticated context; responses are cached only for 2xx.
     const mockRequest = {
+      method: "POST",
+      baseUrl: "/api/payments",
+      path: "/intents",
+      ctx: { tenantId: "tenant-A", userId: "user-1" },
       header: (name) => {
         if (name === "Idempotency-Key") return "test-key-123";
         return null;
@@ -44,6 +57,7 @@ describe("Idempotency Middleware", () => {
     };
 
     const mockResponse = {
+      statusCode: 200,
       status: (code) => mockResponse,
       json: (body) => {
         return mockResponse;

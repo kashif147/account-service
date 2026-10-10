@@ -573,6 +573,7 @@ export async function invoice(req, res, next) {
     const inv = await postBalancedJournal({
       date,
       userId: req.ctx?.userId,
+      tenantId: req.ctx?.tenantId ?? req.tenantId,
       docType: "Invoice",
       docNo,
       memo: memoBase,
@@ -604,6 +605,7 @@ export async function invoice(req, res, next) {
         const cn = await postBalancedJournal({
           date,
           userId: req.ctx?.userId,
+          tenantId: req.ctx?.tenantId ?? req.tenantId,
           docType: "Adjustment",
           docNo: `${docNo}-PRORATA`,
           memo,

@@ -3,6 +3,10 @@ import { forwardedInternalContext } from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import { AppError } from "../errors/AppError.js";
 import {
+  requireInternalOrFinanceRead,
+  requireInternalOrFinanceWrite,
+} from "../middlewares/financePermission.middleware.js";
+import {
   internalWriteOff,
   reminderEligibility,
   reminderEligibilityBulk,
@@ -22,8 +26,20 @@ function internalAuth(req, res, next) {
 
 router.use(internalAuth);
 
-router.get("/members/:memberId/reminder-eligibility", reminderEligibility);
-router.post("/members/reminder-eligibility-bulk", reminderEligibilityBulk);
-router.post("/members/writeoff", internalWriteOff);
+// Callers: subscription-service (reminder batch build/clear, year-end renewal and
+// reinstatement write-offs) via x-internal-request worker requests, or with a forwarded CRM
+// user identity. A user JWT never inherits the internal grant: user calls need finance
+// read (eligibility snapshots) or finance write (write-off journal posting).
+router.get(
+  "/members/:memberId/reminder-eligibility",
+  requireInternalOrFinanceRead,
+  reminderEligibility
+);
+router.post(
+  "/members/reminder-eligibility-bulk",
+  requireInternalOrFinanceRead,
+  reminderEligibilityBulk
+);
+router.post("/members/writeoff", requireInternalOrFinanceWrite, internalWriteOff);
 
 export default router;

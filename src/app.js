@@ -74,10 +74,7 @@ import { ensureAuthenticated } from "./middlewares/auth.js";
 import { defaultPolicyMiddleware } from "./middlewares/policy.middleware.js";
 import { createBatchDetail } from "./controllers/batch.detail.controller.js";
 import logger from "./config/logger.js";
-import {
-  getIdempotencyCacheSize,
-  clearIdempotencyCache,
-} from "./middlewares/idempotency.js";
+import { getIdempotencyCacheSize } from "./middlewares/idempotency.js";
 import Payment from "./models/payment.model.js";
 import Refund from "./models/refund.model.js";
 import webhookRoutes from "./routes/webhook.routes.js";
@@ -221,20 +218,9 @@ app.get("/health/idempotency", (req, res) => {
   });
 });
 
-// clear idempotency cache (for testing)
-app.post("/health/idempotency", (req, res) => {
-  const { action } = req.body;
-  if (action === "clear_cache") {
-    clearIdempotencyCache();
-    res.success({
-      message: "Idempotency cache cleared",
-      cacheSize: getIdempotencyCacheSize(),
-      timestamp: new Date().toISOString(),
-    });
-  } else {
-    res.badRequest("Invalid action. Use 'clear_cache'");
-  }
-});
+// POST /health/idempotency (unauthenticated cache clear) removed: any caller could wipe
+// every tenant's idempotency cache and re-trigger replayed writes. Tests clear the cache
+// in-process via clearIdempotencyCache() instead.
 
 // logging health check
 app.get("/health/logging", (req, res) => {

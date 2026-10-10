@@ -1,6 +1,7 @@
 import Payment, {
   zCreateIntent,
   zReconcile,
+  zReconcileRequest,
   zRecordExternal,
 } from "../models/payment.model.js";
 import Refund, { zCreateRefund } from "../models/refund.model.js";
@@ -12,6 +13,7 @@ import {
   getClaimRecipientMemberIdForApplication,
 } from "./refundCredit.service.js";
 import { centsToEuros } from "../helpers/money.js";
+import { assertIntentAuthorized } from "./paymentIntentGuard.service.js";
 
 function ensureIntegerCents(value) {
   if (!Number.isInteger(value)) {
@@ -356,7 +358,13 @@ async function resolveReusablePaymentAttempt({
   };
 }
 
-export async function createIntent(input, ctx) {
+/**
+ * @param {object} input  zCreateIntent body
+ * @param {object} ctx    trusted request context (tenantId, userId, idempotencyKey)
+ * @param {object} [caller] { userType, internalRequest, req } — used by
+ *   assertIntentAuthorized to verify portal callers' amount and member ownership.
+ */
+export async function createIntent(input, ctx, caller = {}) {
   const parsed = zCreateIntent.parse(input);
   ensureIntegerCents(parsed.amount);
 
@@ -393,6 +401,21 @@ export async function createIntent(input, ctx) {
     memberId,
   });
   const isEventRegistrationPayment = isEventRegistrationPaymentRequest(parsed.purpose);
+
+  // H-11: portal callers may only pay for themselves, and application fees must match the
+  // synced catalogue price (see paymentIntentGuard.service.js for the per-kind source).
+  await assertIntentAuthorized({
+    parsed,
+    metadata,
+    memberId,
+    applicationId,
+    profileId,
+    isApplicationPayment,
+    isEventRegistrationPayment,
+    ctx,
+    caller,
+  });
+
   const stripeCaptureMethod =
     isApplicationPayment || isEventRegistrationPayment ? "manual" : "automatic";
   const logger = (await import("../config/logger.js")).default;
@@ -543,7 +566,7 @@ export async function createIntent(input, ctx) {
         }
 
         if (Object.keys(updateFields).length > 0) {
-          await Payment.findByIdAndUpdate(existingDuplicate._id, {
+          await Payment.updateOne({ _id: existingDuplicate._id, tenantId: ctx.tenantId }, {
             $set: updateFields,
           });
           logger.info(
@@ -636,7 +659,7 @@ export async function createIntent(input, ctx) {
         }
 
         if (Object.keys(updateFields).length > 0) {
-          await Payment.findByIdAndUpdate(recentPayment._id, {
+          await Payment.updateOne({ _id: recentPayment._id, tenantId: ctx.tenantId }, {
             $set: updateFields,
           });
           logger.info(
@@ -770,6 +793,7 @@ export async function createIntent(input, ctx) {
     // This catches race conditions where two requests create sessions simultaneously
     if (stripeIds.checkoutSessionId) {
       const existingBySession = await Payment.findOne({
+        tenantId: ctx.tenantId,
         "stripe.checkoutSessionId": stripeIds.checkoutSessionId,
       })
         .select("stripe status _id")
@@ -854,7 +878,7 @@ export async function createIntent(input, ctx) {
             updateFields.applicationId = applicationId;
 
           if (Object.keys(updateFields).length > 0) {
-            await Payment.findByIdAndUpdate(recentWithIntent._id, {
+            await Payment.updateOne({ _id: recentWithIntent._id, tenantId: ctx.tenantId }, {
               $set: updateFields,
             });
           }
@@ -917,6 +941,7 @@ export async function createIntent(input, ctx) {
     // This catches race conditions where two requests create intents simultaneously
     if (stripeIds.paymentIntentId) {
       const existingByIntent = await Payment.findOne({
+        tenantId: ctx.tenantId,
         "stripe.paymentIntentId": stripeIds.paymentIntentId,
       })
         .select("stripe status _id memberId applicationId")
@@ -946,7 +971,7 @@ export async function createIntent(input, ctx) {
           }
 
           if (Object.keys(updateFields).length > 0) {
-            await Payment.findByIdAndUpdate(existingByIntent._id, {
+            await Payment.updateOne({ _id: existingByIntent._id, tenantId: ctx.tenantId }, {
               $set: updateFields,
             });
             logger.info(
@@ -969,6 +994,7 @@ export async function createIntent(input, ctx) {
     // already created a payment document with this paymentIntentId (race condition)
     if (stripeIds.paymentIntentId) {
       const existingByIntentId = await Payment.findOne({
+        tenantId: ctx.tenantId,
         "stripe.paymentIntentId": stripeIds.paymentIntentId,
       })
         .select("stripe status _id memberId applicationId")
@@ -1000,7 +1026,7 @@ export async function createIntent(input, ctx) {
           }
 
           if (Object.keys(updateFields).length > 0) {
-            await Payment.findByIdAndUpdate(existingByIntentId._id, {
+            await Payment.updateOne({ _id: existingByIntentId._id, tenantId: ctx.tenantId }, {
               $set: updateFields,
             });
           }
@@ -1618,14 +1644,25 @@ export async function reconcileStripeEvent(input, ctx) {
   const parsed = zReconcile.parse(input);
   ensureIntegerCents(parsed.payment.amount);
 
-  // ALWAYS search by paymentIntentId first (without tenantId filter)
-  // This ensures we find the existing payment regardless of tenantId mismatch
+  // Webhook / in-process capture callers: search by paymentIntentId first (without
+  // tenantId filter) so the stored payment's tenant wins over a webhook metadata tenant.
+  // HTTP callers (POST /payments/reconcile via reconcilePaymentFromStripe) pass
+  // ctx.scopeToTenantId: the lookup is then pinned to that trusted tenant and an
+  // unknown PaymentIntent is rejected instead of upserted.
+  const scopedTenantId = ctx?.scopeToTenantId
+    ? String(ctx.scopeToTenantId)
+    : null;
+  const intentLookup = {
+    "stripe.paymentIntentId": parsed.payment.paymentIntentId,
+  };
+  if (scopedTenantId) intentLookup.tenantId = scopedTenantId;
+
   let existingPayment = null;
   if (parsed.payment.paymentIntentId) {
-    // Search by paymentIntentId alone first (most reliable)
-    existingPayment = await Payment.findOne({
-      "stripe.paymentIntentId": parsed.payment.paymentIntentId,
-    }).lean();
+    existingPayment = await Payment.findOne(intentLookup).lean();
+    if (!existingPayment && scopedTenantId) {
+      throw AppError.notFound("Payment not found for PaymentIntent");
+    }
 
     if (existingPayment?.webhookEventIds?.includes(parsed.eventId)) {
       const logger = (await import("../config/logger.js")).default;
@@ -1795,9 +1832,7 @@ export async function reconcileStripeEvent(input, ctx) {
       );
 
       // Try to find the payment again - maybe it was created by another request
-      const retryPayment = await Payment.findOne({
-        "stripe.paymentIntentId": parsed.payment.paymentIntentId,
-      }).lean();
+      const retryPayment = await Payment.findOne(intentLookup).lean();
 
       if (retryPayment) {
         if (retryPayment.webhookEventIds?.includes(parsed.eventId)) {
@@ -2242,6 +2277,69 @@ export async function reconcileStripeEvent(input, ctx) {
       warning: "Payment reconciliation had errors but was attempted",
     };
   }
+}
+
+/**
+ * POST /api/payments/reconcile (HTTP). Never trusts the caller's amount/status/currency/
+ * metadata: the Payment is looked up by {tenantId: trusted tenant, paymentIntentId}, the
+ * PaymentIntent is re-read from Stripe (the authoritative source for what was actually
+ * authorized/captured), and only that Stripe state is fed into reconcileStripeEvent.
+ * A PaymentIntent whose Stripe metadata names a different tenant is rejected.
+ */
+export async function reconcilePaymentFromStripe(input, ctx = {}, deps = {}) {
+  const parsed = zReconcileRequest.parse(input || {});
+  const tenantId = ctx?.tenantId ? String(ctx.tenantId) : null;
+  if (!tenantId) {
+    throw AppError.unauthorized("Tenant context required");
+  }
+  const paymentIntentId = String(
+    parsed.paymentIntentId || parsed.payment?.paymentIntentId,
+  ).trim();
+
+  const PaymentModel = deps.Payment || Payment;
+  const reconcile = deps.reconcileStripeEvent || reconcileStripeEvent;
+
+  const payment = await PaymentModel.findOne({
+    tenantId,
+    "stripe.paymentIntentId": paymentIntentId,
+  }).lean();
+  if (!payment) {
+    throw AppError.notFound("Payment not found for PaymentIntent");
+  }
+
+  const stripe = (deps.getStripe || getStripe)();
+  const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+  if (!pi || pi.id !== paymentIntentId) {
+    throw AppError.notFound("Payment not found for PaymentIntent");
+  }
+  const stripeTenant = pi.metadata?.tenantId || pi.metadata?.tenant_id;
+  if (stripeTenant && String(stripeTenant) !== tenantId) {
+    const logger = (await import("../config/logger.js")).default;
+    logger.warn(
+      { paymentId: String(payment._id), paymentIntentId, tenantId },
+      "Reconcile rejected: Stripe PaymentIntent metadata tenant does not match caller tenant",
+    );
+    throw AppError.notFound("Payment not found for PaymentIntent");
+  }
+
+  const paymentData = paymentDataFromIntent(pi);
+  const result = await reconcile(
+    {
+      eventId: `manual-reconcile-${pi.id}-${pi.status}-${paymentData.amount}`,
+      type: `manual-reconcile.${paymentData.status}`,
+      payment: paymentData,
+    },
+    { ...ctx, tenantId, scopeToTenantId: tenantId },
+  );
+  return {
+    ok: true,
+    paymentId: String(payment._id),
+    paymentIntentId,
+    status: paymentData.status,
+    amount: paymentData.amount,
+    currency: paymentData.currency,
+    duplicate: result?.duplicate === true,
+  };
 }
 
 export async function recordExternal(input, ctx) {
@@ -3082,6 +3180,7 @@ export default {
   createIntent,
   findByStripePaymentIntent,
   reconcileStripeEvent,
+  reconcilePaymentFromStripe,
   recordExternal,
   createRefund,
   postJournalForPayment,

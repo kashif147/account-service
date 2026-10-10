@@ -14,7 +14,8 @@
 9. `requestId` middleware (adds `x-request-id` correlation header)
 10. `loggerMiddleware`, `responseMiddleware` (adds `res.success`/`res.appError`/etc. helpers)
 11. Global rate limiter (`limiterGeneral`)
-12. Health routes: `/health`, `/ready`, `/health/idempotency` (GET+POST clear), `/health/logging`,
+12. Health routes: `/health`, `/ready`, `/health/idempotency` (GET stats only — the unauthenticated
+    POST cache-clear was removed in Phase 2B), `/health/logging`,
     `/health/events`, `/health/rabbitmq`
 13. `/api/docs` (Swagger)
 14. `/api/create-batch` — a one-off route (not under `src/routes/`) requiring `ensureAuthenticated`, a

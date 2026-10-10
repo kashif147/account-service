@@ -71,20 +71,62 @@ async function postEventCancellationRefundJournal({ refundDoc, payment, tenantId
       operation: "events_cancellation_refund_posted",
     });
     if (journal?.docNo) {
-      await deps.Refund.updateOne({ _id: refundDoc._id }, { $set: { glDocNo: journal.docNo, glStatus: "posted" } });
+      await deps.Refund.updateOne({ _id: refundDoc._id, tenantId }, { $set: { glDocNo: journal.docNo, glStatus: "posted" } });
       return { glPosted: true, glDocNo: journal.docNo };
     }
-    await deps.Refund.updateOne({ _id: refundDoc._id }, { $set: { glStatus: "gl_failed" } });
+    await deps.Refund.updateOne({ _id: refundDoc._id, tenantId }, { $set: { glStatus: "gl_failed" } });
     return { glPosted: false, glDocNo: null };
   } catch (err) {
     deps.logger.error({ err, docNo, refundId: String(refundDoc._id) }, "postEventCancellationRefundJournal failed");
-    await deps.Refund.updateOne({ _id: refundDoc._id }, { $set: { glStatus: "gl_failed" } }).catch(() => {});
+    await deps.Refund.updateOne({ _id: refundDoc._id, tenantId }, { $set: { glStatus: "gl_failed" } }).catch(() => {});
     return { glPosted: false, glDocNo: null };
   }
 }
 
 /** One refund candidate from events.event.cancelled.v1's payload - see
  * event.lifecycle.publisher.js on the events-service side for the shape. */
+function metadataValue(metadata, key) {
+  if (!metadata) return undefined;
+  if (typeof metadata.get === "function") return metadata.get(key);
+  return metadata[key];
+}
+
+const EVENT_PURPOSES = new Set(["eventRegistration", "courseRegistration"]);
+
+/** Sum of every refund already recorded against this payment (any reason). */
+async function sumAlreadyRefunded({ tenantId, paymentId, deps }) {
+  const agg = await deps.Refund.aggregate([
+    { $match: { tenantId, paymentId } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  return Number(agg?.[0]?.total) || 0;
+}
+
+/**
+ * The message body is not trusted: the candidate's paymentId must resolve to a Payment in
+ * the envelope tenant that belongs to THIS cancelled event's registration (Payment
+ * registrationId — and metadata eventId / stripe PaymentIntent when recorded — must match).
+ * Returns a skip reason, or null when the payment is a valid refund target.
+ */
+function paymentMismatchReason({ payment, candidate, eventId }) {
+  const registrationId = candidate.registrationId != null ? String(candidate.registrationId) : "";
+  if (!EVENT_PURPOSES.has(payment.purpose) && payment.ledgerDomain !== "events") {
+    return "payment_not_event_registration";
+  }
+  if (!registrationId || !payment.registrationId || String(payment.registrationId) !== registrationId) {
+    return "registration_mismatch";
+  }
+  const paidEventId = metadataValue(payment.metadata, "eventId");
+  if (paidEventId != null && String(paidEventId) !== String(eventId)) {
+    return "event_mismatch";
+  }
+  const candidatePi = candidate.stripePaymentIntentId;
+  if (candidatePi && payment.stripe?.paymentIntentId && String(candidatePi) !== String(payment.stripe.paymentIntentId)) {
+    return "payment_intent_mismatch";
+  }
+  return null;
+}
+
 async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
   const { registrationId, paymentId } = candidate;
 
@@ -118,7 +160,32 @@ async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
     return { registrationId, skipped: true, reason: "payment_not_refundable" };
   }
 
-  const amount = payment.amount;
+  const mismatch = paymentMismatchReason({ payment, candidate, eventId });
+  if (mismatch) {
+    deps.logger.warn(
+      { tenantId, eventId, registrationId, paymentId, reason: mismatch },
+      "Event cancellation refund: payment does not belong to this event registration - skipping",
+    );
+    return { registrationId, skipped: true, reason: mismatch };
+  }
+
+  // Cap at what was actually captured and not yet refunded. The payload's candidate.amount
+  // is never used as the refund amount.
+  const alreadyRefunded = await sumAlreadyRefunded({ tenantId, paymentId: payment._id, deps });
+  const amount = Math.max(0, (Number(payment.amount) || 0) - alreadyRefunded);
+  if (amount <= 0) {
+    deps.logger.warn(
+      { tenantId, eventId, registrationId, paymentId, alreadyRefunded },
+      "Event cancellation refund: nothing left to refund on this payment - skipping",
+    );
+    return { registrationId, skipped: true, reason: "nothing_to_refund" };
+  }
+  if (candidate.amount != null && Number(candidate.amount) !== amount) {
+    deps.logger.warn(
+      { tenantId, eventId, registrationId, paymentId, candidateAmount: candidate.amount, refundAmount: amount },
+      "Event cancellation refund: payload amount differs from refundable captured amount - using captured amount",
+    );
+  }
   const metadata = new Map([
     ["reason", "event_cancellation"],
     ["eventId", eventId],
@@ -158,8 +225,8 @@ async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
     });
 
     await deps.Payment.updateOne(
-      { _id: payment._id },
-      { $set: { status: amount < payment.amount ? "partially_refunded" : "refunded", "audit.updatedBy": "system" } },
+      { _id: payment._id, tenantId },
+      { $set: { status: alreadyRefunded + amount < payment.amount ? "partially_refunded" : "refunded", "audit.updatedBy": "system" } },
     );
   } else {
     // manual/invoice (posted, real GL revenue recognized) - external refund,
@@ -181,8 +248,8 @@ async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
     });
 
     await deps.Payment.updateOne(
-      { _id: payment._id },
-      { $set: { status: amount < payment.amount ? "partially_refunded" : "refunded", "audit.updatedBy": "system" } },
+      { _id: payment._id, tenantId },
+      { $set: { status: alreadyRefunded + amount < payment.amount ? "partially_refunded" : "refunded", "audit.updatedBy": "system" } },
     );
   }
 
@@ -197,12 +264,31 @@ async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
  * cancelEvent). `deps` defaults to the real Payment/Refund/Stripe/journal
  * modules - only ever overridden in tests. */
 export async function processEventCancellationRefunds(payload, deps = defaultDeps) {
-  const data = payload?.data || payload;
-  const { tenantId, eventId, refundCandidates } = data || {};
-  if (!tenantId || !eventId || !Array.isArray(refundCandidates)) {
-    deps.logger.warn({ payload: data }, "events.event.cancelled.v1: malformed payload - skipping");
+  const data = payload?.data || {};
+  const { eventId, refundCandidates } = data;
+  // Envelope tenant (set by rabbitmq-middleware from the producer's options.tenantId) is
+  // required and authoritative; a data.tenantId that disagrees means the message is not
+  // trustworthy, so nothing is refunded.
+  const envelopeTenantId =
+    payload?.data && payload?.tenantId != null && String(payload.tenantId).trim() !== ""
+      ? String(payload.tenantId).trim()
+      : null;
+  const dataTenantId = data.tenantId != null ? String(data.tenantId).trim() : null;
+  if (!envelopeTenantId || !eventId || !Array.isArray(refundCandidates)) {
+    deps.logger.warn(
+      { eventId, hasEnvelopeTenant: !!envelopeTenantId, eventMessageId: payload?.eventId },
+      "events.event.cancelled.v1: malformed payload or missing envelope tenant - skipping",
+    );
     return { processed: 0, results: [] };
   }
+  if (dataTenantId && dataTenantId !== envelopeTenantId) {
+    deps.logger.error(
+      { eventId, envelopeTenantId, dataTenantId, eventMessageId: payload?.eventId },
+      "events.event.cancelled.v1: data.tenantId does not match envelope tenant - refusing all refunds",
+    );
+    return { processed: 0, results: [], rejected: "tenant_mismatch" };
+  }
+  const tenantId = envelopeTenantId;
 
   const results = [];
   for (const candidate of refundCandidates) {
@@ -213,7 +299,7 @@ export async function processEventCancellationRefunds(payload, deps = defaultDep
         { err, tenantId, eventId, registrationId: candidate?.registrationId },
         "Failed to process event cancellation refund candidate",
       );
-      results.push({ registrationId: candidate?.registrationId, error: err.message });
+      results.push({ registrationId: candidate?.registrationId, error: "refund_failed" });
     }
   }
 

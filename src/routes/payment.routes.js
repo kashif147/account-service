@@ -1,7 +1,10 @@
 import express from "express";
 import { forwardedInternalContext } from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
-import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
+import {
+  requireFinanceWrite,
+  requireInternalOrFinanceWrite,
+} from "../middlewares/financePermission.middleware.js";
 import { AppError } from "../errors/AppError.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
@@ -21,7 +24,7 @@ import {
 } from "../controllers/payment.controller.js";
 import {
   zCreateIntent,
-  zReconcile,
+  zReconcileRequest,
   zRecordExternal,
   zAssociateMemberLink,
 } from "../models/payment.model.js";
@@ -49,10 +52,14 @@ router.post(
   createPaymentIntent
 );
 
+// Re-syncs a Payment with Stripe. The body only identifies the PaymentIntent; amount/status
+// are re-read from Stripe and the Payment lookup is pinned to the trusted tenant.
+// Genuine S2S calls (x-internal-request, no user JWT) pass; user calls need finance write.
 router.post(
   "/reconcile",
+  requireInternalOrFinanceWrite,
   idempotency(),
-  zodValidate(zReconcile),
+  zodValidate(zReconcileRequest),
   reconcilePayment
 );
 

@@ -3,7 +3,7 @@ import {
   createIntent,
   findByStripePaymentIntent,
   findLatestApplicationPayment,
-  reconcileStripeEvent,
+  reconcilePaymentFromStripe,
   capturePaymentIntent,
   cancelPaymentIntent,
   attachRegistrationToPaymentIntent,
@@ -17,7 +17,11 @@ import { AppError } from "../errors/AppError.js";
 
 export async function createPaymentIntent(req, res, next) {
   try {
-    const result = await createIntent(req.validated, req.ctx);
+    const result = await createIntent(req.validated, req.ctx, {
+      userType: req.user?.userType || null,
+      internalRequest: req.ctx?.internalRequest === true,
+      req,
+    });
     res.success(result);
   } catch (e) {
     next(e);
@@ -26,8 +30,9 @@ export async function createPaymentIntent(req, res, next) {
 
 export async function reconcilePayment(req, res, next) {
   try {
-    await reconcileStripeEvent(req.validated, req.ctx);
-    res.success({ ok: true });
+    // Amount/status/currency are re-derived from Stripe, never taken from the body.
+    const result = await reconcilePaymentFromStripe(req.validated, req.ctx);
+    res.success(result);
   } catch (e) {
     next(e);
   }

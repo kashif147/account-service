@@ -16,6 +16,7 @@ import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 import { isNoFeeMembershipCategory } from "../helpers/noFeeMembershipCategory.js";
+import { resolveEventTenant } from "../helpers/eventTenant.js";
 
 /**
  * Maps membership category to income account code
@@ -647,11 +648,24 @@ export async function handleMemberCreated(payload) {
       applicationId,
       memberId,
       subscriptionId,
-      tenantId,
       profileId,
       effective,
       subscriptionAttributes,
     } = payload.data || payload;
+
+    // Envelope tenant is canonical (subscription-service sets it only on the envelope);
+    // data.tenantId is a fallback. Never post billing without a tenant.
+    const { tenantId } = resolveEventTenant(payload, {
+      logger,
+      eventType: "members.subscription.current.updated.v1",
+    });
+    if (!tenantId) {
+      logger.error(
+        { applicationId, memberId, subscriptionId, profileId, eventId: payload?.eventId },
+        "Subscription current updated without tenantId (envelope or data) - billing skipped",
+      );
+      return;
+    }
 
     if (!subscriptionId) {
       logger.warn(
@@ -782,6 +796,8 @@ export async function handleMemberCreated(payload) {
         // All money is stored as integer cents throughout the system
 
         const invoiceReq = {
+          tenantId,
+          ctx: { tenantId },
           body: {
             date: invoicePostingDate,
             docNo,
@@ -908,7 +924,7 @@ export async function handleMemberCreated(payload) {
 
         const claimReq = {
           tenantId,
-          ctx: tenantId ? { tenantId } : {},
+          ctx: { tenantId },
           body: {
             date: invoicePostingDate,
             docNo: claimDocNo,

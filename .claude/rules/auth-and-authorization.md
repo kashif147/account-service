@@ -42,7 +42,12 @@ Routes like `/internal/*`, `journal.routes.js`'s `/events/manual-payment`, and `
 `x-jwt-verified` is present, delegate to `ensureAuthenticated`; otherwise require
 `x-internal-request: true` and use `forwardedInternalContext` (`src/middlewares/context.js`), which
 trusts forwarded `x-tenant-id`/`x-user-id`/`x-user-roles`/`x-user-permissions` headers without
-re-verifying a token. There is no remaining route in this service using a static shared-secret
+re-verifying a token. Because that path grants identity from headers, sensitive routes behind it
+add `requireInternalOrFinanceWrite` / `requireInternalOrFinanceRead`
+(`financePermission.middleware.js`): a genuine internal call (`req.ctx.internalRequest === true`,
+only ever set by `forwardedInternalContext`) passes, while any user JWT/gateway caller needs finance
+write (role + permission) or a strict finance read permission (no empty-claims bypass, never
+PORTAL). Used on `POST /payments/reconcile` and all `/internal/members/*` routes. There is no remaining route in this service using a static shared-secret
 `x-api-key`/`*_API_KEY` check — `payment.routes.js` was the last one and now uses this same
 `internalAuth` pattern instead of the old default-export `context()` middleware (removed).
 

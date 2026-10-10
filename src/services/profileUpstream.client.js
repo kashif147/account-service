@@ -116,6 +116,25 @@ export async function fetchProfilesByMembershipNumbers(req, membershipNumbers) {
   return unwrapProfiles(payload);
 }
 
+/**
+ * The calling PORTAL user's own profile ({profileId, membershipNumber}) via profile-service
+ * GET /api/profile/my-profile, forwarding the caller's own gateway/JWT identity. Returns
+ * null when the caller has no linked profile.
+ */
+export async function fetchMyPortalProfile(req) {
+  const url = `${profileBase()}/api/profile/my-profile`;
+  const payload = await fetchJson(url, req, { method: "GET", timeoutMs: 15000 });
+  const d = payload?.data;
+  if (!d || typeof d !== "object") return null;
+  return {
+    profileId: d.profileId != null ? String(d.profileId) : null,
+    membershipNumber:
+      d.membershipNumber != null && String(d.membershipNumber).trim() !== ""
+        ? String(d.membershipNumber).trim()
+        : null,
+  };
+}
+
 export async function findProfileByMembershipNumber(
   req,
   membershipNumberTrimmed,

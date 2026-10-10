@@ -1,6 +1,41 @@
 import { AppError } from "../errors/AppError.js";
 
 const mem = new Map();
+const TTL_MS = 300000;
+
+/**
+ * Trusted tenant/user for scoping the cache. Only values set by the auth layer
+ * (ensureAuthenticated / forwardedInternalContext, re-pinned by tenantContextWarn) —
+ * never body/query.
+ */
+function trustedScope(req) {
+  const tenantId = req.ctx?.tenantId || req.tenantId || null;
+  const userId = req.ctx?.userId || req.userId || null;
+  return { tenantId, userId };
+}
+
+function routeScope(req) {
+  const method = String(req.method || "").toUpperCase();
+  const base = req.baseUrl || "";
+  const path = req.path || (req.originalUrl || req.url || "").split("?")[0];
+  return `${method} ${base}${path}`;
+}
+
+/**
+ * Cache key = tenant + user + method/route + Idempotency-Key. The client key alone is
+ * never a cache key: two callers (or two tenants, or two routes) reusing the same
+ * Idempotency-Key must never receive each other's response.
+ */
+export function buildIdempotencyCacheKey(req, key) {
+  const { tenantId, userId } = trustedScope(req);
+  if (!tenantId) return null;
+  return JSON.stringify([
+    String(tenantId),
+    userId ? String(userId) : "internal",
+    routeScope(req),
+    key,
+  ]);
+}
 
 export function idempotency() {
   return (req, res, next) => {
@@ -35,18 +70,26 @@ export function idempotency() {
     if (!req.ctx) req.ctx = {};
     req.ctx.idempotencyKey = key;
 
-    // Check if we've seen this key before
-    if (mem.has(key)) {
-      const cachedResponse = mem.get(key);
-      return res.status(200).json(cachedResponse);
+    // No trusted tenant => no response cache (never share across callers).
+    const cacheKey = buildIdempotencyCacheKey(req, key);
+    if (!cacheKey) return next();
+
+    // Check if we've seen this key before (same tenant + user + route)
+    if (mem.has(cacheKey)) {
+      const cached = mem.get(cacheKey);
+      return res.status(cached.status).json(cached.body);
     }
 
-    // Intercept the response to cache it
+    // Intercept the response to cache it — successful (2xx) responses only, so a
+    // transient failure or validation error can be retried with the same key.
     const origJson = res.json.bind(res);
     res.json = (body) => {
-      // Cache the response for 5 minutes (300000ms)
-      mem.set(key, body);
-      setTimeout(() => mem.delete(key), 300000);
+      const status = Number(res.statusCode) || 200;
+      if (status >= 200 && status < 300) {
+        mem.set(cacheKey, { status, body });
+        const t = setTimeout(() => mem.delete(cacheKey), TTL_MS);
+        if (typeof t?.unref === "function") t.unref();
+      }
       return origJson(body);
     };
 

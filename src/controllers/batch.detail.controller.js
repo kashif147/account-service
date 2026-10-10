@@ -13,9 +13,27 @@ import { enrichBatchDetailWithMembershipStatus } from "../services/batch.members
 import logger from "../config/logger.js";
 import { publisher } from "../rabbitMQ/index.js";
 
-async function loadBatchDetailEnriched(batchDetailId, req) {
+/**
+ * Trusted tenant for this request: set by ensureAuthenticated and re-pinned by
+ * tenantContextWarn. Never read from body/query. Missing => the caller is rejected.
+ */
+function trustedTenantId(req) {
+  const tid = req.tenantId || req.ctx?.tenantId || null;
+  return tid ? String(tid) : null;
+}
+
+function rejectMissingTenant(res) {
+  return res.status(401).json({
+    success: false,
+    message: "Tenant context required",
+  });
+}
+
+async function loadBatchDetailEnriched(batchDetailId, req, tenantId) {
+  if (!tenantId) return null;
   const batch = await BatchDetail.findOne({
     _id: batchDetailId,
+    tenantId,
     isDeleted: false,
   }).lean();
   if (!batch) return null;
@@ -104,7 +122,8 @@ export async function createBatchDetail(req, res) {
         message: "bank is required when type is cheque",
       });
 
-    const tenantId = req.user?.tenantId || null;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
     const createdBy =
       req.user?.userId || req.user?.id || req.user?.sub || "unknown";
 
@@ -118,7 +137,7 @@ export async function createBatchDetail(req, res) {
       fileContentType = req.file.mimetype || "application/octet-stream";
       if (azureBlob.isConfigured) {
         const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
-        const blobPath = `batch-details/${tenantId || "default"}/${uuidv4()}-${safeName}`;
+        const blobPath = `batch-details/${tenantId}/${uuidv4()}-${safeName}`;
         fileUrl = await azureBlob.uploadToBlob(
           blobPath,
           req.file.buffer,
@@ -160,7 +179,10 @@ export async function createBatchDetail(req, res) {
           { err: err.message },
           "[BatchDetail] file processing error"
         );
-        const saved = await BatchDetail.findById(batch._id).lean();
+        const saved = await BatchDetail.findOne({
+          _id: batch._id,
+          tenantId,
+        }).lean();
         const createdByName = await resolveCreatedByName(
           saved.createdBy,
           tenantId
@@ -170,13 +192,13 @@ export async function createBatchDetail(req, res) {
           createdBy: createdByName,
         });
         return res.status(201).json({
-          message: "Batch is created. File processing failed: " + err.message,
+          message: "Batch is created. File processing failed.",
           data,
         });
       }
     }
 
-    const saved = await BatchDetail.findById(batch._id).lean();
+    const saved = await BatchDetail.findOne({ _id: batch._id, tenantId }).lean();
     const createdByName = await resolveCreatedByName(saved.createdBy, tenantId);
     const data = enrichBatchWithDownloadUrl({
       ...saved,
@@ -190,7 +212,7 @@ export async function createBatchDetail(req, res) {
     logger.error({ err: error.message }, "[BatchDetail] create error");
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to create batch",
+      message: "Failed to create batch",
     });
   }
 }
@@ -198,14 +220,15 @@ export async function createBatchDetail(req, res) {
 export async function deleteBatchDetail(req, res) {
   try {
     const { batchDetailId } = req.params;
-    const tenantId = req.user?.tenantId || null;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
 
     const filter = {
       _id: batchDetailId,
+      tenantId,
       isDeleted: false,
       batchStatus: "pending",
     };
-    if (tenantId) filter.tenantId = tenantId;
 
     // Mongo + Azure cannot share one transaction; we delete Mongo first and restore
     // the full document if blob removal throws (compensating "rollback").
@@ -253,16 +276,10 @@ export async function deleteBatchDetail(req, res) {
       });
     }
 
-    const any = await BatchDetail.findById(batchDetailId)
+    const any = await BatchDetail.findOne({ _id: batchDetailId, tenantId })
       .select("isDeleted tenantId batchStatus")
       .lean();
     if (!any || any.isDeleted) {
-      return res.status(404).json({
-        success: false,
-        message: "Batch detail not found",
-      });
-    }
-    if (tenantId && any.tenantId !== tenantId) {
       return res.status(404).json({
         success: false,
         message: "Batch detail not found",
@@ -277,7 +294,7 @@ export async function deleteBatchDetail(req, res) {
     logger.error({ err: error.message }, "[BatchDetail] deleteBatchDetail");
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to delete batch detail",
+      message: "Failed to delete batch detail",
     });
   }
 }
@@ -285,13 +302,14 @@ export async function deleteBatchDetail(req, res) {
 export async function getBatchDetailById(req, res) {
   try {
     const { batchDetailId } = req.params;
-    const batch = await loadBatchDetailEnriched(batchDetailId, req);
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
+    const batch = await loadBatchDetailEnriched(batchDetailId, req, tenantId);
     if (!batch) {
       return res
         .status(404)
         .json({ success: false, message: "Batch detail not found" });
     }
-    const tenantId = req.user?.tenantId || null;
     const createdByName = await resolveCreatedByName(batch.createdBy, tenantId);
     const withStatus = await enrichBatchDetailWithMembershipStatus(batch, req);
     const data = enrichBatchWithDownloadUrl({
@@ -300,7 +318,10 @@ export async function getBatchDetailById(req, res) {
     });
     return res.json({ data });
   } catch (error) {
-    return res.status(500).json({ success: false, message: error.message });
+    logger.error({ err: error.message }, "[BatchDetail] getBatchDetailById");
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to load batch detail" });
   }
 }
 
@@ -313,13 +334,13 @@ export async function getAllBatchDetails(req, res) {
       });
     }
 
-    const tenantId = req.user?.tenantId || null;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 500;
     const skip = (page - 1) * limit;
 
-    const query = { isDeleted: false };
-    if (tenantId) query.tenantId = tenantId;
+    const query = { tenantId, isDeleted: false };
 
     const rawTypeFilter = req.query.batchType ?? req.query.type;
     if (rawTypeFilter) {
@@ -378,7 +399,9 @@ export async function getAllBatchDetails(req, res) {
     });
   } catch (error) {
     logger.error({ err: error.message }, "[BatchDetail] list error");
-    return res.status(500).json({ success: false, message: error.message });
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to list batch details" });
   }
 }
 
@@ -393,7 +416,8 @@ export async function resolveBatchException(req, res) {
 
     const { batchDetailId } = req.params;
     const { membershipNumber, exceptionMembershipNumber } = req.body || {};
-    const tenantId = req.user?.tenantId || null;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
 
     const membershipNumberTrimmed =
       membershipNumber != null ? String(membershipNumber).trim() : "";
@@ -419,6 +443,7 @@ export async function resolveBatchException(req, res) {
 
     const batch = await BatchDetail.findOne({
       _id: batchDetailId,
+      tenantId,
       isDeleted: false,
     });
     if (!batch) {
@@ -476,7 +501,7 @@ export async function resolveBatchException(req, res) {
     );
     await batch.save();
 
-    const updated = await loadBatchDetailEnriched(batch._id, req);
+    const updated = await loadBatchDetailEnriched(batch._id, req, tenantId);
 
     const createdByName = await resolveCreatedByName(
       updated.createdBy,
@@ -499,7 +524,7 @@ export async function resolveBatchException(req, res) {
     logger.error({ err: error.message }, "[BatchDetail] resolveBatchException");
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to resolve batch exception",
+      message: "Failed to resolve batch exception",
     });
   }
 }
@@ -519,6 +544,8 @@ export async function excludeBatchPaymentsToExceptions(req, res) {
     }
 
     const { batchDetailId } = req.params;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
     const raw = req.body?.paymentEntryIds;
     if (!Array.isArray(raw) || raw.length === 0) {
       return res.status(400).json({
@@ -536,6 +563,7 @@ export async function excludeBatchPaymentsToExceptions(req, res) {
 
     const batch = await BatchDetail.findOne({
       _id: batchDetailId,
+      tenantId,
       isDeleted: false,
     });
     if (!batch) {
@@ -586,8 +614,7 @@ export async function excludeBatchPaymentsToExceptions(req, res) {
     }
     await batch.save();
 
-    const updated = await loadBatchDetailEnriched(batch._id, req);
-    const tenantId = req.user?.tenantId || null;
+    const updated = await loadBatchDetailEnriched(batch._id, req, tenantId);
     const createdByName = await resolveCreatedByName(
       updated.createdBy,
       tenantId,
@@ -615,7 +642,7 @@ export async function excludeBatchPaymentsToExceptions(req, res) {
     );
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to exclude batch payment rows",
+      message: "Failed to exclude batch payment rows",
     });
   }
 }
@@ -632,7 +659,8 @@ export async function addPaymentToBatch(req, res) {
     const { batchDetailId } = req.params;
     const { membershipNumber, memberName, badgeReferenceNumber, amount } =
       req.body || {};
-    const tenantId = req.user?.tenantId || null;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
 
     const membershipNumberTrimmed =
       membershipNumber != null ? String(membershipNumber).trim() : "";
@@ -674,6 +702,7 @@ export async function addPaymentToBatch(req, res) {
 
     const batch = await BatchDetail.findOne({
       _id: batchDetailId,
+      tenantId,
       isDeleted: false,
     });
     if (!batch) {
@@ -718,7 +747,7 @@ export async function addPaymentToBatch(req, res) {
     batch.batchPayments.push(paymentEntry);
     await batch.save();
 
-    const updated = await loadBatchDetailEnriched(batch._id, req);
+    const updated = await loadBatchDetailEnriched(batch._id, req, tenantId);
 
     const createdByName = await resolveCreatedByName(
       updated.createdBy,
@@ -737,7 +766,7 @@ export async function addPaymentToBatch(req, res) {
     logger.error({ err: error.message }, "[BatchDetail] addPaymentToBatch");
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to add payment to batch",
+      message: "Failed to add payment to batch",
     });
   }
 }
@@ -752,8 +781,11 @@ export async function processBatchDetail(req, res) {
     }
 
     const { batchDetailId } = req.params;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
     const batch = await BatchDetail.findOne({
       _id: batchDetailId,
+      tenantId,
       isDeleted: false,
     }).lean();
     if (!batch) {
@@ -792,11 +824,10 @@ export async function processBatchDetail(req, res) {
       });
     }
 
-    const tenantId = req.user?.tenantId || null;
     const userId = req.user?.userId || req.user?.id || req.user?.sub || null;
 
     await BatchDetail.updateOne(
-      { _id: batchDetailId, isDeleted: false },
+      { _id: batchDetailId, tenantId, isDeleted: false },
       {
         $set: {
           batchStatus: "queued",
@@ -826,7 +857,7 @@ export async function processBatchDetail(req, res) {
           status: "queued",
         },
         {
-          tenantId: tenantId || undefined,
+          tenantId,
           exchange: "batch.events",
           routingKey: "batch.process.queued.v1",
           metadata: { service: "account-service", version: "1.0" },
@@ -848,7 +879,7 @@ export async function processBatchDetail(req, res) {
     logger.error({ err: error.message }, "[BatchDetail] processBatchDetail");
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to start batch processing",
+      message: "Failed to start batch processing",
     });
   }
 }
@@ -862,9 +893,9 @@ export async function getBatchQueueStats(req, res) {
       });
     }
 
-    const tenantId = req.user?.tenantId || null;
-    const query = { isDeleted: false };
-    if (tenantId) query.tenantId = tenantId;
+    const tenantId = trustedTenantId(req);
+    if (!tenantId) return rejectMissingTenant(res);
+    const query = { tenantId, isDeleted: false };
 
     const [statusCounts, queueRows, inProgress] = await Promise.all([
       BatchDetail.aggregate([
@@ -909,7 +940,7 @@ export async function getBatchQueueStats(req, res) {
     logger.error({ err: error.message }, "[BatchDetail] getBatchQueueStats");
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to fetch batch queue stats",
+      message: "Failed to fetch batch queue stats",
     });
   }
 }

@@ -227,6 +227,34 @@ export const zReconcile = z.object({
   }),
 });
 
+/**
+ * HTTP body for POST /api/payments/reconcile. Only the PaymentIntent id is used: amount,
+ * currency, status and metadata are re-read from Stripe server-side (see
+ * reconcilePaymentFromStripe). The legacy webhook-shaped body ({eventId, type, payment})
+ * is still accepted for compatibility, but every field other than
+ * payment.paymentIntentId is ignored.
+ */
+export const zReconcileRequest = z
+  .object({
+    paymentIntentId: z.string().trim().min(1).optional(),
+    eventId: z.string().optional(),
+    type: z.string().optional(),
+    payment: z
+      .object({ paymentIntentId: z.string().trim().min(1) })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough()
+  .superRefine((data, ctx) => {
+    if (!data.paymentIntentId && !data.payment?.paymentIntentId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["paymentIntentId"],
+        message: "paymentIntentId is required",
+      });
+    }
+  });
+
 export const zRecordExternal = z.object({
   direction: z.enum(["in", "out"]),
   amount: z.number().int().nonnegative(),

@@ -26,6 +26,7 @@ function makeDeps(overrides = {}) {
       findOne: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue(null) }),
       create: jest.fn().mockResolvedValue({ _id: "refund-1" }),
       updateOne: jest.fn().mockResolvedValue({}),
+      aggregate: jest.fn().mockResolvedValue([]),
     },
     getStripe: jest.fn(() => ({ refunds: { create: jest.fn().mockResolvedValue({ id: "re_1", charge: "ch_1" }) } })),
     postBalancedJournal: jest.fn().mockResolvedValue({ docNo: "RFD-EVT-refund-1" }),
@@ -41,6 +42,8 @@ function stripePayment(overrides = {}) {
   return {
     _id: "payment-1",
     tenantId: TENANT_ID,
+    purpose: "eventRegistration",
+    ledgerDomain: "events",
     mode: "stripe",
     status: "succeeded",
     amount: 12000,
@@ -59,6 +62,7 @@ describe("processEventCancellationRefunds", () => {
 
     const result = await processEventCancellationRefunds(
       {
+        tenantId: TENANT_ID, // envelope tenant is required (Phase 2B)
         data: {
           tenantId: TENANT_ID,
           eventId: EVENT_ID,
@@ -88,12 +92,14 @@ describe("processEventCancellationRefunds", () => {
         findOne: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ _id: "existing-refund" }) }),
         create: jest.fn(),
         updateOne: jest.fn(),
+        aggregate: jest.fn().mockResolvedValue([]),
       },
     });
     deps.Payment.findOne.mockResolvedValue(stripePayment());
 
     const result = await processEventCancellationRefunds(
       {
+        tenantId: TENANT_ID, // envelope tenant is required (Phase 2B)
         data: {
           tenantId: TENANT_ID,
           eventId: EVENT_ID,
@@ -113,6 +119,7 @@ describe("processEventCancellationRefunds", () => {
 
     const result = await processEventCancellationRefunds(
       {
+        tenantId: TENANT_ID, // envelope tenant is required (Phase 2B)
         data: {
           tenantId: TENANT_ID,
           eventId: EVENT_ID,
@@ -130,10 +137,11 @@ describe("processEventCancellationRefunds", () => {
     const deps = makeDeps();
     deps.Payment.findOne
       .mockResolvedValueOnce(null) // first candidate: payment not found
-      .mockResolvedValueOnce(stripePayment({ _id: "payment-2" })); // second candidate: succeeds
+      .mockResolvedValueOnce(stripePayment({ _id: "payment-2", registrationId: "registration-2" })); // second candidate: succeeds
 
     const result = await processEventCancellationRefunds(
       {
+        tenantId: TENANT_ID, // envelope tenant is required (Phase 2B)
         data: {
           tenantId: TENANT_ID,
           eventId: EVENT_ID,
