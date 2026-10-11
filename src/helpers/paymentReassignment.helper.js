@@ -1,3 +1,4 @@
+import { requireTenantId } from "./tenantScope.js";
 import { resolveTxTypeAccountCode } from "./glTransactionTxType.js";
 import { memberPaymentCreditCents } from "./memberLastPayment.js";
 
@@ -473,11 +474,12 @@ export function buildReversalAuditMemo({
   return parts.join(" | ");
 }
 
-export async function isPaymentDocReversed(GL, originalDocNo, docType) {
+export async function isPaymentDocReversed(GL, originalDocNo, docType, tenantId) {
   const prefix =
     docType === "Claim" ? CLAIM_REVERSAL_MEMO_PREFIX : RECEIPT_REVERSAL_MEMO_PREFIX;
   const escaped = String(originalDocNo || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const hit = await GL.findOne({
+    tenantId: requireTenantId(tenantId),
     memo: { $regex: `${prefix}${escaped}` },
   }).lean();
   return Boolean(hit);

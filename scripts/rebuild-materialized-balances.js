@@ -1,3 +1,13 @@
+/**
+ * Rebuild MaterializedBalance for ONE tenant from that tenant's GL (Phase 2B-PARALLEL-2, B6).
+ *
+ * DRY-RUN BY DEFAULT: reports how many balance rows would be written. Writes only with
+ * --apply. Never touches another tenant's balances and never changes indexes (index
+ * changes belong to scripts/migrations/ledger-tenancy.js).
+ *
+ *   node scripts/rebuild-materialized-balances.js --tenant <tenantId> [--year 2026] [--memberId M1]
+ *   node scripts/rebuild-materialized-balances.js --tenant <tenantId> --apply
+ */
 import dotenvFlow from "dotenv-flow";
 import { connectDB, disconnectDB } from "../src/config/db.js";
 import GLTransaction from "../src/models/glTransaction.model.js";
@@ -61,11 +71,13 @@ async function main() {
   const args = parseArgs(process.argv);
   const memberIdFilter = args.memberId ? String(args.memberId).trim() : null;
   const yearFilter = normalizeYear(args.year);
-  const dryRun = Boolean(args.dryRun);
+  const tenantId = typeof args.tenant === "string" ? args.tenant.trim() : "";
+  if (!tenantId) throw new Error("--tenant <tenantId> is required (balances are per tenant)");
+  const dryRun = !args.apply;
 
-  await connectDB();
+  await connectDB(undefined, { autoIndex: false });
   try {
-    const txns = await GLTransaction.find({})
+    const txns = await GLTransaction.find({ tenantId })
       .select("date entries")
       .sort({ date: 1, createdAt: 1 })
       .lean();
@@ -101,6 +113,8 @@ async function main() {
         JSON.stringify(
           {
             mode: "dryRun",
+            tenantId,
+            glDocuments: txns.length,
             docsToWrite: totals.size,
             memberIdFilter,
             yearFilter,
@@ -112,13 +126,10 @@ async function main() {
       return;
     }
 
-    // Replaces the old {memberId, accountCode, bucket, year} unique index with one that also
-    // includes ledgerDomain (see materializedBalance.model.js) - drops the stale index and
-    // creates the new one. Must run before the rebuild below, otherwise the old index would
-    // reject two docs that differ only by ledgerDomain.
-    await MaterializedBalance.syncIndexes();
-
-    const deleteQuery = {};
+    // Index changes are not made here (the old syncIndexes() call dropped every index not in
+    // the schema, on a database other environments may share). Run
+    // scripts/migrations/ledger-tenancy.js first so the tenant-leading unique index exists.
+    const deleteQuery = { tenantId };
     if (yearFilter != null) deleteQuery.year = yearFilter;
     if (memberIdFilter) deleteQuery.memberId = memberIdFilter;
     await MaterializedBalance.deleteMany(deleteQuery);
@@ -129,6 +140,7 @@ async function main() {
       ops.push({
         updateOne: {
           filter: {
+            tenantId,
             memberId,
             accountCode,
             bucket,
@@ -154,6 +166,7 @@ async function main() {
       JSON.stringify(
         {
           mode: "rebuild",
+          tenantId,
           rebuiltDocuments: ops.length,
           memberIdFilter,
           yearFilter,

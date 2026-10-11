@@ -6,6 +6,7 @@ import { inferPaymentMethodFromLines } from "../helpers/financeAuditActions.js";
 import { buildMemberReceiptCreditEntries } from "../helpers/paymentReceiptAllocation.js";
 import { memberPaymentCreditCents } from "../helpers/memberLastPayment.js";
 import { reverseMemberReceipt } from "./memberCreditOperations.service.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import {
   assertPaymentBelongsToMember,
   assertReassignablePaymentDoc,
@@ -36,7 +37,9 @@ async function reverseMemberClaim({
   userId,
   memo,
   correctionDate,
+  tenantId,
 }) {
+  tenantId = requireTenantId(tenantId);
   const docNo = String(claimDocNo || "").trim();
   const revNo = String(reversalDocNo || "").trim();
   const mid = String(memberId || "").trim();
@@ -45,7 +48,7 @@ async function reverseMemberClaim({
   }
   if (!mid) throw AppError.badRequest("memberId is required");
 
-  const original = await GL.findOne({ docNo, docType: "Claim" }).lean();
+  const original = await GL.findOne({ tenantId, docNo, docType: "Claim" }).lean();
   if (!original) {
     throw AppError.notFound(`Claim ${docNo} not found`);
   }
@@ -53,12 +56,12 @@ async function reverseMemberClaim({
   const memberCheck = assertPaymentBelongsToMember(original, mid);
   if (!memberCheck.ok) throw AppError.badRequest(memberCheck.reason);
 
-  const priorRev = await GL.findOne({ docNo: revNo }).lean();
+  const priorRev = await GL.findOne({ tenantId, docNo: revNo }).lean();
   if (priorRev) {
     throw AppError.conflict(`Reversal document ${revNo} already exists`);
   }
 
-  if (await isPaymentDocReversed(GL, docNo, "Claim")) {
+  if (await isPaymentDocReversed(GL, docNo, "Claim", tenantId)) {
     throw AppError.conflict(`Claim ${docNo} was already reversed`);
   }
 
@@ -81,6 +84,7 @@ async function reverseMemberClaim({
   return postBalancedJournal({
     date: new Date(correctionDate),
     userId,
+    tenantId,
     docType: "Adjustment",
     docNo: revNo,
     reference: docNo,
@@ -108,8 +112,9 @@ async function postReassignedReceipt({
   totalCents,
   leg = "move",
 }) {
+  tenantId = requireTenantId(tenantId);
   const docNoKey = newDocNo || reassignedReceiptDocNo(originalDocNo);
-  const exists = await GL.findOne({ docNo: docNoKey }).lean();
+  const exists = await GL.findOne({ tenantId, docNo: docNoKey }).lean();
   if (exists) {
     return { docNo: docNoKey, skipped: true, journal: exists };
   }
@@ -118,6 +123,7 @@ async function postReassignedReceipt({
     targetMemberId,
     amountCents,
     correctionDate,
+    { tenantId },
   );
 
   const lines = [
@@ -172,8 +178,9 @@ async function postReassignedClaim({
   totalCents,
   leg = "move",
 }) {
+  tenantId = requireTenantId(tenantId);
   const docNoKey = newDocNo || reassignedReceiptDocNo(originalDocNo);
-  const exists = await GL.findOne({ docNo: docNoKey }).lean();
+  const exists = await GL.findOne({ tenantId, docNo: docNoKey }).lean();
   if (exists) {
     return { docNo: docNoKey, skipped: true, journal: exists };
   }
@@ -239,8 +246,7 @@ async function syncPaymentMemberFromReceiptDoc(originalDocNo, toMemberId, tenant
     .trim()
     .match(/^RCP-([a-fA-F0-9]{24})$/i);
   if (!m) return { updated: false };
-  const filter = { _id: m[1] };
-  if (tenantId) filter.tenantId = tenantId;
+  const filter = { _id: m[1], tenantId: requireTenantId(tenantId) };
   const result = await Payment.updateOne(filter, {
     $set: { memberId: String(toMemberId).trim() },
   });
@@ -260,6 +266,7 @@ export async function reassignSinglePayment({
   correctionDate,
   amountCents: requestedMoveCents,
 }) {
+  tenantId = requireTenantId(tenantId);
   const docNo = String(originalDocNo || "").trim();
   const fromMid = String(fromMemberId || "").trim();
   const toMid = String(toMemberId || "").trim();
@@ -273,6 +280,7 @@ export async function reassignSinglePayment({
   }
 
   const original = await GL.findOne({
+    tenantId,
     docNo,
     docType: { $in: ["Receipt", "Claim"] },
   }).lean();
@@ -288,7 +296,7 @@ export async function reassignSinglePayment({
   const belongCheck = assertPaymentBelongsToMember(original, fromMid);
   if (!belongCheck.ok) throw AppError.badRequest(belongCheck.reason);
 
-  if (await isPaymentDocReversed(GL, docNo, docType)) {
+  if (await isPaymentDocReversed(GL, docNo, docType, tenantId)) {
     throw AppError.conflict(`Payment ${docNo} was already reversed`);
   }
 
@@ -310,6 +318,7 @@ export async function reassignSinglePayment({
       userId,
       memo: reversalMemo,
       date: correctionDate,
+      tenantId,
     });
   } else {
     reversal = await reverseMemberClaim({
@@ -319,6 +328,7 @@ export async function reassignSinglePayment({
       userId,
       memo: reversalMemo,
       correctionDate,
+      tenantId,
     });
   }
 
@@ -471,6 +481,7 @@ export async function reassignMemberPayments(input) {
     effectiveDate,
     totalMoveAmountCents: totalMoveInput,
   } = input;
+  const tid = requireTenantId(tenantId);
 
   const fromMid = String(fromMemberId || "").trim();
   const items = normalizeReassignPaymentItems(input);
@@ -496,6 +507,7 @@ export async function reassignMemberPayments(input) {
   }
 
   const originals = await GL.find({
+    tenantId: tid,
     docNo: { $in: docNos },
     docType: { $in: ["Receipt", "Claim"] },
   }).lean();

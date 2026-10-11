@@ -1,5 +1,6 @@
 // src/models/journal.model.js
 import mongoose from "mongoose";
+import { tenantScopedPlugin } from "./plugins/tenantScoped.plugin.js";
 
 const JournalSchema = new mongoose.Schema(
   {
@@ -22,5 +23,9 @@ const JournalSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+JournalSchema.index({ tenantId: 1, date: -1 });
+
+JournalSchema.plugin(tenantScopedPlugin, { modelName: "Journal" });
 
 export default mongoose.model("Journal", JournalSchema);

@@ -1,5 +1,6 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
 import GL from "../models/glTransaction.model.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import { AppError } from "../errors/AppError.js";
 
 const BUCKETS = ["arrears", "current", "advance"];
@@ -54,9 +55,10 @@ function memberIdFromClaimJournal(txn) {
  * After approval, app credit is moved to this member via CLAIM-{applicationId} GL.
  * Used for refund credit checks and refund 2020 targeting when Payment still only has applicationId.
  */
-export async function getClaimRecipientMemberIdForApplication(applicationId) {
+export async function getClaimRecipientMemberIdForApplication(applicationId, tenantId) {
+  const tid = requireTenantId(tenantId);
   if (!applicationId) return null;
-  const claimTxn = await GL.findOne({ docNo: `CLAIM-${applicationId}` })
+  const claimTxn = await GL.findOne({ tenantId: tid, docNo: `CLAIM-${applicationId}` })
     .select({ claimMemberId: 1, entries: 1 })
     .lean();
   if (claimTxn?.claimMemberId) {
@@ -98,8 +100,14 @@ function applicationIdForClaimLookup(payment, resolved) {
  * @param {number} year - calendar year
  * @returns {Promise<number>}
  */
-export async function getAvailableCredit2020ForKey(memberKey, year, ledgerDomain = "membership") {
+export async function getAvailableCredit2020ForKey(
+  memberKey,
+  year,
+  ledgerDomain = "membership",
+  { tenantId } = {},
+) {
   const rows = await MaterializedBalance.find({
+    tenantId: requireTenantId(tenantId),
     memberId: memberKey,
     accountCode: "2020",
     year,
@@ -119,9 +127,16 @@ export async function getAvailableCredit2020ForKey(memberKey, year, ledgerDomain
  *   from blending membership and events/courses money now that MaterializedBalance splits
  *   rows by domain (see materializedBalance.model.js).
  */
-export async function getMemberStoredCreditCents(memberKey, year, ledgerDomain = "membership") {
+export async function getMemberStoredCreditCents(
+  memberKey,
+  year,
+  ledgerDomain = "membership",
+  { tenantId } = {},
+) {
+  const tid = requireTenantId(tenantId);
   if (String(memberKey).startsWith("app:")) return 0;
   const rows = await MaterializedBalance.find({
+    tenantId: tid,
     memberId: memberKey,
     year,
     accountCode: { $in: ["2020", "1400"] },
@@ -142,16 +157,22 @@ export async function getMemberStoredCreditCents(memberKey, year, ledgerDomain =
  * @param {number} [year]
  * @param {string} [ledgerDomain] - "membership" (default) or "events"
  */
-export async function getRefundableBalanceForMember(memberId, year, ledgerDomain = "membership") {
+export async function getRefundableBalanceForMember(
+  memberId,
+  year,
+  ledgerDomain = "membership",
+  { tenantId } = {},
+) {
+  const scope = { tenantId: requireTenantId(tenantId) };
   const mid = String(memberId || "").trim();
   if (!mid || mid.toLowerCase().startsWith("app:")) return 0;
   const effectiveYear =
     Number.isFinite(year) && year > 0 ? year : new Date().getFullYear();
 
-  let available = await getAvailableCredit2020ForKey(mid, effectiveYear, ledgerDomain);
+  let available = await getAvailableCredit2020ForKey(mid, effectiveYear, ledgerDomain, scope);
   available = Math.max(
     available,
-    await getMemberStoredCreditCents(mid, effectiveYear, ledgerDomain),
+    await getMemberStoredCreditCents(mid, effectiveYear, ledgerDomain, scope),
   );
   return Math.max(0, available);
 }
@@ -169,6 +190,12 @@ export async function assertRefundWithinCredit(
   options = {}
 ) {
   const { linkedPaymentRemainingCents } = options;
+  // The payment row is itself tenant-owned; an explicit trusted tenant must agree with it.
+  const tenantId = requireTenantId(options.tenantId || payment?.tenantId);
+  if (payment?.tenantId && String(payment.tenantId) !== tenantId) {
+    throw AppError.notFound("Payment not found");
+  }
+  const scope = { tenantId };
   const resolved = matBalMemberKeyFromPayment(payment);
   if (!resolved) {
     throw AppError.badRequest(
@@ -177,28 +204,32 @@ export async function assertRefundWithinCredit(
   }
   let available = await getAvailableCredit2020ForKey(
     resolved.key,
-    journalYear
+    journalYear,
+    "membership",
+    scope,
   );
 
   if (!String(resolved.key).startsWith("app:")) {
     available = Math.max(
       available,
-      await getMemberStoredCreditCents(resolved.key, journalYear),
+      await getMemberStoredCreditCents(resolved.key, journalYear, "membership", scope),
     );
   }
 
   const appId = applicationIdForClaimLookup(payment, resolved);
   if (appId) {
-    const claimMemberId = await getClaimRecipientMemberIdForApplication(appId);
+    const claimMemberId = await getClaimRecipientMemberIdForApplication(appId, tenantId);
     if (claimMemberId) {
       const claimedMemberCredit = await getAvailableCredit2020ForKey(
         claimMemberId,
-        journalYear
+        journalYear,
+        "membership",
+        scope,
       );
       available = Math.max(available, claimedMemberCredit);
       available = Math.max(
         available,
-        await getMemberStoredCreditCents(claimMemberId, journalYear),
+        await getMemberStoredCreditCents(claimMemberId, journalYear, "membership", scope),
       );
     }
   }

@@ -255,7 +255,11 @@ export async function buildEligibilityItems({
 
     let outstandingCurrentCents = 0;
     try {
-      const owed = await memberOwed1400ByBucket(memberId, new Date(run.periodEndDate).getFullYear());
+      const owed = await memberOwed1400ByBucket(
+        memberId,
+        new Date(run.periodEndDate).getFullYear(),
+        { tenantId: run.tenantId },
+      );
       outstandingCurrentCents = Math.max(0, owed.current || 0);
     } catch {
       /* optional for non-AD_HOC */

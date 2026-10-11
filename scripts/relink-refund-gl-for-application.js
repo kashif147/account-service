@@ -30,6 +30,7 @@ async function main() {
   }
   await mongoose.connect(uri);
   const byApp = await relinkRefundGlFromApplicationToMember({
+    tenantId,
     applicationId,
     memberId,
   });

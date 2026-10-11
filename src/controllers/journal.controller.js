@@ -7,6 +7,7 @@ import Refund from "../models/refund.model.js";
 import Payment from "../models/payment.model.js";
 import dayjs from "dayjs";
 import { AppError } from "../errors/AppError.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import { logInfo, logWarn, logError } from "../middlewares/logger.mw.js";
 // import { calculateProRataFee } from "../helpers/prorata.js";
 import {
@@ -64,9 +65,10 @@ function resolveMemberIdForJournalEvent({
 // Load CoA rows for the accounts referenced in the journal,
 // and attach 'accountName' by mapping CoA.description → accountName.
 // We leave your GL model untouched (it still expects accountName).
-async function enrichLines(lines) {
+async function enrichLines(lines, tenantId) {
   const codes = [...new Set(lines.map((l) => l.accountCode))];
-  const coaRows = await CoA.find({ code: { $in: codes } }).lean();
+  // CoA rows are tenant-owned: an account the tenant has not provisioned is "Unknown".
+  const coaRows = await CoA.find({ tenantId, code: { $in: codes } }).lean();
 
   const byCode = Object.fromEntries(coaRows.map((a) => [a.code, a]));
   return lines.map((l) => {
@@ -125,8 +127,9 @@ function applicationIdsEqual(a, b) {
   return ca !== "" && ca === cb;
 }
 
-async function bulkWriteMaterializedRollup(year, totals, sign = 1) {
+async function bulkWriteMaterializedRollup(year, totals, sign = 1, tenantId) {
   if (!totals?.size) return;
+  const tid = requireTenantId(tenantId);
   const ops = [];
   for (const [key, amount] of totals.entries()) {
     const delta = sign * amount;
@@ -134,7 +137,7 @@ async function bulkWriteMaterializedRollup(year, totals, sign = 1) {
     const [memberId, accountCode, bucket, , ledgerDomain] = key.split("|");
     ops.push({
       updateOne: {
-        filter: { memberId, accountCode, bucket, year, ledgerDomain },
+        filter: { tenantId: tid, memberId, accountCode, bucket, year, ledgerDomain },
         update: {
           $inc: { amount: delta },
           $set: { updatedAt: new Date() },
@@ -153,7 +156,9 @@ async function bulkWriteMaterializedRollup(year, totals, sign = 1) {
 export async function relinkRefundGlFromApplicationToMember({
   applicationId,
   memberId,
+  tenantId,
 }) {
+  const tid = requireTenantId(tenantId);
   if (!applicationId || !memberId) return { updated: 0 };
   const appId = String(applicationId).trim();
   const mid = String(memberId).trim();
@@ -170,6 +175,7 @@ export async function relinkRefundGlFromApplicationToMember({
   }
 
   const candidates = await GLTransaction.find({
+    tenantId: tid,
     docType: "Refund",
     "entries.accountCode": "2020",
     $or: appIdOrOid,
@@ -205,11 +211,11 @@ export async function relinkRefundGlFromApplicationToMember({
       entries: newEntries,
     });
 
-    await bulkWriteMaterializedRollup(year, oldTotals, -1);
-    await bulkWriteMaterializedRollup(year, newTotals, 1);
+    await bulkWriteMaterializedRollup(year, oldTotals, -1, tid);
+    await bulkWriteMaterializedRollup(year, newTotals, 1, tid);
 
     await GLTransaction.updateOne(
-      { _id: txn._id },
+      { _id: txn._id, tenantId: tid },
       { $set: { entries: newEntries } },
     );
     updated += 1;
@@ -251,7 +257,7 @@ export async function relinkPostedRefundGlFromRefundDocuments({
     const target = String(refund.memberId || "").trim();
     if (!target) continue;
     const docNo = refund.glDocNo || `RFD-${refund._id}`;
-    const txn = await GLTransaction.findOne({ docNo }).lean();
+    const txn = await GLTransaction.findOne({ tenantId, docNo }).lean();
     if (!txn || txn.docType !== "Refund") continue;
 
     const newEntries = (txn.entries || []).map((e) => {
@@ -280,10 +286,13 @@ export async function relinkPostedRefundGlFromRefundDocuments({
       entries: newEntries,
     });
 
-    await bulkWriteMaterializedRollup(year, oldTotals, -1);
-    await bulkWriteMaterializedRollup(year, newTotals, 1);
+    await bulkWriteMaterializedRollup(year, oldTotals, -1, tenantId);
+    await bulkWriteMaterializedRollup(year, newTotals, 1, tenantId);
 
-    await GLTransaction.updateOne({ _id: txn._id }, { $set: { entries: newEntries } });
+    await GLTransaction.updateOne(
+      { _id: txn._id, tenantId },
+      { $set: { entries: newEntries } },
+    );
     updated += 1;
   }
 
@@ -313,8 +322,10 @@ export async function postBalancedJournal({
 }) {
   // Wrap entire function in global DB limiter
   // This ensures all journal operations share the same resource pool
+  // Every ledger posting belongs to exactly one trusted tenant (never body/query input).
+  const tid = requireTenantId(tenantId);
   return globalDBLimiter(async () => {
-    const enriched = await enrichLines(lines);
+    const enriched = await enrichLines(lines, tid);
 
     // basic balance check
     const deb = sumArray(enriched, (x) => (x.dc === "D" ? x.amount : 0));
@@ -341,7 +352,7 @@ export async function postBalancedJournal({
     //   member-tracked accounts - driven by CoA.isMemberTracked (not a
     //   hardcoded "1400"/"2020" list) so newly-seeded codes (e.g. events/
     //   courses AR/POA) get the same guardrail automatically.
-    const memberTrackedCodes = new Set(await getMemberTrackedAccountCodes());
+    const memberTrackedCodes = new Set(await getMemberTrackedAccountCodes(tid));
     for (const e of enriched) {
       if (memberTrackedCodes.has(e.accountCode)) {
         if (!e.periodBucket) {
@@ -368,13 +379,14 @@ export async function postBalancedJournal({
       }
     }
 
-    // idempotency on docNo
-    const exists = await GLTransaction.findOne({ docNo }).lean();
+    // idempotency on docNo (unique per tenant)
+    const exists = await GLTransaction.findOne({ tenantId: tid, docNo }).lean();
     if (exists) return exists;
 
     // strip helper and persist
     const entries = enriched.map(({ _a, ...rest }) => rest);
     const txn = await GLTransaction.create({
+      tenantId: tid,
       date,
       ...(userId != null && String(userId).trim() !== ""
         ? { userId: String(userId).trim() }
@@ -397,7 +409,7 @@ export async function postBalancedJournal({
     });
 
     const { year, totals } = rollupMemberBalances({ date, entries });
-    await bulkWriteMaterializedRollup(year, totals, 1);
+    await bulkWriteMaterializedRollup(year, totals, 1, tid);
 
     const memberId = resolveMemberIdForJournalEvent({
       claimMemberId: txn.claimMemberId,
@@ -406,10 +418,7 @@ export async function postBalancedJournal({
       lines,
     });
 
-    const resolvedTenantId =
-      tenantId != null && String(tenantId).trim()
-        ? String(tenantId).trim()
-        : undefined;
+    const resolvedTenantId = tid;
 
     const resolvedProfileId =
       profileId != null && String(profileId).trim()
@@ -573,7 +582,7 @@ export async function invoice(req, res, next) {
     const inv = await postBalancedJournal({
       date,
       userId: req.ctx?.userId,
-      tenantId: req.ctx?.tenantId ?? req.tenantId,
+      tenantId: requireTenantId(req),
       docType: "Invoice",
       docNo,
       memo: memoBase,
@@ -605,7 +614,7 @@ export async function invoice(req, res, next) {
         const cn = await postBalancedJournal({
           date,
           userId: req.ctx?.userId,
-          tenantId: req.ctx?.tenantId ?? req.tenantId,
+          tenantId: requireTenantId(req),
           docType: "Adjustment",
           docNo: `${docNo}-PRORATA`,
           memo,
@@ -675,6 +684,7 @@ export async function postCategoryChangeJournals({
   previousSubscriptionStartDate,
   periodBucket = "current",
   userId,
+  tenantId,
 }) {
   const { lines, memo } = buildCategoryChangeJournalPayload({
     memberId,
@@ -692,6 +702,7 @@ export async function postCategoryChangeJournals({
   const txn = await postBalancedJournal({
     date,
     userId,
+    tenantId,
     docType: "Adjustment",
     docNo: `${docNoBase}-CATNET`,
     memo,
@@ -733,6 +744,7 @@ export async function changeCategory(req, res, next) {
       previousSubscriptionStartDate: previousStartDate,
       periodBucket,
       userId: req.ctx?.userId,
+      tenantId: requireTenantId(req),
     });
 
     res.created(results);
@@ -747,6 +759,7 @@ export async function creditNote(req, res, next) {
     const { createCreditNoteDraft } = await import(
       "../services/creditNote.service.js"
     );
+    const tenantId = requireTenantId(req);
     const {
       date,
       docNo,
@@ -781,6 +794,7 @@ export async function creditNote(req, res, next) {
       notes,
       effectiveDate: date,
       createdBy: req.ctx?.userId,
+      tenantId,
     });
     res.status(201).json({
       ...cn,
@@ -819,9 +833,12 @@ export async function receipt(req, res, next) {
         applicationId,
       });
 
+    const tenantId = requireTenantId(req);
     let creditLines;
     if (memberId && bucket === "current") {
-      creditLines = await buildMemberReceiptCreditEntries(memberId, amount, date);
+      creditLines = await buildMemberReceiptCreditEntries(memberId, amount, date, {
+        tenantId,
+      });
     } else {
       const entry2020 = {
         accountCode: "2020",
@@ -862,7 +879,7 @@ export async function receipt(req, res, next) {
     const out = await postBalancedJournal({
       date,
       userId: req.ctx?.userId,
-      tenantId: req.ctx?.tenantId ?? req.tenantId,
+      tenantId,
       docType: "Receipt",
       docNo,
       memo,
@@ -891,6 +908,7 @@ export async function runProcessDeductionBatchPayments(
     options?.userId != null && String(options.userId).trim() !== ""
       ? String(options.userId).trim()
       : undefined;
+  const tenantId = requireTenantId(options?.tenantId);
   if (!batchPayments || !Array.isArray(batchPayments) || batchPayments.length === 0) {
     throw AppError.badRequest("batchPayments array is required and must not be empty", {
       batchPayments: batchPayments ?? "missing",
@@ -930,6 +948,7 @@ export async function runProcessDeductionBatchPayments(
       String(membershipNumber),
       amountNum,
       date,
+      { tenantId },
     );
     const lines = [
       { accountCode: "1230", dc: "D", amount: amountNum },
@@ -945,6 +964,7 @@ export async function runProcessDeductionBatchPayments(
       const txn = await postBalancedJournal({
         date,
         userId,
+        tenantId,
         profileId: row?.profileId ? String(row.profileId) : undefined,
         docType: "Receipt",
         docNo: `test-${randomUUID()}`,
@@ -1011,10 +1031,7 @@ export async function runProcessBatchPayments(
     typeof options.referenceNumber === "string"
       ? options.referenceNumber.trim()
       : "";
-  const tenantId =
-    options?.tenantId != null && String(options.tenantId).trim() !== ""
-      ? String(options.tenantId).trim()
-      : undefined;
+  const tenantId = requireTenantId(options?.tenantId);
   const batchDetailId =
     options?.batchDetailId != null && String(options.batchDetailId).trim() !== ""
       ? String(options.batchDetailId).trim()
@@ -1060,6 +1077,7 @@ export async function runProcessBatchPayments(
       String(membershipNumber),
       amountNum,
       date,
+      { tenantId },
     );
     const lines = [
       { accountCode: clearingCode, dc: "D", amount: amountNum },
@@ -1126,7 +1144,7 @@ export async function processDeductionBatch(req, res, next) {
     const out = await runProcessDeductionBatchPayments(
       req.body.paymentDate,
       req.body.batchPayments,
-      { userId: req.ctx?.userId }
+      { userId: req.ctx?.userId, tenantId: requireTenantId(req) }
     );
     res.status(201).json(out);
   } catch (e) {
@@ -1155,7 +1173,7 @@ async function resolveClaimJournalDate({
   const docNoStr = parentCreditTxn?.docNo && String(parentCreditTxn.docNo);
   const rcpMatch = docNoStr?.match(/^RCP-([a-fA-F0-9]{24})$/);
   if (rcpMatch && mongoose.Types.ObjectId.isValid(rcpMatch[1])) {
-    const payment = await Payment.findById(rcpMatch[1])
+    const payment = await Payment.findOne({ _id: rcpMatch[1], tenantId })
       .select({ status: 1, updatedAt: 1 })
       .lean();
     if (payment?.status === "succeeded" && payment.updatedAt) {
@@ -1205,12 +1223,13 @@ export async function claimApplicationCredit(req, res, next) {
       });
     }
 
-    const tenantId = req.tenantId ?? req.ctx?.tenantId;
+    const tenantId = requireTenantId(req);
 
     // Find the credit entry for this application
     // Check both new format (applicationId) and old format (memberId: "app:...")
     const appMember = `app:${applicationId}`;
     const creditEntry = await GLTransaction.aggregate([
+      { $match: { tenantId } },
       { $unwind: "$entries" },
       {
         $match: {
@@ -1277,7 +1296,7 @@ export async function claimApplicationCredit(req, res, next) {
     const out = await postBalancedJournal({
       date: resolvedClaimDate,
       userId: req.ctx?.userId,
-      tenantId: req.ctx?.tenantId ?? req.tenantId,
+      tenantId,
       docType: "Claim",
       docNo,
       memo: `Claim app credit ${applicationId} → ${memberId}`,
@@ -1318,7 +1337,7 @@ export async function writeOff(req, res, next) {
     const out = await postBalancedJournal({
       date,
       userId: req.ctx?.userId,
-      tenantId: req.ctx?.tenantId ?? req.tenantId,
+      tenantId: requireTenantId(req),
       docType: "WriteOff",
       docNo: resolvedDocNo,
       memo,
@@ -1345,8 +1364,9 @@ export async function writeOff(req, res, next) {
 export async function listJournals(req, res, next) {
   try {
     const { from, to, docType, memberId, limit = 500, skip = 0 } = req.query;
+    const tenantId = requireTenantId(req);
 
-    const query = {};
+    const query = { tenantId };
     if (from || to) {
       query.date = {};
       if (from) {
@@ -1385,7 +1405,7 @@ export async function listJournals(req, res, next) {
 
     logInfo("Journal query results", { total, itemsCount: items.length });
 
-    const itemsWithTxType = await attachTxTypesToLedgerItems(items);
+    const itemsWithTxType = await attachTxTypesToLedgerItems(items, tenantId);
 
     res.success({
       total,
@@ -1410,7 +1430,9 @@ export async function listStripePayments(req, res, next) {
   try {
     const { from, to, status = "PENDING", limit = 500, skip = 0 } = req.query;
 
+    const tenantId = requireTenantId(req);
     const query = {
+      tenantId,
       docType: "Receipt",
       "settlement.provider": "Stripe",
     };
@@ -1451,7 +1473,7 @@ export async function listStripePayments(req, res, next) {
     ]);
 
     const enriched = await enrichStripePaymentItems(rawItems, req);
-    const items = await attachTxTypesToLedgerItems(enriched);
+    const items = await attachTxTypesToLedgerItems(enriched, tenantId);
 
     logInfo("Stripe payments query results", {
       total,

@@ -1,5 +1,6 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
 import GL from "../models/glTransaction.model.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import {
   getAvailableCredit2020ForKey,
   getMemberStoredCreditCents,
@@ -52,6 +53,8 @@ function entryBelongsToIdentity(entry, mid, rawProfileIds) {
  */
 export async function computeMemberFinanceSummary(memberId, year, options = {}) {
   const { req, ledgerDomain = "membership" } = options;
+  const tenantId = requireTenantId(options.tenantId || req);
+  const scope = { tenantId };
   const mid = String(memberId || "").trim();
   if (!mid) {
     throw new Error("memberId required");
@@ -62,6 +65,7 @@ export async function computeMemberFinanceSummary(memberId, year, options = {}) 
   const balanceKeys = await resolveMemberBalanceKeys(mid, req);
 
   const matRows = await MaterializedBalance.find({
+    tenantId,
     memberId: { $in: balanceKeys },
     year: effectiveYear,
     ledgerDomain,
@@ -70,14 +74,14 @@ export async function computeMemberFinanceSummary(memberId, year, options = {}) 
   const { arrears, current } = await memberOwed1400ByBucket(
     mid,
     effectiveYear,
-    { req, ledgerDomain },
+    { req, ledgerDomain, tenantId },
   );
   const outstandingBalance = Math.max(0, arrears) + Math.max(0, current);
 
   let availableCredit = 0;
   for (const key of balanceKeys) {
-    const available2020 = await getAvailableCredit2020ForKey(key, effectiveYear, ledgerDomain);
-    const storedCredit = await getMemberStoredCreditCents(key, effectiveYear, ledgerDomain);
+    const available2020 = await getAvailableCredit2020ForKey(key, effectiveYear, ledgerDomain, scope);
+    const storedCredit = await getMemberStoredCreditCents(key, effectiveYear, ledgerDomain, scope);
     availableCredit = Math.max(availableCredit, available2020, storedCredit);
   }
 
@@ -85,7 +89,7 @@ export async function computeMemberFinanceSummary(memberId, year, options = {}) 
   for (const key of balanceKeys) {
     refundableBalance = Math.max(
       refundableBalance,
-      await getRefundableBalanceForMember(key, effectiveYear, ledgerDomain),
+      await getRefundableBalanceForMember(key, effectiveYear, ledgerDomain, scope),
     );
   }
 
@@ -96,12 +100,13 @@ export async function computeMemberFinanceSummary(memberId, year, options = {}) 
     }
   }
 
-  const glMemberQuery = await buildMemberFacingGlQuery({ memberId: mid, req });
+  const glMemberQuery = await buildMemberFacingGlQuery({ memberId: mid, req, tenantId });
   const domainFilter = ledgerDomainGlFilter(ledgerDomain);
   const rawProfileIds = rawProfileIdsFromBalanceKeys(mid, balanceKeys);
 
   let writtenOffBalance = 0;
   const writeOffTxns = await GL.find({
+    tenantId,
     $and: [glMemberQuery, domainFilter],
     docType: "WriteOff",
     date: {
@@ -123,6 +128,7 @@ export async function computeMemberFinanceSummary(memberId, year, options = {}) 
 
   let unreconciledClearingBalance = 0;
   const clearingTxns = await GL.find({
+    tenantId,
     $and: [glMemberQuery, domainFilter],
     docType: { $in: ["Receipt", "Refund"] },
     "settlement.status": "PENDING",

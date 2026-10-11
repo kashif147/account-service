@@ -1,4 +1,5 @@
 import GL from "../models/glTransaction.model.js";
+import { requireTenantId } from "./tenantScope.js";
 
 const AMOUNT_TOLERANCE_CENTS = 50;
 
@@ -92,14 +93,15 @@ export function enrichReconciliationRecord(rec, glByDocNo = new Map()) {
   };
 }
 
-export async function enrichReconciliationRecords(records) {
+export async function enrichReconciliationRecords(records, tenantId) {
   if (!records?.length) return [];
+  const tid = requireTenantId(tenantId);
 
   const docNos = [
     ...new Set(records.map((r) => r.glDocNo).filter(Boolean)),
   ];
   const glRows = docNos.length
-    ? await GL.find({ docNo: { $in: docNos } }).lean()
+    ? await GL.find({ tenantId: tid, docNo: { $in: docNos } }).lean()
     : [];
   const glByDocNo = new Map(glRows.map((g) => [g.docNo, g]));
 
@@ -110,11 +112,14 @@ export async function findGlMatchForBankLine({
   externalReference,
   amount,
   clearingAccountCode,
+  tenantId,
 }) {
+  const tid = requireTenantId(tenantId);
   const ref = String(externalReference || "").trim();
   if (!ref) return null;
 
   const candidates = await GL.find({
+    tenantId: tid,
     $or: [
       { docNo: ref },
       { reference: ref },

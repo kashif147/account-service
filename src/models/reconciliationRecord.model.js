@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { tenantScopedPlugin } from "./plugins/tenantScoped.plugin.js";
 
 const RECON_STATUSES = [
   "unmatched",
@@ -47,7 +48,12 @@ const ReconciliationRecordSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+ReconciliationRecordSchema.index({ tenantId: 1, clearingAccountCode: 1, reconciliationStatus: 1 });
+ReconciliationRecordSchema.index({ tenantId: 1, glDocNo: 1 });
+
 export { RECON_STATUSES };
+ReconciliationRecordSchema.plugin(tenantScopedPlugin, { modelName: "ReconciliationRecord" });
+
 export default mongoose.model(
   "ReconciliationRecord",
   ReconciliationRecordSchema,

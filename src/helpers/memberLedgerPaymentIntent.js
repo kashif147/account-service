@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
+import { requireTenantId } from "./tenantScope.js";
 
 const RCP_RE = /^RCP-([a-fA-F0-9]{24})$/u;
 const RFD_RE = /^RFD-([a-fA-F0-9]{24})$/u;
@@ -140,14 +141,8 @@ function pickStripePaymentForClaim(payments, claimAmountCents) {
 export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
   if (!Array.isArray(items) || items.length === 0) return items || [];
 
-  const tid = tenantId != null ? String(tenantId).trim() : "";
-  if (!tid) {
-    return items.map((txn) => ({
-      ...txn,
-      paymentIntentId: null,
-      paymentStatus: null,
-    }));
-  }
+  // Fail closed: ledger rows are never enriched without the caller's trusted tenant.
+  const tid = requireTenantId(tenantId);
 
   const paymentIdsFromRcp = new Set();
   const refundIds = new Set();
@@ -309,6 +304,7 @@ export async function attachPaymentIntentIdsToLedgerItems(items, tenantId) {
   let rcpGlByDocNo = new Map();
   if (rcpDocNosToFetch.size > 0) {
     const glRows = await GLTransaction.find({
+      tenantId: tid,
       docNo: { $in: [...rcpDocNosToFetch] },
     }).lean();
     rcpGlByDocNo = new Map(glRows.map((g) => [String(g.docNo), g]));

@@ -5,6 +5,7 @@ import { postBalancedJournal } from "../controllers/journal.controller.js";
 import MaterializedBalance from "../models/materializedBalance.model.js";
 import { publishFinanceAudit } from "./finance.audit.publisher.js";
 import { buildFinanceAuditSnapshot } from "../helpers/financeAuditActions.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 const INCOME_CODE_RE = /^40\d{2}$/;
 
@@ -13,8 +14,9 @@ const INCOME_CODE_RE = /^40\d{2}$/;
  * @param {string} invoiceDocNo
  * @param {string} memberId
  */
-export async function resolveInvoiceIncomeCode(invoiceDocNo, memberId) {
+export async function resolveInvoiceIncomeCode(invoiceDocNo, memberId, tenantId) {
   const inv = await GL.findOne({
+    tenantId: requireTenantId(tenantId),
     docNo: invoiceDocNo,
     docType: "Invoice",
   }).lean();
@@ -54,11 +56,13 @@ async function postPaidInvoiceCreditTransfer({
   amountCents,
   docNo,
   userId,
+  tenantId,
 }) {
   if (amountCents <= 0) return null;
   return postBalancedJournal({
     date,
     userId,
+    tenantId,
     docType: "Claim",
     docNo,
     memo: `Credit note — member credit to Payment on Account`,
@@ -91,8 +95,11 @@ export async function getRemainingCreditableCents(
   invoiceDocNo,
   memberId,
   excludeDocNo,
+  tenantId,
 ) {
+  const tid = requireTenantId(tenantId);
   const inv = await GL.findOne({
+    tenantId: tid,
     docNo: invoiceDocNo,
     docType: "Invoice",
   }).lean();
@@ -129,6 +136,7 @@ export async function getRemainingCreditableCents(
   }
 
   const q = {
+    tenantId: tid,
     invoiceDocNo,
     memberId: mid,
     status: { $in: ["Draft", "Approved"] },
@@ -145,11 +153,13 @@ async function assertCreditNoteWithinInvoiceLimit({
   memberId,
   amount,
   excludeDocNo,
+  tenantId,
 }) {
   const remaining = await getRemainingCreditableCents(
     invoiceDocNo,
     memberId,
     excludeDocNo,
+    tenantId,
   );
   if (amount > remaining) {
     const euros = (remaining / 100).toFixed(2);
@@ -164,8 +174,9 @@ async function assertCreditNoteWithinInvoiceLimit({
 /**
  * AR credit balance on 1400 after CN (cents): payments exceeded remaining AR.
  */
-async function memberArCreditAfterCn(memberId, periodBucket, year) {
+async function memberArCreditAfterCn(memberId, periodBucket, year, tenantId) {
   const rows = await MaterializedBalance.find({
+    tenantId: requireTenantId(tenantId),
     memberId,
     accountCode: "1400",
     year,
@@ -189,22 +200,25 @@ export async function createCreditNoteDraft({
   tenantId,
   profileId,
 }) {
+  tenantId = requireTenantId(tenantId);
   if (!Number.isInteger(amount) || amount <= 0) {
     throw AppError.badRequest("amount must be a positive integer (cents)");
   }
-  const exists = await CreditNote.findOne({ docNo }).lean();
+  const exists = await CreditNote.findOne({ tenantId, docNo }).lean();
   if (exists) throw AppError.conflict(`Credit note ${docNo} already exists`);
 
   const { incomeCode, categoryName, isAdjustmentLine } =
-    await resolveInvoiceIncomeCode(invoiceDocNo, memberId);
+    await resolveInvoiceIncomeCode(invoiceDocNo, memberId, tenantId);
 
   await assertCreditNoteWithinInvoiceLimit({
     invoiceDocNo,
     memberId,
     amount,
+    tenantId,
   });
 
   const cn = await CreditNote.create({
+    tenantId,
     docNo,
     memberId,
     invoiceDocNo,
@@ -219,7 +233,7 @@ export async function createCreditNoteDraft({
     createdBy,
   });
 
-  if (tenantId) {
+  {
     await publishFinanceAudit({
       action: "CREDIT_NOTE_DRAFT_CREATED",
       tenantId,
@@ -249,10 +263,14 @@ export async function approveCreditNote({
   tenantId,
   profileId,
 }) {
-  const cn = await CreditNote.findOne({ docNo });
+  tenantId = requireTenantId(tenantId);
+  const cn = await CreditNote.findOne({ tenantId, docNo });
   if (!cn) throw AppError.notFound(`Credit note ${docNo} not found`);
   if (cn.status === "Approved") {
-    return { creditNote: cn.toObject(), gl: await GL.findOne({ docNo: cn.glDocNo }).lean() };
+    return {
+      creditNote: cn.toObject(),
+      gl: await GL.findOne({ tenantId, docNo: cn.glDocNo }).lean(),
+    };
   }
   if (cn.status === "Cancelled") {
     throw AppError.badRequest("Cannot approve a cancelled credit note");
@@ -266,6 +284,7 @@ export async function approveCreditNote({
     memberId: cn.memberId,
     amount: cn.amount,
     excludeDocNo: cn.docNo,
+    tenantId,
   });
 
   const revenueCode = cn.incomeCode || "4900";
@@ -308,6 +327,7 @@ export async function approveCreditNote({
     cn.memberId,
     cn.periodBucket,
     year,
+    tenantId,
   );
   let transferGl = null;
   let transferGlDocNo = null;
@@ -321,6 +341,7 @@ export async function approveCreditNote({
       amountCents: transferAmount,
       docNo: transferGlDocNo,
       userId,
+      tenantId,
     });
   }
 
@@ -344,7 +365,8 @@ export async function cancelCreditNote({
   tenantId,
   profileId,
 }) {
-  const cn = await CreditNote.findOne({ docNo });
+  tenantId = requireTenantId(tenantId);
+  const cn = await CreditNote.findOne({ tenantId, docNo });
   if (!cn) throw AppError.notFound(`Credit note ${docNo} not found`);
   if (cn.status === "Approved") {
     throw AppError.badRequest(
@@ -359,7 +381,7 @@ export async function cancelCreditNote({
   cn.cancelledAt = new Date();
   await cn.save();
 
-  if (tenantId) {
+  {
     await publishFinanceAudit({
       action: "CREDIT_NOTE_CANCELLED",
       tenantId,
@@ -385,14 +407,14 @@ export async function cancelCreditNote({
   return cn.toObject();
 }
 
-export async function getCreditNote(docNo) {
-  const cn = await CreditNote.findOne({ docNo }).lean();
+export async function getCreditNote(docNo, tenantId) {
+  const cn = await CreditNote.findOne({ tenantId: requireTenantId(tenantId), docNo }).lean();
   if (!cn) throw AppError.notFound(`Credit note ${docNo} not found`);
   return cn;
 }
 
-export async function listCreditNotes({ memberId, status, limit = 50, skip = 0 }) {
-  const q = {};
+export async function listCreditNotes({ tenantId, memberId, status, limit = 50, skip = 0 }) {
+  const q = { tenantId: requireTenantId(tenantId) };
   if (memberId) q.memberId = memberId;
   if (status) q.status = status;
   const [items, total] = await Promise.all([

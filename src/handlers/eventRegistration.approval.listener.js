@@ -10,6 +10,7 @@ import { postBalancedJournal } from "../controllers/journal.controller.js";
 import { stripeFeeBreakdown } from "../helpers/fees.js";
 import { publisher } from "../rabbitMQ/index.js";
 import logger from "../config/logger.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 const DEFAULT_EVENTS_INCOME_CODE = "4500";
 const EVENTS_CLEARING_CODE_STRIPE = "1220";
@@ -69,6 +70,11 @@ export async function postJournalForEventPayment(payment, ctx) {
     return null;
   }
 
+  // The payment row's tenant is authoritative; a differing caller tenant is refused.
+  const tenantId = requireTenantId(payment.tenantId || ctx?.tenantId);
+  if (ctx?.tenantId && String(ctx.tenantId) !== tenantId) {
+    throw new Error("Event payment tenant does not match the posting context");
+  }
   const amount = payment.amount;
   const clearingCode = payment.mode === "stripe" ? EVENTS_CLEARING_CODE_STRIPE : EVENTS_CLEARING_CODE_MANUAL;
   const incomeCode = resolveEventIncomeCode(payment.eventCategoryCode);
@@ -89,7 +95,7 @@ export async function postJournalForEventPayment(payment, ctx) {
 
   await postBalancedJournal({
     date,
-    tenantId: ctx?.tenantId || payment.tenantId,
+    tenantId,
     profileId: payment.profileId,
     docType: "Receipt",
     docNo: `RCP-EVT-${payment._id}`,
@@ -101,7 +107,7 @@ export async function postJournalForEventPayment(payment, ctx) {
 
   await postBalancedJournal({
     date,
-    tenantId: ctx?.tenantId || payment.tenantId,
+    tenantId,
     profileId: payment.profileId,
     docType: "Invoice",
     docNo: `INV-EVT-${payment.registrationId}`,
@@ -115,7 +121,7 @@ export async function postJournalForEventPayment(payment, ctx) {
 
   await postBalancedJournal({
     date,
-    tenantId: ctx?.tenantId || payment.tenantId,
+    tenantId,
     profileId: payment.profileId,
     docType: "Claim",
     docNo: `CLAIM-EVT-${payment.registrationId}`,
@@ -128,7 +134,7 @@ export async function postJournalForEventPayment(payment, ctx) {
   });
 
   await publishPaymentStatusUpdated({
-    tenantId: ctx?.tenantId || payment.tenantId,
+    tenantId,
     paymentId: String(payment._id),
     registrationId: payment.registrationId,
     status: "succeeded",

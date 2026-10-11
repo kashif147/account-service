@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { tenantScopedPlugin } from "./plugins/tenantScoped.plugin.js";
 
 const reportSnapshotSchema = new mongoose.Schema({
   type: { type: String, enum: ["month-end", "year-end"], required: true },
@@ -13,6 +14,10 @@ const reportSnapshotSchema = new mongoose.Schema({
   notes: { type: String }
 }, { timestamps: true });
 
-reportSnapshotSchema.index({ type: 1, label: 1 }, { unique: true });
+// One snapshot per tenant + period; the global type_1_label_1 index is dropped by the
+// ledger-tenancy migration.
+reportSnapshotSchema.index({ tenantId: 1, type: 1, label: 1 }, { unique: true });
+
+reportSnapshotSchema.plugin(tenantScopedPlugin, { modelName: "ReportSnapshot" });
 
 export default mongoose.model("ReportSnapshot", reportSnapshotSchema);

@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { tenantScopedPlugin } from "./plugins/tenantScoped.plugin.js";
 
 /**
  * One document per (memberId, accountCode, bucket, year, ledgerDomain)
@@ -24,8 +25,16 @@ const MatBalSchema = new mongoose.Schema({
 // must be dropped in every environment (it would otherwise still reject two docs that differ
 // only by ledgerDomain). See scripts/rebuild-materialized-balances.js, which drops it before
 // rebuilding.
-MatBalSchema.index({ memberId: 1, accountCode: 1, bucket: 1, year: 1, ledgerDomain: 1 }, { unique: true });
-MatBalSchema.index({ accountCode: 1, bucket: 1, year: 1 });
-MatBalSchema.index({ amount: 1 }); // for fast debtors/creditors scans
+// Phase 2B-PARALLEL-2: balances are per tenant. The global
+// memberId_1_accountCode_1_bucket_1_year_1_ledgerDomain_1 index is dropped by
+// scripts/migrations/ledger-tenancy.js; rebuilds run per tenant.
+MatBalSchema.index(
+  { tenantId: 1, memberId: 1, accountCode: 1, bucket: 1, year: 1, ledgerDomain: 1 },
+  { unique: true },
+);
+MatBalSchema.index({ tenantId: 1, accountCode: 1, bucket: 1, year: 1 });
+MatBalSchema.index({ tenantId: 1, amount: 1 }); // debtors/creditors scans
+
+MatBalSchema.plugin(tenantScopedPlugin, { modelName: "MaterializedBalance" });
 
 export default mongoose.model("MaterializedBalance", MatBalSchema);

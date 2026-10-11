@@ -2,6 +2,7 @@ import GL from "../models/glTransaction.model.js";
 import { AppError } from "../errors/AppError.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
 import { buildMemberApplyCreditEntries } from "../helpers/paymentReceiptAllocation.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 /**
  * Apply available member credit (2020) against outstanding AR (1400).
@@ -13,7 +14,9 @@ export async function applyMemberCreditToInvoices({
   amount,
   userId,
   memo,
+  tenantId,
 }) {
+  tenantId = requireTenantId(tenantId);
   const mid = String(memberId || "").trim();
   const cents = Math.round(Number(amount));
   if (!mid) throw AppError.badRequest("memberId is required");
@@ -21,7 +24,7 @@ export async function applyMemberCreditToInvoices({
     throw AppError.badRequest("amount must be a positive integer (cents)");
   }
 
-  const lines = await buildMemberApplyCreditEntries(mid, cents, date);
+  const lines = await buildMemberApplyCreditEntries(mid, cents, date, { tenantId });
   if (!lines.length) {
     throw AppError.badRequest(
       "No credit to apply or no outstanding balance on accounts receivable",
@@ -32,7 +35,7 @@ export async function applyMemberCreditToInvoices({
     .filter((l) => l.accountCode === "1400" && l.dc === "C")
     .reduce((s, l) => s + (Number(l.amount) || 0), 0);
 
-  const existing = await GL.findOne({ docNo }).lean();
+  const existing = await GL.findOne({ tenantId, docNo }).lean();
   if (existing) {
     throw AppError.conflict(`Document ${docNo} already exists`);
   }
@@ -40,6 +43,7 @@ export async function applyMemberCreditToInvoices({
   const out = await postBalancedJournal({
     date,
     userId,
+    tenantId,
     docType: "Adjustment",
     docNo,
     memo: memo || `Apply member credit (${mid})`,
@@ -61,7 +65,9 @@ export async function reverseMemberReceipt({
   userId,
   memo,
   date,
+  tenantId,
 }) {
+  tenantId = requireTenantId(tenantId);
   const docNo = String(receiptDocNo || "").trim();
   const revNo = String(reversalDocNo || "").trim();
   const mid = String(memberId || "").trim();
@@ -70,7 +76,7 @@ export async function reverseMemberReceipt({
   }
   if (!mid) throw AppError.badRequest("memberId is required");
 
-  const original = await GL.findOne({ docNo, docType: "Receipt" }).lean();
+  const original = await GL.findOne({ tenantId, docNo, docType: "Receipt" }).lean();
   if (!original) {
     throw AppError.notFound(`Receipt ${docNo} not found`);
   }
@@ -83,6 +89,7 @@ export async function reverseMemberReceipt({
   }
 
   const priorRev = await GL.findOne({
+    tenantId,
     docNo: revNo,
   }).lean();
   if (priorRev) {
@@ -90,6 +97,7 @@ export async function reverseMemberReceipt({
   }
 
   const alreadyReversed = await GL.findOne({
+    tenantId,
     memo: { $regex: `Reverse receipt ${docNo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}` },
   }).lean();
   if (alreadyReversed) {
@@ -120,6 +128,7 @@ export async function reverseMemberReceipt({
   const out = await postBalancedJournal({
     date: journalDate,
     userId,
+    tenantId,
     docType: "Adjustment",
     docNo: revNo,
     reference: docNo,
@@ -138,10 +147,12 @@ function writeOffReversalMemoRegex(docNo) {
 }
 
 /** Whether a reversing journal already exists for this write-off doc. */
-export async function isWriteOffReversed(writeOffDocNo) {
+export async function isWriteOffReversed(writeOffDocNo, tenantId) {
+  const tid = requireTenantId(tenantId);
   const docNo = String(writeOffDocNo || "").trim();
   if (!docNo) return false;
   const existing = await GL.findOne({
+    tenantId: tid,
     memo: { $regex: writeOffReversalMemoRegex(docNo) },
   }).lean();
   return Boolean(existing);
@@ -164,7 +175,9 @@ export async function reverseMemberWriteOff({
   userId,
   memo,
   recoveryNote,
+  tenantId,
 }) {
+  tenantId = requireTenantId(tenantId);
   const docNo = String(writeOffDocNo || "").trim();
   const revNo = String(reversalDocNo || "").trim();
   const mid = String(memberId || "").trim();
@@ -173,7 +186,7 @@ export async function reverseMemberWriteOff({
   }
   if (!mid) throw AppError.badRequest("memberId is required");
 
-  const original = await GL.findOne({ docNo, docType: "WriteOff" }).lean();
+  const original = await GL.findOne({ tenantId, docNo, docType: "WriteOff" }).lean();
   if (!original) {
     throw AppError.notFound(`Write-off ${docNo} not found`);
   }
@@ -185,12 +198,12 @@ export async function reverseMemberWriteOff({
     throw AppError.badRequest("Write-off does not belong to this member");
   }
 
-  const priorRev = await GL.findOne({ docNo: revNo }).lean();
+  const priorRev = await GL.findOne({ tenantId, docNo: revNo }).lean();
   if (priorRev) {
     throw AppError.conflict(`Reversal document ${revNo} already exists`);
   }
 
-  if (await isWriteOffReversed(docNo)) {
+  if (await isWriteOffReversed(docNo, tenantId)) {
     throw AppError.conflict(`Write-off ${docNo} was already reversed`);
   }
 
@@ -213,6 +226,7 @@ export async function reverseMemberWriteOff({
   return postBalancedJournal({
     date: new Date(),
     userId,
+    tenantId,
     docType: "Adjustment",
     docNo: revNo,
     memo: buildWriteOffReversalMemo(docNo, { memo, recoveryNote }),

@@ -2,6 +2,7 @@ import GL from "../models/glTransaction.model.js";
 import Balance from "../models/balance.model.js";
 import CoA from "../models/coa.model.js";
 import MatBal from "../models/materializedBalance.model.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import Refund from "../models/refund.model.js";
 import User from "../models/user.model.js";
 import { monthRange, yearRange } from "../helpers/period.js";
@@ -106,7 +107,8 @@ export async function memberStatement(req, res, next) {
 
     logInfo("Generating member statement", { memberId, from, to });
 
-    const q = { "entries.memberId": memberId };
+    const tenantId = requireTenantId(req);
+    const q = { tenantId, "entries.memberId": memberId };
     if (from || to) q.date = {};
     if (from) q.date.$gte = new Date(from);
     if (to) q.date.$lte = new Date(to);
@@ -116,12 +118,9 @@ export async function memberStatement(req, res, next) {
 
     // Filter member-facing GL; category-change rows stay as stored (-CATNET or legacy INVNEW+CADJ)
     const txns = consolidateCategoryChanges(allTxns);
-    const tenantId = req.tenantId || req.ctx?.tenantId;
-    const withPi = tenantId
-      ? await attachPaymentIntentIdsToLedgerItems(txns, tenantId)
-      : txns.map((t) => ({ ...t, paymentIntentId: null }));
+    const withPi = await attachPaymentIntentIdsToLedgerItems(txns, tenantId);
     const withClaimRef = attachClaimLedgerReference(withPi);
-    const txnsWithTypes = await attachTxTypesToLedgerItems(withClaimRef);
+    const txnsWithTypes = await attachTxTypesToLedgerItems(withClaimRef, tenantId);
 
     const portalStatement = isPortalMemberStatementCaller(req);
     let txnsOut = txnsWithTypes;
@@ -204,7 +203,7 @@ function normalizeDateRange(from, to) {
 
 export async function refundsList(req, res, next) {
   try {
-    const tenantId = req.tenantId || req.ctx?.tenantId;
+    const tenantId = requireTenantId(req);
     const limit = Math.min(Math.max(parseInt(req.query.limit ?? "500", 10) || 500, 1), 1000);
     const skip = Math.max(parseInt(req.query.skip ?? "0", 10) || 0, 0);
     const mode = req.query.mode;
@@ -336,7 +335,9 @@ export async function refundsList(req, res, next) {
 
 export async function balancesSnapshot(req, res, next) {
   try {
+    const tenantId = requireTenantId(req);
     const agg = await Balance.aggregate([
+      { $match: { tenantId } },
       {
         $group: {
           _id: { code: "$accountCode", bucket: "$periodBucket" },
@@ -371,11 +372,14 @@ function mapNames(byCode, rows) {
 }
 
 // Generic Trial Balance over a date range
-async function trialBalance(startISO, endISO) {
+async function trialBalance(tenantId, startISO, endISO) {
   const [rows, coa] = await Promise.all([
     GL.aggregate([
       {
-        $match: { date: { $gte: new Date(startISO), $lte: new Date(endISO) } },
+        $match: {
+          tenantId,
+          date: { $gte: new Date(startISO), $lte: new Date(endISO) },
+        },
       },
       { $unwind: "$entries" },
       {
@@ -394,7 +398,7 @@ async function trialBalance(startISO, endISO) {
         },
       },
     ]),
-    CoA.find({}).lean(),
+    CoA.find({ tenantId }).lean(),
   ]);
   const byCode = Object.fromEntries(coa.map((a) => [a.code, a]));
   return mapNames(byCode, rows).sort((a, b) =>
@@ -403,8 +407,8 @@ async function trialBalance(startISO, endISO) {
 }
 
 // Income Statement over a date range
-async function incomeStatement(startISO, endISO) {
-  const tb = await trialBalance(startISO, endISO);
+async function incomeStatement(tenantId, startISO, endISO) {
+  const tb = await trialBalance(tenantId, startISO, endISO);
   const income = tb.filter((x) => x.type === "Income");
   const contraIncome = tb.filter((x) => x.type === "ContraIncome");
   const expenses = tb.filter((x) => x.type === "Expense");
@@ -428,10 +432,10 @@ async function incomeStatement(startISO, endISO) {
 }
 
 // Debtors / Creditors as of a date (recalc from GL by date)
-async function membersBalancesAsOf(endISO) {
+async function membersBalancesAsOf(tenantId, endISO) {
   const endDate = new Date(endISO);
   const rows = await GL.aggregate([
-    { $match: { date: { $lte: endDate } } },
+    { $match: { tenantId, date: { $lte: endDate } } },
     { $unwind: "$entries" },
     {
       $match: {
@@ -489,10 +493,15 @@ async function membersBalancesAsOf(endISO) {
 }
 
 // Clearing accounts reconciliation for a month (1210–1250)
-async function clearingReconciliation(startISO, endISO) {
+async function clearingReconciliation(tenantId, startISO, endISO) {
   const codes = ["1210", "1220", "1230", "1240", "1250"];
   const rows = await GL.aggregate([
-    { $match: { date: { $gte: new Date(startISO), $lte: new Date(endISO) } } },
+    {
+      $match: {
+        tenantId,
+        date: { $gte: new Date(startISO), $lte: new Date(endISO) },
+      },
+    },
     { $unwind: "$entries" },
     { $match: { "entries.accountCode": { $in: codes } } },
     {
@@ -532,7 +541,7 @@ export async function balancesAsOf(req, res, next) {
     // const docs = await MatBal.find({ year: y }).lean();
 
     // On-demand recompute from GL (authoritative at a date)
-    const mem = await membersBalancesAsOf(asOf);
+    const mem = await membersBalancesAsOf(requireTenantId(req), asOf);
     res.success({ asOf, members: mem });
   } catch (e) {
     next(e);
@@ -543,8 +552,9 @@ export async function memberNetBalance(req, res, next) {
   try {
     const { memberId } = req.params;
     const { year, scope } = req.query;
-    const memberTrackedCodes = await getMemberTrackedAccountCodes();
-    const query = { memberId };
+    const tenantId = requireTenantId(req);
+    const memberTrackedCodes = await getMemberTrackedAccountCodes(tenantId);
+    const query = { tenantId, memberId };
     if (memberTrackedCodes.length) {
       query.accountCode = { $in: memberTrackedCodes };
     }
@@ -611,9 +621,10 @@ export async function memberSummary(req, res, next) {
     // labeled by domain). This endpoint returns single aggregate numbers, where blending would
     // recreate the membership/events money-mixing bug this domain awareness exists to prevent.
     const ledgerDomain = req.query.ledgerDomain === "events" ? "events" : "membership";
-    const memberTrackedCodes = await getMemberTrackedAccountCodes();
+    const tenantId = requireTenantId(req);
+    const memberTrackedCodes = await getMemberTrackedAccountCodes(tenantId);
     const balanceKeys = await resolveMemberBalanceKeys(memberId, req);
-    const query = { memberId: { $in: balanceKeys }, ledgerDomain };
+    const query = { tenantId, memberId: { $in: balanceKeys }, ledgerDomain };
     if (memberTrackedCodes.length) {
       query.accountCode = { $in: memberTrackedCodes };
     }
@@ -633,7 +644,7 @@ export async function memberSummary(req, res, next) {
       query.year = effectiveYear;
     }
 
-    const glMemberQuery = await buildMemberFacingGlQuery({ memberId, req });
+    const glMemberQuery = await buildMemberFacingGlQuery({ memberId, req, tenantId });
     const glDomainFilter =
       ledgerDomain === "events"
         ? { "entries.ledgerDomain": "events" }
@@ -652,6 +663,7 @@ export async function memberSummary(req, res, next) {
     const [matBalRows, receiptCandidates, latestInvoiceTxn] = await Promise.all([
       MatBal.find(query).lean(),
       GL.find({
+        tenantId,
         $and: [glMemberQuery, glDomainFilter],
         docType: { $in: ["Receipt", "Claim"] },
       })
@@ -659,6 +671,7 @@ export async function memberSummary(req, res, next) {
         .limit(150)
         .lean(),
       GL.findOne({
+        tenantId,
         $and: [glMemberQuery, glDomainFilter],
         docType: "Invoice",
       })
@@ -694,7 +707,7 @@ export async function memberSummary(req, res, next) {
     const financeSummary = await computeMemberFinanceSummary(
       memberId,
       effectiveYear ?? new Date().getFullYear(),
-      { req, ledgerDomain },
+      { req, ledgerDomain, tenantId },
     );
 
     res.success({
@@ -736,6 +749,7 @@ export async function creditorsList(req, res, next) {
     const { asOf, year, month, dateFrom, dateTo, offset, limit } =
       req.body || {};
     const data = await listCreditorsAsOf({
+      tenantId: requireTenantId(req),
       asOf,
       year,
       month,
@@ -755,10 +769,7 @@ export async function creditorsList(req, res, next) {
 
 export async function memberSummaryBatch(req, res, next) {
   try {
-    const tenantId = req.tenantId || req.ctx?.tenantId;
-    if (!tenantId) {
-      throw AppError.badRequest("Tenant context required");
-    }
+    const tenantId = requireTenantId(req);
     const { memberIds, year, scope } = req.body || {};
     if (!Array.isArray(memberIds) || memberIds.length === 0) {
       throw AppError.badRequest("memberIds must be a non-empty array");
@@ -777,7 +788,7 @@ export async function memberSummaryBatch(req, res, next) {
       throw AppError.badRequest("memberIds exceeds maximum of 5000");
     }
 
-    const memberTrackedCodes = await getMemberTrackedAccountCodes();
+    const memberTrackedCodes = await getMemberTrackedAccountCodes(tenantId);
     const normalizedScope = String(scope || "all").toLowerCase();
     if (!["all", "current"].includes(normalizedScope)) {
       throw AppError.badRequest("scope must be all or current");
@@ -991,7 +1002,9 @@ export async function memberSummaryBatch(req, res, next) {
           }
 
           try {
-            const fs = await computeMemberFinanceSummary(row.memberId, financeYear);
+            const fs = await computeMemberFinanceSummary(row.memberId, financeYear, {
+              tenantId,
+            });
             return {
               ...row,
               outstandingBalance: fs.outstandingBalance,
@@ -1174,7 +1187,7 @@ export async function generalLedgerTransactions(req, res, next) {
       docType,
       from,
       to,
-      tenantId: req.tenantId || req.ctx?.tenantId,
+      tenantId: requireTenantId(req),
       maxDocuments,
       includeDrafts,
       ledgerDomain,
@@ -1199,7 +1212,13 @@ export async function memberCreditNotes(req, res, next) {
     const status = req.query.status || "Draft";
     const limit = req.query.limit ? parseInt(req.query.limit, 10) : 50;
     const skip = req.query.skip ? parseInt(req.query.skip, 10) : 0;
-    const result = await listCreditNotes({ memberId, status, limit, skip });
+    const result = await listCreditNotes({
+      tenantId: requireTenantId(req),
+      memberId,
+      status,
+      limit,
+      skip,
+    });
     res.success({ memberId, status, ...result });
   } catch (e) {
     next(e);
@@ -1210,8 +1229,9 @@ export async function memberLedger(req, res, next) {
   try {
     const { memberId } = req.params;
     const { accountCode, ledgerDomain } = req.query;
+    const tenantId = requireTenantId(req);
 
-    const q = await buildMemberFacingGlQuery({ memberId, req });
+    const q = await buildMemberFacingGlQuery({ memberId, req, tenantId });
     if (accountCode) q["entries.accountCode"] = accountCode;
     if (ledgerDomain === "events") {
       // All events/courses entries always have this field explicitly set.
@@ -1236,13 +1256,12 @@ export async function memberLedger(req, res, next) {
 
     const consolidatedItems = consolidateCategoryChanges(allItems);
 
-    const tenantId = req.tenantId || req.ctx?.tenantId;
     const withPaymentIntent = await attachPaymentIntentIdsToLedgerItems(
       consolidatedItems,
       tenantId
     );
     const withClaimRef = attachClaimLedgerReference(withPaymentIntent);
-    const withTxType = await attachTxTypesToLedgerItems(withClaimRef);
+    const withTxType = await attachTxTypesToLedgerItems(withClaimRef, tenantId);
 
     const view =
       String(req.query.view || "simple").toLowerCase() === "full"
@@ -1254,6 +1273,7 @@ export async function memberLedger(req, res, next) {
         : simplifyMemberLedgerPresentations(withTxType, memberId);
 
     const { items: draftCreditNotes } = await listCreditNotes({
+      tenantId,
       memberId,
       status: "Draft",
       limit: 50,
@@ -1270,13 +1290,14 @@ export async function monthEnd(req, res, next) {
   try {
     const { period, lock, notes } = req.query; // YYYY-MM
     const { startISO, endISO, label } = monthRange(period);
+    const tenantId = requireTenantId(req);
 
     const compute = async () => {
       const [tb, is, clearing, debtors] = await Promise.all([
-        trialBalance(startISO, endISO),
-        incomeStatement(startISO, endISO),
-        clearingReconciliation(startISO, endISO),
-        membersBalancesAsOf(endISO),
+        trialBalance(tenantId, startISO, endISO),
+        incomeStatement(tenantId, startISO, endISO),
+        clearingReconciliation(tenantId, startISO, endISO),
+        membersBalancesAsOf(tenantId, endISO),
       ]);
 
       return {
@@ -1294,6 +1315,7 @@ export async function monthEnd(req, res, next) {
 
     const report = lock
       ? await snapshotOrCompute(
+          tenantId,
           "month-end",
           label,
           { startISO, endISO },
@@ -1313,12 +1335,13 @@ export async function yearEnd(req, res, next) {
   try {
     const { year, lock, notes } = req.query;
     const { startISO, endISO, label } = yearRange(year);
+    const tenantId = requireTenantId(req);
 
     const compute = async () => {
       const [tb, is, asOfBalances] = await Promise.all([
-        trialBalance(startISO, endISO),
-        incomeStatement(startISO, endISO),
-        membersBalancesAsOf(endISO),
+        trialBalance(tenantId, startISO, endISO),
+        incomeStatement(tenantId, startISO, endISO),
+        membersBalancesAsOf(tenantId, endISO),
       ]);
 
       return {
@@ -1335,6 +1358,7 @@ export async function yearEnd(req, res, next) {
 
     const report = lock
       ? await snapshotOrCompute(
+          tenantId,
           "year-end",
           label,
           { startISO, endISO },
@@ -1352,6 +1376,7 @@ export async function yearEnd(req, res, next) {
 
 // utility to either reuse existing snapshot or create new one
 async function snapshotOrCompute(
+  tenantId,
   type,
   label,
   range,
@@ -1359,8 +1384,9 @@ async function snapshotOrCompute(
   lockedBy,
   notes,
 ) {
-  // Check if already exists
-  let snap = await ReportSnapshot.findOne({ type, label }).lean();
+  // Snapshots are per tenant: one tenant's locked month-end is never served to another.
+  const tid = requireTenantId(tenantId);
+  let snap = await ReportSnapshot.findOne({ tenantId: tid, type, label }).lean();
   if (snap) return snap;
 
   // Compute fresh
@@ -1368,6 +1394,7 @@ async function snapshotOrCompute(
 
   // Persist
   snap = await ReportSnapshot.create({
+    tenantId: tid,
     type,
     label,
     range,

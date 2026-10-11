@@ -112,6 +112,23 @@ export async function runBatchProcessing(
     };
   }
 
+  // Ledger postings use the batch record's own tenant (written under the uploader's trusted
+  // tenant). A caller/event tenant that disagrees is refused rather than trusted.
+  const ledgerTenantId =
+    batch.tenantId != null && String(batch.tenantId).trim() !== ""
+      ? String(batch.tenantId).trim()
+      : null;
+  if (!ledgerTenantId || (tenantId && String(tenantId).trim() !== ledgerTenantId)) {
+    return {
+      success: false,
+      message: ledgerTenantId
+        ? "Batch tenant does not match the requested tenant"
+        : "Batch has no tenant; refusing to post ledger entries",
+      processed: 0,
+      failed: 0,
+    };
+  }
+
   const batchPayments = Array.isArray(batch.batchPayments)
     ? batch.batchPayments
     : [];
@@ -184,7 +201,7 @@ export async function runBatchProcessing(
           {
             batchName: batch.description || "",
             referenceNumber: batch.referenceNumber || "",
-            tenantId: tenantId || batch.tenantId || undefined,
+            tenantId: ledgerTenantId,
             userId: batch.createdBy || batch.queuedBy || undefined,
             batchDetailId: String(batchDetailId),
           }

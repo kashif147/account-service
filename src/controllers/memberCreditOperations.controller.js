@@ -1,4 +1,5 @@
 import { asyncHandler } from "../helpers/asyncHandler.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import {
   applyMemberCreditToInvoices,
   reverseMemberReceipt,
@@ -13,6 +14,7 @@ export const applyMemberCreditHandler = asyncHandler(async (req, res) => {
     memberId,
     amount: Math.round(Number(amount)),
     userId: req.ctx?.userId,
+    tenantId: requireTenantId(req),
     memo,
   });
   res.created(result);
@@ -25,6 +27,7 @@ export const reverseReceiptHandler = asyncHandler(async (req, res) => {
     reversalDocNo,
     memberId,
     userId: req.ctx?.userId,
+    tenantId: requireTenantId(req),
     memo,
   });
   res.created(result);
@@ -38,6 +41,7 @@ export const reverseWriteOffHandler = asyncHandler(async (req, res) => {
     reversalDocNo,
     memberId,
     userId: req.ctx?.userId,
+    tenantId: requireTenantId(req),
     memo,
     recoveryNote,
   });

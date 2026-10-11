@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
 import CreditNote from "../models/creditNote.model.js";
@@ -18,10 +19,8 @@ function expandMemberIdKeys(memberId) {
 
 export async function profileMergeReassignHandler(req, res, next) {
   try {
-    const tenantId = req.tenantId || req.headers["x-tenant-id"];
-    if (!tenantId) {
-      return next(AppError.badRequest("Tenant context is required"));
-    }
+    // Trusted tenant from the auth/internal-context middleware only (never a raw header).
+    const tenantId = requireTenantId(req);
 
     const {
       masterProfileId,

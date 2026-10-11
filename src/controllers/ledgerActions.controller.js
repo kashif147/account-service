@@ -1,4 +1,5 @@
 import { asyncHandler } from "../helpers/asyncHandler.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import { collectRequestPermissions } from "../helpers/financePermissions.js";
 import { getLedgerActionsForDocument } from "../services/ledgerActions.service.js";
 
@@ -9,6 +10,7 @@ export const memberLedgerActions = asyncHandler(async (req, res) => {
   const permissions = collectRequestPermissions(req);
 
   const result = await getLedgerActionsForDocument({
+    tenantId: requireTenantId(req),
     docType,
     docNo,
     status,

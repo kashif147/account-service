@@ -26,7 +26,7 @@ function parseArgs() {
     const hit = args.find((a) => a.startsWith(`${prefix}=`));
     return hit ? hit.slice(prefix.length + 1).trim() : "";
   };
-  return { envName: get("--env") || "staging" };
+  return { envName: get("--env") || "staging", tenantId: get("--tenant") };
 }
 
 function loadEnv(envName) {
@@ -63,8 +63,13 @@ const CPD_EVENTS_INCOME_ROWS = [
 ];
 
 async function main() {
-  const { envName } = parseArgs();
+  const { envName, tenantId } = parseArgs();
   loadEnv(envName);
+  // CoA rows are tenant-owned (prefer scripts/provision-tenant-coa.js for a new tenant).
+  if (!tenantId) {
+    console.error("--tenant=<tenantId> is required (CoA rows are tenant-owned)");
+    process.exit(1);
+  }
 
   const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!mongoUri) {
@@ -77,8 +82,8 @@ async function main() {
 
   for (const row of CPD_EVENTS_INCOME_ROWS) {
     const result = await CoA.findOneAndUpdate(
-      { code: row.code },
-      { $setOnInsert: row },
+      { tenantId, code: row.code },
+      { $setOnInsert: { ...row, tenantId } },
       { upsert: true, new: true },
     );
     console.log("CoA row ensured:", result.toObject());

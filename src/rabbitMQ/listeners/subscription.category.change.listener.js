@@ -2,7 +2,7 @@ import logger from "../../config/logger.js";
 import { getMembershipPricing } from "../../handlers/application.approval.listener.js";
 import { postCategoryChangeJournals } from "../../controllers/journal.controller.js";
 import { globalDBLimiter } from "../../config/globalLimiter.js";
-import { resolveEventTenant } from "../../helpers/eventTenant.js";
+import { resolveLedgerEventTenant } from "../../helpers/eventTenant.js";
 
 function toYmd(value) {
   if (value == null) return null;
@@ -18,11 +18,19 @@ function toYmd(value) {
  */
 export async function handleSubscriptionCategoryChanged(payload) {
   const data = payload.data || payload;
-  // Envelope tenant canonical, data.tenantId fallback (mismatch logged).
-  const { tenantId } = resolveEventTenant(payload, {
+  // Envelope tenant canonical, data.tenantId fallback; a mismatch throws (quarantined via
+  // retry -> DLQ) instead of posting journals under a guessed tenant.
+  const tenantId = resolveLedgerEventTenant(payload, {
     logger,
     eventType: "members.subscription.category.changed.v1",
   });
+  if (!tenantId) {
+    logger.error(
+      { eventId: payload?.eventId },
+      "category.changed: no tenant on envelope or data - journals not posted",
+    );
+    return;
+  }
   const {
     subscriptionId,
     profileId,
@@ -117,6 +125,7 @@ export async function handleSubscriptionCategoryChanged(payload) {
     changeDate: newStart,
     previousSubscriptionStartDate: prevStart,
     periodBucket: "current",
+    tenantId,
   });
 
   logger.info(

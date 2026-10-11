@@ -1,3 +1,30 @@
+# Ledger tenancy (Phase 2B-PARALLEL-2)
+
+The 9 GL models (`glTransaction`, `coa`, `materializedBalance`, `balance`, `journal`,
+`creditNote`, `journalAdjustment`, `reconciliationRecord`, `reportSnapshot`) carry a required
+`tenantId` added by `models/plugins/tenantScoped.plugin.js`. The plugin **throws** (fails
+closed) on any query, update, delete, aggregate (first stage must `$match` a single tenantId),
+`bulkWrite` or `insertMany` that is not pinned to one tenant, and on any update that changes
+`tenantId`. So `findById(id)` is rejected: use `findOne({ _id: id, tenantId })`. The tenant
+always comes from `helpers/tenantScope.js` `requireTenantId(req)` (trusted auth context, never
+body/query/header), from the owning record (Payment/Refund/BatchDetail `tenantId`) on
+webhook/job paths, or from `resolveLedgerEventTenant()` on consumers (envelope canonical; an
+envelope/data mismatch throws and is quarantined via retry -> DLQ). `postBalancedJournal`
+requires a tenant.
+
+Uniqueness is per tenant: `{tenantId, docNo}` (GL, credit notes, journal adjustments),
+`{tenantId, code}` (CoA), `{tenantId, memberId, ...}` (Balance, MaterializedBalance),
+`{tenantId, type, label}` (ReportSnapshot). The Chart of Accounts is tenant-owned:
+`config/chartOfAccountsTemplate.js` is only a template, cloned per tenant by
+`services/coaProvisioning.service.js` / `scripts/provision-tenant-coa.js` (missing codes only,
+idempotent). A tenant without a provisioned chart cannot post ("Unknown account").
+
+Migration: `scripts/migrations/ledger-tenancy.js` (`--report` default; `--backfill
+--tenant=<id> --confirm-single-tenant`, `--create-indexes`, `--drop-legacy-indexes`, each
+needs `--apply`). `scripts/rebuild-materialized-balances.js --tenant <id>` rebuilds one
+tenant's balances (dry-run unless `--apply`) and no longer touches indexes. Operator scripts
+that must span tenants use the raw driver (`Model.collection`), which bypasses the plugin.
+
 # Double-entry accounting / GL
 
 `journal.service.js`, `glJournalReplication.service.js`, `ledgerActions.service.js` implement

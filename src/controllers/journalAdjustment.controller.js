@@ -1,4 +1,5 @@
 import { asyncHandler } from "../helpers/asyncHandler.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import {
   createJournalAdjustmentDraft,
   approveJournalAdjustment,
@@ -33,7 +34,7 @@ export const createJournalAdjustment = asyncHandler(async (req, res) => {
     financialPeriod,
     effectiveDate: date,
     createdBy: req.ctx?.userId,
-    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    tenantId: requireTenantId(req),
   });
 
   res.created({
@@ -47,7 +48,7 @@ export const approveJournalAdjustmentHandler = asyncHandler(async (req, res) => 
     docNo: req.params.docNo,
     approvedBy: req.ctx?.userId,
     userId: req.ctx?.userId,
-    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    tenantId: requireTenantId(req),
   });
   res.success(result);
 });
@@ -55,6 +56,7 @@ export const approveJournalAdjustmentHandler = asyncHandler(async (req, res) => 
 export const listJournalAdjustmentsHandler = asyncHandler(async (req, res) => {
   const { limit, skip } = req.query;
   const result = await listJournalAdjustments({
+    tenantId: requireTenantId(req),
     limit: limit ? parseInt(limit, 10) : 50,
     skip: skip ? parseInt(skip, 10) : 0,
   });

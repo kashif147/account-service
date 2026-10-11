@@ -16,7 +16,7 @@ import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 import { isNoFeeMembershipCategory } from "../helpers/noFeeMembershipCategory.js";
-import { resolveEventTenant } from "../helpers/eventTenant.js";
+import { resolveLedgerEventTenant } from "../helpers/eventTenant.js";
 
 /**
  * Maps membership category to income account code
@@ -259,7 +259,7 @@ function resolveIncomeCodeKey(categoryName, categoryToIncomeCode) {
   return null;
 }
 
-async function getIncomeCodeForCategory(categoryName) {
+async function getIncomeCodeForCategory(categoryName, tenantId) {
   // Default mapping - customize based on your CoA (keys are canonical; variants match via normalize + prefix)
   const categoryToIncomeCode = {
     "General All Grades": "4000",
@@ -275,7 +275,7 @@ async function getIncomeCodeForCategory(categoryName) {
 
   const code = resolveIncomeCodeKey(categoryName, categoryToIncomeCode);
   if (code) {
-    const coa = await CoA.findOne({ code }).lean();
+    const coa = tenantId ? await CoA.findOne({ tenantId, code }).lean() : null;
     if (coa) return code;
   }
 
@@ -518,7 +518,7 @@ export async function getMembershipPricing({
 
   // Get income code from category mapping (not from product.code)
   if (incomeCode == null) {
-    incomeCode = await getIncomeCodeForCategory(categoryName);
+    incomeCode = await getIncomeCodeForCategory(categoryName, tenantId);
   }
 
   // Fallback to defaults only if no pricing found
@@ -643,6 +643,12 @@ export async function handleApplicationApproved(payload) {
  * Requires membership number (memberId) on the event: invoices are never posted against applicationId alone.
  */
 export async function handleMemberCreated(payload) {
+  // Outside the try: a tenant mismatch must propagate to the consumer (retry -> DLQ
+  // quarantine) rather than be swallowed by the catch below.
+  const tenantId = resolveLedgerEventTenant(payload, {
+    logger,
+    eventType: "members.subscription.current.updated.v1",
+  });
   try {
     const {
       applicationId,
@@ -655,10 +661,6 @@ export async function handleMemberCreated(payload) {
 
     // Envelope tenant is canonical (subscription-service sets it only on the envelope);
     // data.tenantId is a fallback. Never post billing without a tenant.
-    const { tenantId } = resolveEventTenant(payload, {
-      logger,
-      eventType: "members.subscription.current.updated.v1",
-    });
     if (!tenantId) {
       logger.error(
         { applicationId, memberId, subscriptionId, profileId, eventId: payload?.eventId },
@@ -761,6 +763,7 @@ export async function handleMemberCreated(payload) {
       // Wrap in global limiter to prevent connection pool exhaustion
       const existingInvoice = await globalDBLimiter(async () => {
         return await GLTransaction.findOne({
+          tenantId,
           docNo: docNo,
         }).lean();
       });
@@ -902,6 +905,7 @@ export async function handleMemberCreated(payload) {
 
       const existingClaim = await globalDBLimiter(async () => {
         return await GLTransaction.findOne({
+          tenantId,
           docNo: claimDocNo,
         }).lean();
       });
@@ -1033,6 +1037,7 @@ export async function handleMemberCreated(payload) {
         const byApp = await relinkRefundGlFromApplicationToMember({
           applicationId,
           memberId,
+          tenantId,
         });
         const byDoc = await relinkPostedRefundGlFromRefundDocuments({
           tenantId,

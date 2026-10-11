@@ -29,3 +29,46 @@ export function resolveEventTenant(payload, { logger, eventType } = {}) {
   }
   return { tenantId, envelopeTenantId, dataTenantId, mismatch };
 }
+
+export class EventTenantMismatchError extends Error {
+  constructor({ eventType, eventId, envelopeTenantId, dataTenantId }) {
+    super(
+      `Event tenant mismatch (${eventType || "event"}): envelope tenant and data.tenantId differ`,
+    );
+    this.name = "EventTenantMismatchError";
+    this.code = "EVENT_TENANT_MISMATCH";
+    this.eventType = eventType;
+    this.eventId = eventId;
+    this.envelopeTenantId = envelopeTenantId;
+    this.dataTenantId = dataTenantId;
+  }
+}
+
+/**
+ * Tenant for a consumer that posts to the general ledger. Same precedence as
+ * resolveEventTenant (envelope canonical, data fallback when the envelope has none), but a
+ * disagreement is never resolved by picking one side: it throws, so the consumer's
+ * retry -> DLQ path quarantines the message for review instead of posting money under a
+ * possibly wrong tenant. Returns null when neither carries a tenant (caller decides).
+ */
+export function resolveLedgerEventTenant(payload, { logger, eventType } = {}) {
+  const r = resolveEventTenant(payload, { eventType });
+  if (r.mismatch) {
+    logger?.error?.(
+      {
+        eventType: eventType || payload?.eventType,
+        eventId: payload?.eventId,
+        envelopeTenantId: r.envelopeTenantId,
+        dataTenantId: r.dataTenantId,
+      },
+      "Ledger event tenant mismatch - quarantining (no posting)",
+    );
+    throw new EventTenantMismatchError({
+      eventType: eventType || payload?.eventType,
+      eventId: payload?.eventId,
+      envelopeTenantId: r.envelopeTenantId,
+      dataTenantId: r.dataTenantId,
+    });
+  }
+  return r.tenantId;
+}

@@ -1,4 +1,5 @@
 import GL from "../models/glTransaction.model.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import { computeMemberBalanceFromGl } from "../helpers/memberCreditorBalance.helper.js";
 
 function isMemberKey(memberId) {
@@ -73,9 +74,9 @@ export function resolveMonthYearAsOfEnd(year, month) {
  * Signed amount = debits − credits per account; combined net = ar1400 + poa2020.
  * Creditor when net < 0 (organisation liability / member credit per Irish POA treatment).
  */
-async function memberBalancesAsOfGl(endDate) {
+async function memberBalancesAsOfGl(tenantId, endDate) {
   const rows = await GL.aggregate([
-    { $match: { date: { $lte: endDate } } },
+    { $match: { tenantId, date: { $lte: endDate } } },
     { $unwind: "$entries" },
     {
       $match: {
@@ -142,6 +143,7 @@ async function memberBalancesAsOfGl(endDate) {
  * Only GL entries with date <= asOf end-of-day are included.
  */
 export async function listCreditorsAsOf({
+  tenantId,
   asOf,
   year,
   month,
@@ -180,7 +182,7 @@ export async function listCreditorsAsOf({
   const safeOffset = Math.max(0, Number(offset) || 0);
   const safeLimit = Math.min(Math.max(1, Number(limit) || 5000), 5000);
 
-  const balances = await memberBalancesAsOfGl(asOfEnd);
+  const balances = await memberBalancesAsOfGl(requireTenantId(tenantId), asOfEnd);
   const allRows = balances
     .filter((b) => b.amountCents > 0)
     .map((b) => ({
@@ -222,6 +224,7 @@ export async function listCreditorsReport(params = {}) {
       ? resolveMonthYearAsOfEnd(year, 12)
       : resolveAsOfEndDate(new Date());
   return listCreditorsAsOf({
+    tenantId,
     asOf: asOf.toISOString().slice(0, 10),
     offset,
     limit,

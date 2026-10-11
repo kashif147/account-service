@@ -2,6 +2,7 @@ import { asyncHandler } from "../helpers/asyncHandler.js";
 import { getReminderEligibilitySnapshot } from "../services/reminderEligibilityRead.service.js";
 import { AppError } from "../errors/AppError.js";
 import { postBalancedJournal } from "./journal.controller.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 const BULK_MAX = 5000;
 const VALID_WRITE_OFF_BUCKETS = new Set(["arrears", "current"]);
@@ -14,7 +15,7 @@ const VALID_WRITE_OFF_BUCKETS = new Set(["arrears", "current"]);
 export const reminderEligibility = asyncHandler(async (req, res) => {
   const { memberId } = req.params;
   const asOf = req.query.asOf;
-  const data = await getReminderEligibilitySnapshot(memberId, asOf);
+  const data = await getReminderEligibilitySnapshot(memberId, asOf, requireTenantId(req));
   res.success(data);
 });
 
@@ -24,6 +25,7 @@ export const reminderEligibility = asyncHandler(async (req, res) => {
  */
 export const reminderEligibilityBulk = asyncHandler(async (req, res) => {
   const { memberIds, asOf } = req.body || {};
+  const tenantId = requireTenantId(req);
   if (!Array.isArray(memberIds) || memberIds.length === 0) {
     throw AppError.badRequest("memberIds must be a non-empty array");
   }
@@ -36,7 +38,7 @@ export const reminderEligibilityBulk = asyncHandler(async (req, res) => {
   for (let i = 0; i < slice.length; i += PARALLEL) {
     const part = slice.slice(i, i + PARALLEL);
     const partItems = await Promise.all(
-      part.map((memberId) => getReminderEligibilitySnapshot(memberId, asOf))
+      part.map((memberId) => getReminderEligibilitySnapshot(memberId, asOf, tenantId))
     );
     items.push(...partItems);
   }
@@ -91,7 +93,7 @@ export const internalWriteOff = asyncHandler(async (req, res) => {
   const out = await postBalancedJournal({
     date,
     userId: req.ctx?.userId,
-    tenantId: req.ctx?.tenantId,
+    tenantId: requireTenantId(req),
     docType: "WriteOff",
     docNo: resolvedDocNo,
     memo,

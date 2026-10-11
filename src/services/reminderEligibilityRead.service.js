@@ -1,6 +1,7 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
 import GLTransaction from "../models/glTransaction.model.js";
 import { memberPaymentCreditCents } from "../helpers/memberLastPayment.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 const MEMBER_CREDIT_BUCKETS = ["arrears", "current", "advance"];
 
@@ -18,10 +19,12 @@ function asDate(value) {
  * Sum signed 1400 arrears materialized balance for a member (all years).
  * Positive amount per schema = member owes (debit balance).
  */
-export async function sumNet1400ArrearsCents(memberId) {
+export async function sumNet1400ArrearsCents(memberId, tenantId) {
+  const tid = requireTenantId(tenantId);
   const mid = normMemberId(memberId);
   if (!mid) return 0;
   const rows = await MaterializedBalance.find({
+    tenantId: tid,
     memberId: mid,
     accountCode: "1400",
     bucket: "arrears",
@@ -36,10 +39,12 @@ export async function sumNet1400ArrearsCents(memberId) {
 /**
  * Sum signed 1400 current bucket (optional context for snapshots).
  */
-export async function sumNet1400CurrentCents(memberId) {
+export async function sumNet1400CurrentCents(memberId, tenantId) {
+  const tid = requireTenantId(tenantId);
   const mid = normMemberId(memberId);
   if (!mid) return 0;
   const rows = await MaterializedBalance.find({
+    tenantId: tid,
     memberId: mid,
     accountCode: "1400",
     bucket: "current",
@@ -55,10 +60,12 @@ export async function sumNet1400CurrentCents(memberId) {
  * Operational available credit for reminder eligibility across all years.
  * Negative materialized 2020/1400 rows represent credit held for the member.
  */
-export async function sumAvailableCreditCents(memberId) {
+export async function sumAvailableCreditCents(memberId, tenantId) {
+  const tid = requireTenantId(tenantId);
   const mid = normMemberId(memberId);
   if (!mid) return 0;
   const rows = await MaterializedBalance.find({
+    tenantId: tid,
     memberId: mid,
     accountCode: { $in: ["2020", "1400"] },
     bucket: { $in: MEMBER_CREDIT_BUCKETS },
@@ -74,7 +81,8 @@ export async function sumAvailableCreditCents(memberId) {
 /**
  * Latest Receipt that credits member-tracked 1400 or 2020 (member cash / allocation).
  */
-export async function findLastMemberReceipt(memberId, asOf) {
+export async function findLastMemberReceipt(memberId, asOf, tenantId) {
+  const tid = requireTenantId(tenantId);
   const mid = normMemberId(memberId);
   if (!mid) {
     return {
@@ -86,6 +94,7 @@ export async function findLastMemberReceipt(memberId, asOf) {
   const end = asDate(asOf);
 
   const doc = await GLTransaction.findOne({
+    tenantId: tid,
     docType: "Receipt",
     date: { $lte: end },
     $or: [
@@ -130,15 +139,16 @@ export async function findLastMemberReceipt(memberId, asOf) {
 /**
  * Snapshot for reminder-batch eligibility (subscription-service / workers).
  */
-export async function getReminderEligibilitySnapshot(memberId, asOf) {
+export async function getReminderEligibilitySnapshot(memberId, asOf, tenantId) {
+  const tid = requireTenantId(tenantId);
   const mid = normMemberId(memberId);
   const asOfDate = asDate(asOf);
   const [net1400ArrearsCents, net1400CurrentCents, availableCreditCents, receipt] =
     await Promise.all([
-      sumNet1400ArrearsCents(mid),
-      sumNet1400CurrentCents(mid),
-      sumAvailableCreditCents(mid),
-      findLastMemberReceipt(mid, asOfDate),
+      sumNet1400ArrearsCents(mid, tid),
+      sumNet1400CurrentCents(mid, tid),
+      sumAvailableCreditCents(mid, tid),
+      findLastMemberReceipt(mid, asOfDate, tid),
     ]);
   const gross1400OwedCents = Math.max(
     0,

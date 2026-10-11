@@ -19,6 +19,7 @@ import {
   BATCH_PROCESS_EVENTS,
 } from "./events/index.js";
 import { runBatchProcessing } from "../services/batch.process.job.service.js";
+import { resolveLedgerEventTenant } from "../helpers/eventTenant.js";
 import {
   handleCrmUserCreated,
   handleCrmUserUpdated,
@@ -505,7 +506,13 @@ export async function setupConsumers() {
       BATCH_PROCESS_EVENTS.BATCH_PROCESS_REQUESTED,
       async (payload) => {
         const data = payload.data || payload;
-        const { batchDetailId, tenantId, userId } = data;
+        const { batchDetailId, userId } = data;
+        // Envelope tenant canonical; mismatch with data.tenantId is quarantined (throws).
+        // runBatchProcessing additionally refuses a tenant that differs from the batch's own.
+        const tenantId = resolveLedgerEventTenant(payload, {
+          logger,
+          eventType: BATCH_PROCESS_EVENTS.BATCH_PROCESS_REQUESTED,
+        });
         if (!batchDetailId) {
           logger.error("[BatchProcess] Missing batchDetailId in payload");
           return;

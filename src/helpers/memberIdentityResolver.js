@@ -1,6 +1,7 @@
 import Payment from "../models/payment.model.js";
 import Refund from "../models/refund.model.js";
 import GL from "../models/glTransaction.model.js";
+import { requireTenantId } from "./tenantScope.js";
 import {
   fetchProfilesByIds,
   fetchProfilesByMembershipNumbers,
@@ -75,14 +76,17 @@ export async function resolveMemberBalanceKeys(memberId, req) {
   return [...keys];
 }
 
-export async function applicationIdsLinkedToMember(memberId) {
+export async function applicationIdsLinkedToMember(memberId, tenantId) {
+  const tid = requireTenantId(tenantId);
   const mid = String(memberId || "").trim();
   if (!mid) return [];
   const ids = new Set();
   const [payments, refunds, claimDocs] = await Promise.all([
-    Payment.find({ memberId: mid }).select("applicationId").lean(),
-    Refund.find({ memberId: mid }).select("applicationId").lean(),
-    GL.find({ claimMemberId: mid }).select("sourceApplicationId docNo").lean(),
+    Payment.find({ tenantId: tid, memberId: mid }).select("applicationId").lean(),
+    Refund.find({ tenantId: tid, memberId: mid }).select("applicationId").lean(),
+    GL.find({ tenantId: tid, claimMemberId: mid })
+      .select("sourceApplicationId docNo")
+      .lean(),
   ]);
   for (const p of payments) {
     if (p.applicationId) ids.add(String(p.applicationId).trim());
@@ -100,7 +104,8 @@ export async function applicationIdsLinkedToMember(memberId) {
   return [...ids].filter(Boolean);
 }
 
-export async function buildApplicationMemberMap(applicationIds) {
+export async function buildApplicationMemberMap(applicationIds, tenantId) {
+  const tid = requireTenantId(tenantId);
   const map = new Map();
   const ids = [
     ...new Set(
@@ -112,18 +117,20 @@ export async function buildApplicationMemberMap(applicationIds) {
   const claimDocNos = ids.map((id) => `CLAIM-${id}`);
   const [payments, refunds, claimDocs] = await Promise.all([
     Payment.find({
+      tenantId: tid,
       applicationId: { $in: ids },
       memberId: { $exists: true, $nin: [null, ""] },
     })
       .select("applicationId memberId")
       .lean(),
     Refund.find({
+      tenantId: tid,
       applicationId: { $in: ids },
       memberId: { $exists: true, $nin: [null, ""] },
     })
       .select("applicationId memberId")
       .lean(),
-    GL.find({ docNo: { $in: claimDocNos } })
+    GL.find({ tenantId: tid, docNo: { $in: claimDocNos } })
       .select({ docNo: 1, claimMemberId: 1, entries: 1 })
       .lean(),
   ]);
@@ -182,19 +189,20 @@ export async function buildProfileMemberMap(profileIds, req) {
 
 export async function createMemberIdentityResolver(txns, options = {}) {
   const { seedMemberId, req } = options;
+  const tenantId = requireTenantId(options.tenantId || req);
   const keys = collectIdentityKeysFromGlTxns(txns);
   const applicationIds = new Set(keys.applicationIds);
   const profileIds = new Set(keys.profileIds);
 
   if (seedMemberId && req) {
-    const linkedApps = await applicationIdsLinkedToMember(seedMemberId);
+    const linkedApps = await applicationIdsLinkedToMember(seedMemberId, tenantId);
     for (const id of linkedApps) applicationIds.add(id);
     const profileKeys = await profileKeysLinkedToMember(seedMemberId, req);
     for (const pk of profileKeys) profileIds.add(pk.slice(8));
   }
 
   const [appToMember, profileToMember] = await Promise.all([
-    buildApplicationMemberMap([...applicationIds]),
+    buildApplicationMemberMap([...applicationIds], tenantId),
     buildProfileMemberMap([...profileIds], req),
   ]);
 
@@ -241,8 +249,10 @@ export async function buildMemberFacingGlQuery({
   from,
   to,
   req,
+  tenantId: explicitTenantId,
 }) {
-  const q = { docType: { $ne: "Settlement" } };
+  const tenantId = requireTenantId(explicitTenantId || req);
+  const q = { tenantId, docType: { $ne: "Settlement" } };
   const date = {};
   if (from) {
     const fromDate = new Date(from);
@@ -276,7 +286,7 @@ export async function buildMemberFacingGlQuery({
         memberOr.push({ "entries.profileId": pk.slice(8) });
       }
     }
-    const appIds = await applicationIdsLinkedToMember(mid);
+    const appIds = await applicationIdsLinkedToMember(mid, tenantId);
     if (appIds.length) {
       memberOr.push(
         { "entries.applicationId": { $in: appIds } },

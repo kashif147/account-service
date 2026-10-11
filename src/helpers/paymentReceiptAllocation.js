@@ -1,4 +1,5 @@
 import MaterializedBalance from "../models/materializedBalance.model.js";
+import { requireTenantId } from "./tenantScope.js";
 import { resolveMemberBalanceKeys } from "./memberIdentityResolver.js";
 
 /**
@@ -88,11 +89,13 @@ function sumOwed1400Rows(rows, { netAcrossRows = false } = {}) {
  */
 export async function memberOwed1400AllYears(memberId, options = {}) {
   const { req, ledgerDomain = "membership" } = options;
+  const tenantId = requireTenantId(options.tenantId || req);
   const mid = String(memberId || "").trim();
   if (!mid) return { arrears: 0, current: 0 };
 
   const balanceKeys = await resolveMemberBalanceKeys(mid, req);
   const rows = await MaterializedBalance.find({
+    tenantId,
     memberId: { $in: balanceKeys },
     accountCode: "1400",
     bucket: { $in: ["arrears", "current"] },
@@ -110,12 +113,14 @@ export async function memberOwed1400AllYears(memberId, options = {}) {
  */
 export async function memberOwed1400ByBucket(memberId, year, options = {}) {
   const { req, ledgerDomain = "membership" } = options;
+  const tenantId = requireTenantId(options.tenantId || req);
   const mid = String(memberId || "").trim();
   if (!mid || !Number.isFinite(year))
     return { arrears: 0, current: 0 };
 
   const balanceKeys = await resolveMemberBalanceKeys(mid, req);
   const rows = await MaterializedBalance.find({
+    tenantId,
     memberId: { $in: balanceKeys },
     accountCode: "1400",
     year,
@@ -137,12 +142,14 @@ export async function buildMemberReceiptCreditEntries(
   memberId,
   amountCents,
   dateInput,
+  { tenantId } = {},
 ) {
+  const tid = requireTenantId(tenantId);
   const mid = String(memberId || "").trim();
   const cents = Math.max(0, Math.round(Number(amountCents) || 0));
   if (!mid || cents <= 0) return [];
 
-  const { arrears, current } = await memberOwed1400AllYears(mid);
+  const { arrears, current } = await memberOwed1400AllYears(mid, { tenantId: tid });
   const { toArrears1400, toCurrent1400, toAdvance2020 } =
     allocateMemberReceiptAmounts(cents, arrears, current);
 
@@ -184,17 +191,19 @@ export async function buildMemberApplyCreditEntries(
   memberId,
   amountCents,
   dateInput,
+  { tenantId } = {},
 ) {
+  const tid = requireTenantId(tenantId);
   const mid = String(memberId || "").trim();
   const requested = Math.max(0, Math.round(Number(amountCents) || 0));
   if (!mid || requested <= 0) return [];
 
   const year = new Date(dateInput).getFullYear();
-  const available = await member2020AdvanceCreditCents(mid, year);
+  const available = await member2020AdvanceCreditCents(mid, year, { tenantId: tid });
   const apply = Math.min(requested, available);
   if (apply <= 0) return [];
 
-  const { arrears, current } = await memberOwed1400AllYears(mid);
+  const { arrears, current } = await memberOwed1400AllYears(mid, { tenantId: tid });
   const owed = Math.max(0, arrears) + Math.max(0, current);
   if (owed <= 0) return [];
 
@@ -242,13 +251,15 @@ export async function buildMemberApplyCreditEntries(
  * @param {string} memberId
  * @param {number} year
  */
-export async function member2020AdvanceCreditCents(memberId, year) {
+export async function member2020AdvanceCreditCents(memberId, year, { tenantId } = {}) {
+  const tid = requireTenantId(tenantId);
   const mid = String(memberId || "").trim();
   if (!mid || !Number.isFinite(year)) return 0;
   // Always membership: this backs buildMemberApplyCreditEntries/buildMemberRefundDebitEntries,
   // membership-only flows - must not pull in a member-attendee's events/courses 2020 credit now
   // that MaterializedBalance splits rows by ledgerDomain (see materializedBalance.model.js).
   const rows = await MaterializedBalance.find({
+    tenantId: tid,
     memberId: mid,
     accountCode: "2020",
     bucket: "advance",
@@ -271,18 +282,20 @@ export async function buildMemberRefundDebitEntries(
   memberId,
   amountCents,
   dateInput,
+  { tenantId } = {},
 ) {
+  const tid = requireTenantId(tenantId);
   const mid = String(memberId || "").trim();
   const cents = Math.max(0, Math.round(Number(amountCents) || 0));
   if (!mid || cents <= 0) return [];
 
   const year = new Date(dateInput).getFullYear();
-  const advCredit = await member2020AdvanceCreditCents(mid, year);
+  const advCredit = await member2020AdvanceCreditCents(mid, year, { tenantId: tid });
   const d2020Adv = Math.min(cents, advCredit);
   const rem = cents - d2020Adv;
 
   const { arrears: owedArrears, current: owedCurrent } =
-    await memberOwed1400AllYears(mid);
+    await memberOwed1400AllYears(mid, { tenantId: tid });
   const { toCurrent1400, toArrears1400, overflowCurrent } =
     allocateMemberRefund1400Amounts(rem, owedCurrent, owedArrears);
   const totalCurrentDr = toCurrent1400 + overflowCurrent;

@@ -1,4 +1,5 @@
 import { asyncHandler } from "../helpers/asyncHandler.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import {
   createCreditNoteDraft,
   approveCreditNote,
@@ -30,7 +31,7 @@ export const createCreditNote = asyncHandler(async (req, res) => {
     notes,
     effectiveDate: date,
     createdBy: req.ctx?.userId,
-    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    tenantId: requireTenantId(req),
     profileId: req.body?.profileId,
   });
 
@@ -46,7 +47,7 @@ export const approveCreditNoteHandler = asyncHandler(async (req, res) => {
     docNo,
     approvedBy: req.ctx?.userId,
     userId: req.ctx?.userId,
-    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    tenantId: requireTenantId(req),
     profileId: req.body?.profileId,
   });
   res.success(result);
@@ -57,20 +58,21 @@ export const cancelCreditNoteHandler = asyncHandler(async (req, res) => {
   const cn = await cancelCreditNote({
     docNo,
     cancelledBy: req.ctx?.userId,
-    tenantId: req.ctx?.tenantId ?? req.tenantId,
+    tenantId: requireTenantId(req),
     profileId: req.body?.profileId,
   });
   res.success(cn);
 });
 
 export const getCreditNoteHandler = asyncHandler(async (req, res) => {
-  const cn = await getCreditNote(req.params.docNo);
+  const cn = await getCreditNote(req.params.docNo, requireTenantId(req));
   res.success(cn);
 });
 
 export const listCreditNotesHandler = asyncHandler(async (req, res) => {
   const { memberId, status, limit, skip } = req.query;
   const result = await listCreditNotes({
+    tenantId: requireTenantId(req),
     memberId,
     status,
     limit: limit ? parseInt(limit, 10) : 50,

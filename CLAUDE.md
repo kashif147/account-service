@@ -27,17 +27,24 @@ npm run unittest -- --testPathPattern=payments  # Run a single test file by patt
 npm run test:rabbitmq    # Manual RabbitMQ event testing via scripts/
 
 # Data / maintenance scripts (see scripts/)
-node scripts/rebuild-materialized-balances.js
+node scripts/rebuild-materialized-balances.js --tenant <id> [--apply]   # per tenant, dry-run by default
+node scripts/provision-tenant-coa.js --tenant=<id> [--apply]           # clone CoA template for a tenant
+node scripts/migrations/ledger-tenancy.js [--report|--backfill|--create-indexes|--drop-legacy-indexes] [--apply]
 node scripts/migrate-money-to-cents.js
 node scripts/relink-refund-gl-for-application.js
-node scripts/seed-events-income-coa.js / seed-cpd-events-income-coa.js
+node scripts/seed-events-income-coa.js / seed-cpd-events-income-coa.js --tenant=<id>
 node scripts/seed-grid-system-default-template.js
 
 # Production
 npm start                # node bin/account-service.js
 ```
 
-Tests live in `src/tests/` and match `**/*.test.js`. There is no lint script configured despite
+Tests live in `src/tests/` and match `**/*.test.js`. Some files use Node's built-in runner
+(`import test from "node:test"`: `phase2bStream2.*`, `tenantContext.adoption`,
+`testPublishEventRemoved`, `ledgerTenancy`) and must be run with
+`node --test --test-force-exit <file>` (jest cannot load them); the rest are jest.
+`ledgerTenancy.test.js` is the GL Tenant A/B suite: it starts a throwaway `mongod` from PATH
+(or uses `LEDGER_TEST_MONGO_URI`) and skips when neither is available. There is no lint script configured despite
 `eslint` being a devDependency — don't assume `npm run lint` exists.
 
 **Jest config is `jest.config.cjs`, not `.js`** — it must stay CommonJS. This service is

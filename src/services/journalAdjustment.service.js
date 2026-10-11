@@ -3,6 +3,7 @@ import { AppError } from "../errors/AppError.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
 import { publishFinanceAudit } from "./finance.audit.publisher.js";
 import { buildFinanceAuditSnapshot } from "../helpers/financeAuditActions.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 export async function createJournalAdjustmentDraft({
   docNo,
@@ -19,6 +20,7 @@ export async function createJournalAdjustmentDraft({
   createdBy,
   tenantId,
 }) {
+  tenantId = requireTenantId(tenantId);
   if (!Number.isInteger(amount) || amount <= 0) {
     throw AppError.badRequest("amount must be a positive integer (cents)");
   }
@@ -26,10 +28,11 @@ export async function createJournalAdjustmentDraft({
     throw AppError.badRequest("debitAccount and creditAccount must differ");
   }
 
-  const exists = await JournalAdjustment.findOne({ docNo }).lean();
+  const exists = await JournalAdjustment.findOne({ tenantId, docNo }).lean();
   if (exists) throw AppError.conflict(`Journal adjustment ${docNo} exists`);
 
   const adj = await JournalAdjustment.create({
+    tenantId,
     docNo,
     debitAccount,
     creditAccount,
@@ -45,7 +48,7 @@ export async function createJournalAdjustmentDraft({
     createdBy,
   });
 
-  if (tenantId) {
+  {
     await publishFinanceAudit({
       action: "JOURNAL_ADJUSTMENT_DRAFT_CREATED",
       tenantId,
@@ -74,7 +77,8 @@ export async function approveJournalAdjustment({
   userId,
   tenantId,
 }) {
-  const adj = await JournalAdjustment.findOne({ docNo });
+  tenantId = requireTenantId(tenantId);
+  const adj = await JournalAdjustment.findOne({ tenantId, docNo });
   if (!adj) throw AppError.notFound(`Journal adjustment ${docNo} not found`);
   if (adj.approvalStatus === "Approved") {
     return { adjustment: adj.toObject() };
@@ -120,14 +124,15 @@ export async function approveJournalAdjustment({
   return { adjustment: adj.toObject(), gl };
 }
 
-export async function listJournalAdjustments({ limit = 50, skip = 0 }) {
+export async function listJournalAdjustments({ tenantId, limit = 50, skip = 0 }) {
+  const q = { tenantId: requireTenantId(tenantId) };
   const [items, total] = await Promise.all([
-    JournalAdjustment.find()
+    JournalAdjustment.find(q)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean(),
-    JournalAdjustment.countDocuments(),
+    JournalAdjustment.countDocuments(q),
   ]);
   return { items, total };
 }

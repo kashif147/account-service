@@ -3,25 +3,28 @@ import Journal from "../models/journal.model.js";
 import Balance from "../models/balance.model.js";
 import CoA from "../models/coa.model.js";
 import { AppError } from "../errors/AppError.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
-export async function postJournal({ date, memberId, entries, ref, tags }) {
+// Legacy Journal/Balance path (no current importer); tenant-scoped like the GL path.
+export async function postJournal({ tenantId, date, memberId, entries, ref, tags }) {
+  tenantId = requireTenantId(tenantId);
   // Validate each CoA code exists
   for (const e of entries) {
-    const coa = await CoA.findOne({ code: e.coaCode });
+    const coa = await CoA.findOne({ tenantId, code: e.coaCode });
     if (!coa)
       throw AppError.badRequest(`Invalid CoA code ${e.coaCode}`, {
         coaCode: e.coaCode,
       });
   }
 
-  const journal = await Journal.create({ date, memberId, entries, ref, tags });
+  const journal = await Journal.create({ tenantId, date, memberId, entries, ref, tags });
 
   // Update balances
   for (const e of entries) {
     const multiplier = e.drCr === "Dr" ? 1 : -1;
 
     await Balance.updateOne(
-      { memberId, coaCode: e.coaCode, bucket: "Current" },
+      { tenantId, memberId, coaCode: e.coaCode, bucket: "Current" },
       {
         $inc: {
           debit: e.drCr === "Dr" ? e.amount : 0,

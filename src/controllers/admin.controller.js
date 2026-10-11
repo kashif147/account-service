@@ -1,13 +1,15 @@
 // src/controllers/admin.controller.js
 import CoA from "../models/coa.model.js";
 import { AppError } from "../errors/AppError.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import { logInfo } from "../middlewares/logger.mw.js";
 import { publishDomainEvent, EVENT_TYPES } from "../rabbitMQ/events.js";
 
 export async function listCoA(req, res, next) {
   try {
     logInfo("Listing Chart of Accounts");
-    const rows = await CoA.find({}).sort({ code: 1 }).lean();
+    // The tenant's own chart (CoA rows are tenant-owned).
+    const rows = await CoA.find({ tenantId: requireTenantId(req) }).sort({ code: 1 }).lean();
 
     // Publish CoA list accessed event
     await publishDomainEvent(

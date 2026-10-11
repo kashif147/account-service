@@ -3,6 +3,7 @@ import { getMemberTrackedAccountCodes } from "./coaAccountCodes.helper.js";
 import { simplifyMemberLedgerPresentations } from "./memberLedgerPresentation.js";
 import { attachPaymentIntentIdsToLedgerItems } from "./memberLedgerPaymentIntent.js";
 import { attachTxTypesToLedgerItems } from "./glTransactionTxType.js";
+import { requireTenantId } from "./tenantScope.js";
 import { listCreditNotes } from "../services/creditNote.service.js";
 import { isApplicationCreditClaimReceipt } from "./memberLastPayment.js";
 import {
@@ -211,10 +212,11 @@ async function fetchAllMemberFacingGl(q, maxDocuments) {
   };
 }
 
-async function appendDraftCreditNoteRows(rows, { memberId, includeDrafts }) {
+async function appendDraftCreditNoteRows(rows, { memberId, includeDrafts, tenantId }) {
   if (!includeDrafts) return rows;
   const limit = 1000;
   const { items } = await listCreditNotes({
+    tenantId,
     memberId: memberId || undefined,
     status: "Draft",
     limit,
@@ -257,6 +259,7 @@ export async function buildGeneralLedgerList({
   ledgerDomain,
   req,
 }) {
+  tenantId = requireTenantId(tenantId || req);
   const filterMember = String(memberId || "").trim();
   const q = await buildMemberFacingGlQuery({
     memberId: filterMember,
@@ -264,6 +267,7 @@ export async function buildGeneralLedgerList({
     from,
     to,
     req,
+    tenantId,
   });
   if (ledgerDomain === "events") {
     q["entries.ledgerDomain"] = "events";
@@ -284,10 +288,11 @@ export async function buildGeneralLedgerList({
   );
 
   const consolidated = consolidateCategoryChanges(rawItems);
-  const trackedCodes = await getMemberTrackedAccountCodes();
+  const trackedCodes = await getMemberTrackedAccountCodes(tenantId);
   const resolver = await createMemberIdentityResolver(consolidated, {
     seedMemberId: filterMember || undefined,
     req,
+    tenantId,
   });
 
   const byMember = new Map();
@@ -306,12 +311,9 @@ export async function buildGeneralLedgerList({
 
   const rowGroups = await Promise.all(
     [...byMember.entries()].map(async ([mid, items]) => {
-      let withPi = items;
-      if (tenantId) {
-        withPi = await attachPaymentIntentIdsToLedgerItems(items, tenantId);
-      }
+      const withPi = await attachPaymentIntentIdsToLedgerItems(items, tenantId);
       const withClaim = attachClaimLedgerReference(withPi);
-      const withTx = await attachTxTypesToLedgerItems(withClaim);
+      const withTx = await attachTxTypesToLedgerItems(withClaim, tenantId);
       const simplified = simplifyMemberLedgerPresentations(withTx, mid);
       return simplified.map((txn) => flattenGlRow(txn, mid, resolver));
     }),
@@ -324,6 +326,7 @@ export async function buildGeneralLedgerList({
   items = await appendDraftCreditNoteRows(items, {
     memberId: filterMember,
     includeDrafts,
+    tenantId,
   });
 
   items.sort((a, b) => {

@@ -568,7 +568,7 @@ test("H29-A resolveEventTenant: envelope wins, data fallback, mismatch flagged +
   assert.equal(resolveEventTenant({ data: {} }).tenantId, null);
 });
 
-test("H29-B current.updated with tenant only on the envelope prices in that tenant (Tenant A, data says B)", async () => {
+test("H29-B current.updated with tenant only on the envelope prices in that tenant (Tenant A)", async () => {
   const productFilters = [];
   const r1 = patch(Product, { findOne: (f) => (productFilters.push(f), q(null)) });
   const r2 = patch(CoA, { findOne: () => q({ code: "4000" }) });
@@ -577,12 +577,32 @@ test("H29-B current.updated with tenant only on the envelope prices in that tena
     await handleMemberCreated({
       eventId: "evt-1",
       tenantId: A,
-      data: { subscriptionId: "sub-1", memberId: "M-A", tenantId: B, subscriptionAttributes: { startDate: "2026-01-01" } },
+      data: { subscriptionId: "sub-1", memberId: "M-A", subscriptionAttributes: { startDate: "2026-01-01" } },
     });
     assert.equal(productFilters.length, 1);
     assert.equal(productFilters[0].tenantId, A);
   } finally {
     r1(); r2(); r3();
+  }
+});
+
+test("H29-B2 current.updated with envelope A but data B is quarantined, nothing priced or posted (Phase 2B-P2 B7)", async () => {
+  let touched = 0;
+  const r1 = patch(Product, { findOne: () => (touched++, q(null)) });
+  const r3 = patch(GLTransaction, { findOne: () => (touched++, q(null)) });
+  try {
+    await assert.rejects(
+      () =>
+        handleMemberCreated({
+          eventId: "evt-1",
+          tenantId: A,
+          data: { subscriptionId: "sub-1", memberId: "M-A", tenantId: B, subscriptionAttributes: { startDate: "2026-01-01" } },
+        }),
+      (e) => e.code === "EVENT_TENANT_MISMATCH",
+    );
+    assert.equal(touched, 0);
+  } finally {
+    r1(); r3();
   }
 });
 
@@ -602,7 +622,8 @@ test("H29-D invoice() forwards the trusted tenant to postBalancedJournal (source
   const src = fs.readFileSync(new URL("../controllers/journal.controller.js", import.meta.url), "utf8");
   const start = src.indexOf("export async function invoice(");
   const body = src.slice(start, src.indexOf("\n}\n", start));
-  assert.equal((body.match(/tenantId: req\.ctx\?\.tenantId \?\? req\.tenantId/g) || []).length, 2);
+  // Both invoice postings take the trusted tenant via requireTenantId(req) (Phase 2B-P2).
+  assert.equal((body.match(/tenantId: requireTenantId\(req\)/g) || []).length, 2);
 });
 
 // ======================= H-27 event-cancellation refunds =======================

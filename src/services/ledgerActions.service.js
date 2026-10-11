@@ -2,6 +2,7 @@ import CreditNote from "../models/creditNote.model.js";
 import { hasFinancePermission } from "../helpers/financePermissions.js";
 import { computeMemberFinanceSummary } from "./memberFinanceSummary.service.js";
 import { isWriteOffReversed } from "./memberCreditOperations.service.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 /**
  * Contextual ledger actions for member finance UI (permissions are resource names).
@@ -23,11 +24,12 @@ export async function getLedgerActionsForDocument(ctx) {
     permissions = [],
     year = new Date().getFullYear(),
   } = ctx;
+  const tenantId = requireTenantId(ctx.tenantId);
 
   const can = (resource, action) =>
     hasFinancePermission(permissions, resource, action);
 
-  const summary = await computeMemberFinanceSummary(memberId, year);
+  const summary = await computeMemberFinanceSummary(memberId, year, { tenantId });
   const actions = [];
 
   const add = (id, label, permission) => {
@@ -91,6 +93,7 @@ export async function getLedgerActionsForDocument(ctx) {
     const cnStatus = status || "Draft";
     if (docNo) {
       const cn = await CreditNote.findOne({
+        tenantId,
         $or: [{ docNo }, { glDocNo: docNo }],
       }).lean();
       const st = cn?.status || cnStatus;
@@ -115,7 +118,7 @@ export async function getLedgerActionsForDocument(ctx) {
   }
 
   if (dt === "writeoff" && docNo) {
-    const reversed = await isWriteOffReversed(docNo);
+    const reversed = await isWriteOffReversed(docNo, tenantId);
     if (!reversed) {
       add("reverse-writeoff", "Reverse Write-off", {
         resource: "accounts.journals",

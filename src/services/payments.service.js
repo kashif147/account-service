@@ -1,3 +1,4 @@
+import { requireTenantId } from "../helpers/tenantScope.js";
 import Payment, {
   zCreateIntent,
   zReconcile,
@@ -1866,6 +1867,7 @@ export async function reconcileStripeEvent(input, ctx) {
             await import("../models/glTransaction.model.js");
           const GLTransaction = GLTransactionModule.default;
           const existingJournal = await GLTransaction.findOne({
+            tenantId: retryPayment.tenantId,
             docNo: `RCP-${retryPayment._id}`,
           }).lean();
 
@@ -1913,6 +1915,7 @@ export async function reconcileStripeEvent(input, ctx) {
         await import("../models/glTransaction.model.js");
       const GLTransaction = GLTransactionModule.default;
       const existingJournal = await GLTransaction.findOne({
+        tenantId: doc.tenantId,
         docNo: `RCP-${doc._id}`,
       }).lean();
 
@@ -2028,12 +2031,16 @@ export async function reconcileStripeEvent(input, ctx) {
         await import("../models/glTransaction.model.js");
       const GLTransaction = GLTransactionModule.default;
       const existingJournal = await GLTransaction.findOne({
+        tenantId: existingPayment.tenantId,
         docNo: `RCP-${existingPayment._id}`,
       }).lean();
 
       if (!existingJournal) {
         // Try to get the full payment document
-        const fullPayment = await Payment.findById(existingPayment._id).lean();
+        const fullPayment = await Payment.findOne({
+          _id: existingPayment._id,
+          tenantId: existingPayment.tenantId,
+        }).lean();
         if (fullPayment) {
           try {
             // postJournalForPayment is defined in this file, call it directly
@@ -2143,6 +2150,7 @@ export async function reconcileStripeEvent(input, ctx) {
             await import("../models/glTransaction.model.js");
           const GLTransaction = GLTransactionModule.default;
           const existingJournal = await GLTransaction.findOne({
+            tenantId: doc.tenantId,
             docNo: `RCP-${doc._id}`,
           }).lean();
 
@@ -2224,6 +2232,7 @@ export async function reconcileStripeEvent(input, ctx) {
           await import("../models/glTransaction.model.js");
         const GLTransaction = GLTransactionModule.default;
         const existingJournal = await GLTransaction.findOne({
+          tenantId: finalRetry.tenantId,
           docNo: `RCP-${finalRetry._id}`,
         }).lean();
 
@@ -2543,6 +2552,7 @@ export async function createRefund(input, ctx) {
   const paymentLike = paymentLikeForRefund(parsed, payment);
   await assertRefundWithinCredit(refundAmount, paymentLike, journalYear, {
     linkedPaymentRemainingCents,
+    tenantId: ctx.tenantId,
   });
 
   const meta =
@@ -2708,6 +2718,11 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
   const GLTransaction = (await import("../models/glTransaction.model.js"))
     .default;
 
+  // The refund row is tenant-owned; a caller tenant that disagrees is refused.
+  const tenantId = requireTenantId(refundDoc?.tenantId || ctx?.tenantId);
+  if (ctx?.tenantId && String(ctx.tenantId) !== tenantId) {
+    throw AppError.notFound("Refund not found");
+  }
   const amount = refundDoc.amount;
   const clearingCode = clearingAccountCodeForRefund(refundDoc, payment);
 
@@ -2734,7 +2749,7 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
     null;
 
   if (!memberId && applicationId) {
-    memberId = await getClaimRecipientMemberIdForApplication(applicationId);
+    memberId = await getClaimRecipientMemberIdForApplication(applicationId, tenantId);
   }
 
   if (!memberId && !applicationId) {
@@ -2759,6 +2774,7 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
       memberId,
       amount,
       journalDate,
+      { tenantId },
     );
   } else {
     debitLines = [
@@ -2783,7 +2799,7 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
   const lines = [...debitLines, { accountCode: clearingCode, dc: "C", amount }];
 
   const docNo = `RFD-${refundDoc._id}`;
-  const existing = await GLTransaction.findOne({ docNo }).lean();
+  const existing = await GLTransaction.findOne({ tenantId, docNo }).lean();
   if (existing) return existing;
   const refNoStr =
     refundDoc.refNo != null ? String(refundDoc.refNo).trim() : "";
@@ -2801,7 +2817,7 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
   return postBalancedJournal({
     date: journalDate,
     userId: ctx?.userId,
-    tenantId: ctx?.tenantId,
+    tenantId,
     docType: "Refund",
     docNo,
     reference,
@@ -2811,10 +2827,16 @@ export async function postJournalForRefund(refundDoc, payment, ctx) {
   });
 }
 
+// The payment row's own tenant is authoritative for its ledger postings; a caller/webhook
+// context naming a different tenant is refused rather than overriding it.
 function paymentJournalCtx(payment, ctx = {}) {
+  const tenantId = requireTenantId(payment?.tenantId || ctx?.tenantId);
+  if (ctx?.tenantId && String(ctx.tenantId) !== tenantId) {
+    throw AppError.notFound("Payment not found");
+  }
   return {
     ...ctx,
-    tenantId: payment?.tenantId || ctx?.tenantId,
+    tenantId,
   };
 }
 
@@ -2922,6 +2944,7 @@ export async function postJournalForPayment(payment, ctx) {
       memberId,
       amount,
       date,
+      { tenantId: journalCtx.tenantId },
     );
   } else {
     creditEntries = [];

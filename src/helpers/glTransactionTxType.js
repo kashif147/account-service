@@ -1,4 +1,5 @@
 import CoA from "../models/coa.model.js";
+import { requireTenantId } from "./tenantScope.js";
 
 /** Cash / bank / clearing codes used to label how cash moved for receipts & refunds. */
 export const GL_TX_TYPE_ACCOUNT_CODES = [
@@ -65,11 +66,12 @@ export function resolveTxTypeAccountCode(txn) {
   return hits[0].accountCode;
 }
 
-export async function loadCoaTxTypeDescriptionMap(extraCodes = []) {
+export async function loadCoaTxTypeDescriptionMap(tenantId, extraCodes = []) {
   const codes = [
     ...new Set([...GL_TX_TYPE_ACCOUNT_CODES, ...extraCodes].filter(Boolean)),
   ];
   const rows = await CoA.find({
+    tenantId: requireTenantId(tenantId),
     code: { $in: codes },
   })
     .select({ code: 1, description: 1 })
@@ -79,14 +81,15 @@ export async function loadCoaTxTypeDescriptionMap(extraCodes = []) {
 
 /**
  * @param {object[]} items - ledger / statement rows
+ * @param {string} tenantId - trusted tenant (CoA rows are tenant-owned)
  * @returns {Promise<object[]>} same items with `txType: { code, description } | null`
  */
-export async function attachTxTypesToLedgerItems(items) {
+export async function attachTxTypesToLedgerItems(items, tenantId) {
   if (!Array.isArray(items) || items.length === 0) return items || [];
   const resolvedCodes = items
     .map((txn) => resolveTxTypeAccountCode(txn))
     .filter((c) => c != null);
-  const descMap = await loadCoaTxTypeDescriptionMap(resolvedCodes);
+  const descMap = await loadCoaTxTypeDescriptionMap(tenantId, resolvedCodes);
   return items.map((txn) => {
     const code = resolveTxTypeAccountCode(txn);
     const txType =

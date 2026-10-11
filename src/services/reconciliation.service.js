@@ -9,6 +9,7 @@ import {
 } from "../helpers/reconciliationEnrichment.js";
 import { publishFinanceAudit } from "./finance.audit.publisher.js";
 import { buildFinanceAuditSnapshot } from "../helpers/financeAuditActions.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 
 const CLEARING_CODES = ["1210", "1220", "1230", "1240", "1250"];
 
@@ -22,7 +23,7 @@ async function auditReconciliationChange({
   if (!tenantId || !rec) return;
   let memberId = null;
   if (rec.glDocNo) {
-    const gl = await GL.findOne({ docNo: rec.glDocNo })
+    const gl = await GL.findOne({ tenantId, docNo: rec.glDocNo })
       .select({ entries: 1, claimMemberId: 1 })
       .lean();
     memberId =
@@ -66,12 +67,14 @@ function normalizeClearingFilter(clearingAccountCode) {
 }
 
 export async function listReconciliationRecords({
+  tenantId,
   clearingAccountCode,
   reconciliationStatus,
   limit = 100,
   skip = 0,
 }) {
-  const q = {};
+  tenantId = requireTenantId(tenantId);
+  const q = { tenantId };
   const clearing = normalizeClearingFilter(clearingAccountCode);
   if (clearing) q.clearingAccountCode = clearing;
   if (reconciliationStatus) q.reconciliationStatus = reconciliationStatus;
@@ -85,20 +88,23 @@ export async function listReconciliationRecords({
     ReconciliationRecord.countDocuments(q),
   ]);
 
-  const items = await enrichReconciliationRecords(rawItems);
+  const items = await enrichReconciliationRecords(rawItems, tenantId);
   return { items, total, supportedClearingAccounts: CLEARING_CODES };
 }
 
 export async function seedReconciliationFromPendingGl({
+  tenantId,
   clearingAccountCode,
   createdBy,
 }) {
+  tenantId = requireTenantId(tenantId);
   const clearing = normalizeClearingFilter(clearingAccountCode);
   if (!clearing) {
     throw AppError.badRequest("clearingAccountCode is required for seed");
   }
 
   const pending = await GL.find({
+    tenantId,
     "settlement.status": "PENDING",
     "entries.accountCode": clearing,
   })
@@ -113,11 +119,13 @@ export async function seedReconciliationFromPendingGl({
     if (!clearingEntry) continue;
 
     const exists = await ReconciliationRecord.findOne({
+      tenantId,
       glDocNo: txn.docNo,
     }).lean();
     if (exists) continue;
 
     const rec = await ReconciliationRecord.create({
+      tenantId,
       clearingAccountCode: clearing,
       glDocNo: txn.docNo,
       amount: clearingEntry.amount,
@@ -136,11 +144,13 @@ export async function seedReconciliationFromPendingGl({
  * Import bank / payout lines as unmatched reconciliation rows.
  */
 export async function importBankReconciliationLines({
+  tenantId,
   clearingAccountCode,
   batchReference,
   lines,
   createdBy,
 }) {
+  tenantId = requireTenantId(tenantId);
   const clearing = normalizeClearingFilter(clearingAccountCode);
   if (!clearing) {
     throw AppError.badRequest("clearingAccountCode is required");
@@ -167,6 +177,7 @@ export async function importBankReconciliationLines({
     }
 
     const dup = await ReconciliationRecord.findOne({
+      tenantId,
       clearingAccountCode: clearing,
       externalReference,
       amount,
@@ -178,6 +189,7 @@ export async function importBankReconciliationLines({
     }
 
     const rec = await ReconciliationRecord.create({
+      tenantId,
       clearingAccountCode: clearing,
       externalReference,
       amount,
@@ -205,11 +217,13 @@ export async function importBankReconciliationLines({
  * Propose or apply auto-matches for unmatched bank / GL rows.
  */
 export async function runAutoMatchReconciliation({
+  tenantId,
   clearingAccountCode,
   matchedBy,
   apply = true,
 }) {
-  const q = { reconciliationStatus: "unmatched" };
+  tenantId = requireTenantId(tenantId);
+  const q = { tenantId, reconciliationStatus: "unmatched" };
   const clearing = normalizeClearingFilter(clearingAccountCode);
   if (clearing) q.clearingAccountCode = clearing;
 
@@ -224,12 +238,14 @@ export async function runAutoMatchReconciliation({
         externalReference: rec.externalReference,
         amount: rec.amount,
         clearingAccountCode: rec.clearingAccountCode,
+        tenantId,
       });
     } else if (rec.glDocNo) {
-      const gl = await GL.findOne({ docNo: rec.glDocNo }).lean();
+      const gl = await GL.findOne({ tenantId, docNo: rec.glDocNo }).lean();
       const payoutId = gl?.settlement?.payoutId;
       if (payoutId) {
         const bankRec = await ReconciliationRecord.findOne({
+          tenantId,
           clearingAccountCode: rec.clearingAccountCode,
           externalReference: payoutId,
           reconciliationStatus: "unmatched",
@@ -260,7 +276,7 @@ export async function runAutoMatchReconciliation({
     };
 
     if (apply) {
-      await ReconciliationRecord.findByIdAndUpdate(rec._id, {
+      await ReconciliationRecord.findOneAndUpdate({ _id: rec._id, tenantId }, {
         reconciliationStatus: "auto_matched",
         matchedGlDocNo: match.glDocNo,
         matchedBy,
@@ -284,8 +300,13 @@ export async function manualMatchReconciliation({
   matchedBy,
   tenantId,
 }) {
-  const rec = await ReconciliationRecord.findById(recordId);
+  tenantId = requireTenantId(tenantId);
+  const rec = await ReconciliationRecord.findOne({ _id: recordId, tenantId });
   if (!rec) throw AppError.notFound("Reconciliation record not found");
+  const matched = await GL.findOne({ tenantId, docNo: matchedGlDocNo })
+    .select({ _id: 1 })
+    .lean();
+  if (!matched) throw AppError.notFound("GL document not found");
 
   rec.reconciliationStatus = "manual_matched";
   rec.matchedGlDocNo = matchedGlDocNo;
@@ -309,7 +330,8 @@ export async function moveToSuspense({
   matchedBy,
   tenantId,
 }) {
-  const rec = await ReconciliationRecord.findById(recordId);
+  tenantId = requireTenantId(tenantId);
+  const rec = await ReconciliationRecord.findOne({ _id: recordId, tenantId });
   if (!rec) throw AppError.notFound("Reconciliation record not found");
 
   rec.reconciliationStatus = "suspense";
@@ -329,7 +351,8 @@ export async function moveToSuspense({
 }
 
 export async function markReconciliationSettled({ recordId, tenantId, actorId }) {
-  const rec = await ReconciliationRecord.findById(recordId);
+  tenantId = requireTenantId(tenantId);
+  const rec = await ReconciliationRecord.findOne({ _id: recordId, tenantId });
   if (!rec) throw AppError.notFound("Reconciliation record not found");
 
   rec.reconciliationStatus = "settled";
@@ -339,7 +362,7 @@ export async function markReconciliationSettled({ recordId, tenantId, actorId })
 
   if (rec.glDocNo) {
     await GL.updateOne(
-      { docNo: rec.glDocNo },
+      { tenantId, docNo: rec.glDocNo },
       {
         $set: {
           "settlement.status": "SETTLED",
@@ -362,7 +385,8 @@ export async function markReconciliationSettled({ recordId, tenantId, actorId })
 /**
  * Clearing account dashboard: unreconciled counts and open amounts per rail.
  */
-export async function getReconciliationDashboard() {
+export async function getReconciliationDashboard({ tenantId } = {}) {
+  tenantId = requireTenantId(tenantId);
   const accounts = await Promise.all(
     CLEARING_CODES.map(async (clearingAccountCode) => {
       const [
@@ -374,32 +398,39 @@ export async function getReconciliationDashboard() {
         pendingGl,
       ] = await Promise.all([
         ReconciliationRecord.countDocuments({
+          tenantId,
           clearingAccountCode,
           reconciliationStatus: "unmatched",
         }),
         ReconciliationRecord.countDocuments({
+          tenantId,
           clearingAccountCode,
           reconciliationStatus: "auto_matched",
         }),
         ReconciliationRecord.countDocuments({
+          tenantId,
           clearingAccountCode,
           reconciliationStatus: "manual_matched",
         }),
         ReconciliationRecord.countDocuments({
+          tenantId,
           clearingAccountCode,
           reconciliationStatus: "suspense",
         }),
         ReconciliationRecord.countDocuments({
+          tenantId,
           clearingAccountCode,
           reconciliationStatus: "settled",
         }),
         GL.countDocuments({
+          tenantId,
           "settlement.status": "PENDING",
           "entries.accountCode": clearingAccountCode,
         }),
       ]);
 
       const openRecords = await ReconciliationRecord.find({
+        tenantId,
         clearingAccountCode,
         reconciliationStatus: {
           $in: ["unmatched", "auto_matched", "manual_matched", "suspense"],
@@ -414,6 +445,7 @@ export async function getReconciliationDashboard() {
       );
 
       const lastSettled = await ReconciliationRecord.findOne({
+        tenantId,
         clearingAccountCode,
         reconciliationStatus: "settled",
       })

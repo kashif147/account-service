@@ -7,7 +7,7 @@
  * categories.
  *
  * Usage:
- *   node scripts/seed-events-income-coa.js --env=staging
+ *   node scripts/seed-events-income-coa.js --env=staging --tenant=<tenantId>
  */
 
 import fs from "fs";
@@ -25,7 +25,7 @@ function parseArgs() {
     const hit = args.find((a) => a.startsWith(`${prefix}=`));
     return hit ? hit.slice(prefix.length + 1).trim() : "";
   };
-  return { envName: get("--env") || "staging" };
+  return { envName: get("--env") || "staging", tenantId: get("--tenant") };
 }
 
 function loadEnv(envName) {
@@ -50,8 +50,13 @@ const EVENTS_INCOME_ROW = {
 };
 
 async function main() {
-  const { envName } = parseArgs();
+  const { envName, tenantId } = parseArgs();
   loadEnv(envName);
+  // CoA rows are tenant-owned (prefer scripts/provision-tenant-coa.js for a new tenant).
+  if (!tenantId) {
+    console.error("--tenant=<tenantId> is required (CoA rows are tenant-owned)");
+    process.exit(1);
+  }
 
   const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!mongoUri) {
@@ -63,8 +68,8 @@ async function main() {
   console.log("Connected to MongoDB");
 
   const result = await CoA.findOneAndUpdate(
-    { code: EVENTS_INCOME_ROW.code },
-    { $setOnInsert: EVENTS_INCOME_ROW },
+    { tenantId, code: EVENTS_INCOME_ROW.code },
+    { $setOnInsert: { ...EVENTS_INCOME_ROW, tenantId } },
     { upsert: true, new: true },
   );
   console.log("CoA row ensured:", result.toObject());

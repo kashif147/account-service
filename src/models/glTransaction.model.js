@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { tenantScopedPlugin } from "./plugins/tenantScoped.plugin.js";
 
 const EntrySchema = new mongoose.Schema(
   {
@@ -25,7 +26,7 @@ const GLSchema = new mongoose.Schema(
     date: { type: Date, required: true },
     userId: { type: String, index: true },
     docType: { type: String, required: true }, // Invoice, CreditNote, Receipt, Claim, Refund, WriteOff, Adjustment, etc.
-    docNo: { type: String, required: true, unique: true },
+    docNo: { type: String, required: true },
     reference: { type: String },
     memo: { type: String },
     /** App id for claim / traceability; does not replace entry-level memberId for 2020 rollups. */
@@ -52,17 +53,20 @@ const GLSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Helpful compound indexes for reporting and lookups
-GLSchema.index({ "entries.memberId": 1, date: -1 });
-GLSchema.index({ "entries.periodBucket": 1, date: -1 });
-GLSchema.index({ "entries.adjSubType": 1, date: -1 });
-GLSchema.index({ "entries.accountCode": 1, date: -1 });
-GLSchema.index({ docType: 1, date: -1 });
+// docNo is unique per tenant (also the posting idempotency key); the legacy global docNo_1
+// index is dropped by scripts/migrations/ledger-tenancy.js.
+GLSchema.index({ tenantId: 1, docNo: 1 }, { unique: true });
 
-// Fast docNo fetch (already unique)
-//GLSchema.index({ docNo: 1 }, { unique: true });
+// Reporting/lookup indexes, tenant-leading.
+GLSchema.index({ tenantId: 1, "entries.memberId": 1, date: -1 });
+GLSchema.index({ tenantId: 1, "entries.periodBucket": 1, date: -1 });
+GLSchema.index({ tenantId: 1, "entries.adjSubType": 1, date: -1 });
+GLSchema.index({ tenantId: 1, "entries.accountCode": 1, date: -1 });
+GLSchema.index({ tenantId: 1, docType: 1, date: -1 });
 
 // Optional: text index on memo/category for search
 GLSchema.index({ memo: "text", "entries.categoryName": "text" });
+
+GLSchema.plugin(tenantScopedPlugin, { modelName: "GLTransaction" });
 
 export default mongoose.model("GLTransaction", GLSchema);

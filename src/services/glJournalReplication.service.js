@@ -1,4 +1,5 @@
 import GL from "../models/glTransaction.model.js";
+import { requireTenantId } from "../helpers/tenantScope.js";
 import { AppError } from "../errors/AppError.js";
 
 const REPLICATED_ACCOUNTS = new Set(["1400", "2020"]);
@@ -60,17 +61,23 @@ function flattenGlDocument(txn, tenantId, eventIdPrefix) {
  */
 export async function glJournalReplicationFeed(req, res, next) {
   try {
-    const tenantId = req.tenantId || req.ctx?.tenantId;
-    if (!tenantId) {
-      throw AppError.badRequest("Tenant context required");
-    }
+    const tenantId = requireTenantId(req);
 
     const limit = Math.min(Math.max(Number(req.body?.limit) || 200, 1), 500);
     const cursor = req.body?.cursor ? String(req.body.cursor).trim() : null;
 
+    // Only the caller's tenant: rows are re-stamped with tenantId downstream, so an
+    // unscoped feed would relabel other tenants' ledger lines as the caller's.
+    // $elemMatch: on an array, "entries.memberId": { $ne: null } rejects every document
+    // that has any entry without a memberId (i.e. nearly all of them).
     const query = {
-      "entries.accountCode": { $in: ["1400", "2020"] },
-      "entries.memberId": { $exists: true, $ne: null },
+      tenantId,
+      entries: {
+        $elemMatch: {
+          accountCode: { $in: ["1400", "2020"] },
+          memberId: { $exists: true, $nin: [null, ""] },
+        },
+      },
     };
     if (cursor) {
       query._id = { $gt: cursor };
