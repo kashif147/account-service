@@ -36,22 +36,18 @@ export function hasFinancePermission(permissions, resource, action) {
   return list.some((p) => perms.includes(p));
 }
 
+/**
+ * Permissions from the authenticated identity only (set by the auth middleware from the
+ * verified JWT / gateway headers). Never from the query string or body: a client must
+ * not be able to grant itself a permission.
+ */
 export function collectRequestPermissions(req) {
   const fromUser = req.user?.permissions;
   const fromCtx = req.ctx?.permissions;
   const fromReq = req.permissions;
-  const fromQuery = req.query?.permissions;
   const merged = [];
   for (const src of [fromUser, fromCtx, fromReq]) {
     if (Array.isArray(src)) merged.push(...src);
-  }
-  if (typeof fromQuery === "string" && fromQuery.trim()) {
-    merged.push(
-      ...fromQuery
-        .split(",")
-        .map((p) => p.trim())
-        .filter(Boolean),
-    );
   }
   return [...new Set(merged)];
 }
