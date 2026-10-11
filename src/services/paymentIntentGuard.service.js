@@ -1,19 +1,23 @@
-// Server-side authorization of POST /api/payments/intents inputs (H-11).
+// Server-side authorization of POST /api/payments/intents inputs (H-11, corrected in
+// Phase 2B-PARALLEL-2). The client may calculate or choose an amount; the backend checks
+// that the submitted amount is allowed by current server-side rules and financial state.
 //
-// Authoritative amount sources, by payment kind:
-//  - Membership APPLICATION payments (applicationId, no membership number yet — portal
-//    SubscriptionWrapper): the synced product catalogue (Product/Pricing, kept current by
-//    product.sync.listener) resolved through getMembershipPricing(), the same resolver the
-//    approval listener uses to post the invoice. Accepted amounts are the annual fee or the
-//    quarterly instalment (Math.round(annual / 4)) — exactly what the portal offers.
-//  - Member payments ON ACCOUNT (memberId = caller's own membership number, no
-//    applicationId — portal dashboard "pay now"): the payer chooses how much to pay towards
-//    their own balance by design; the receipt posts only what Stripe actually captures, so
-//    a small amount cannot mark anything as paid. Ownership of memberId is enforced.
-//  - Event/course registrations: price lives in events-service (price-quote). events-service
-//    re-verifies amount/currency against GET /payments/by-stripe/:id before attaching the
-//    intent to a Registration, and these intents are manual-capture, captured only at CRM
-//    approval. Not re-priced here (account-service has no event pricing).
+//  - APPLICATION payments (applicationId, no membership number yet; portal
+//    SubscriptionWrapper): application -> payment -> approval -> member creation. The
+//    application is loaded from portal-service AS THE CALLER under the trusted tenant
+//    (proves it exists in this tenant and belongs to the caller). Its OWN subscription
+//    record supplies the membership category and payment type (never the client
+//    metadata). Allowed amounts mirror the portal's existing rule: Credit Card -> the
+//    annual catalogue fee; any other payment type -> the first-quarter instalment
+//    (Math.round(annual / 4)) or the full annual fee. The annual fee comes from the synced
+//    catalogue via getMembershipPricing(), the same resolver the approval listener uses.
+//  - MEMBER payments ON ACCOUNT (memberId = the caller's own membership number): the
+//    member chooses full or partial payment of their CURRENT outstanding balance
+//    (MaterializedBalance 1400 arrears + current, this tenant): 0 < amount <= outstanding.
+//  - Event/course registrations: price lives in events-service, which re-verifies amount
+//    and currency before attaching the intent; manual capture at CRM approval. Unchanged.
+//  - Any other portal payment (no applicationId and no memberId) is rejected: it could not
+//    be reconciled to anything.
 //
 // Caller scope: the checks apply to user-originated calls that are not CRM staff (PORTAL
 // members and any unknown user type). Genuine S2S calls (x-internal-request, no user JWT)
@@ -38,6 +42,20 @@ async function defaultFetchMyPortalProfile(req) {
   const mod = await import("./profileUpstream.client.js");
   return mod.fetchMyPortalProfile(req);
 }
+
+async function defaultFetchMyApplicationSubscription(req, applicationId) {
+  const mod = await import("./portalUpstream.client.js");
+  return mod.fetchMyApplicationSubscription(req, applicationId);
+}
+
+/** Current outstanding membership AR (cents) for the member in this tenant. */
+async function defaultGetMemberOutstandingCents(memberId, tenantId) {
+  const mod = await import("../helpers/paymentReceiptAllocation.js");
+  const { arrears, current } = await mod.memberOwed1400AllYears(memberId, { tenantId });
+  return Math.max(0, arrears || 0) + Math.max(0, current || 0);
+}
+
+const CARD_PAYMENT_TYPE = "credit card";
 
 /**
  * @param {object} p
@@ -74,6 +92,10 @@ export async function assertIntentAuthorized(
     deps.getMembershipPricing || defaultGetMembershipPricing;
   const fetchMyPortalProfile =
     deps.fetchMyPortalProfile || defaultFetchMyPortalProfile;
+  const fetchMyApplicationSubscription =
+    deps.fetchMyApplicationSubscription || defaultFetchMyApplicationSubscription;
+  const getMemberOutstandingCents =
+    deps.getMemberOutstandingCents || defaultGetMemberOutstandingCents;
 
   // 1) Ownership of member/profile identifiers (portal callers only ever pay for themselves).
   const wantMember = norm(memberId);
@@ -95,15 +117,29 @@ export async function assertIntentAuthorized(
     }
   }
 
-  // 2) Amount for membership application payments comes from the catalogue.
-  if (isApplicationPayment && !isEventRegistrationPayment) {
-    const categoryName = norm(
-      metadata.membershipCategory || metadata.membership_category,
-    );
-    if (!categoryName) {
-      throw AppError.badRequest(
-        "membershipCategory is required to price an application payment",
+  if (!Number.isInteger(parsed.amount) || parsed.amount <= 0) {
+    throw AppError.badRequest("amount must be a positive integer (minor units)");
+  }
+
+  // Events/courses: re-verified by events-service (see header). Unchanged.
+  if (isEventRegistrationPayment) return { checked: true, kind: "event" };
+
+  // 2) Application payment: the caller's own application in this tenant.
+  if (isApplicationPayment) {
+    let app;
+    try {
+      app = await fetchMyApplicationSubscription(caller.req, applicationId);
+    } catch (err) {
+      if (err?.name === "UpstreamNotFoundError") {
+        throw AppError.notFound("Application not found");
+      }
+      throw AppError.serviceUnavailable(
+        "Unable to verify the application for this payment. Please try again.",
       );
+    }
+    const categoryName = norm(app?.membershipCategory);
+    if (!categoryName) {
+      throw AppError.badRequest("The application has no membership category to price");
     }
     const today = new Date().toISOString().split("T")[0];
     let annualFee = null;
@@ -124,14 +160,37 @@ export async function assertIntentAuthorized(
         "No payable catalogue price for this membership category",
       );
     }
-    const allowed = new Set([annualFee, Math.round(annualFee / 4)]);
-    if (!allowed.has(parsed.amount)) {
+    const isCard = norm(app?.paymentType).toLowerCase() === CARD_PAYMENT_TYPE;
+    const allowed = isCard ? [annualFee] : [Math.round(annualFee / 4), annualFee];
+    if (!allowed.includes(parsed.amount)) {
       throw AppError.badRequest(
-        "Payment amount does not match the membership fee for this category",
+        "Payment amount does not match the membership fee for this application",
       );
     }
-    return { checked: true, annualFee, allowed: [...allowed] };
+    // Record the authoritative category on the intent, never the client's value.
+    metadata.membershipCategory = categoryName;
+    return { checked: true, kind: "application", annualFee, allowed, paymentType: app?.paymentType || null };
   }
 
-  return { checked: true };
+  // 3) Member payment on account: full or partial payment of the current outstanding balance.
+  if (!wantMember) {
+    throw AppError.badRequest("memberId or applicationId is required for this payment");
+  }
+  let outstandingCents;
+  try {
+    outstandingCents = await getMemberOutstandingCents(wantMember, tenantId);
+  } catch {
+    throw AppError.serviceUnavailable(
+      "Unable to read the outstanding balance for this payment. Please try again.",
+    );
+  }
+  if (!Number.isFinite(outstandingCents) || outstandingCents <= 0) {
+    throw AppError.badRequest("There is no outstanding balance to pay");
+  }
+  if (parsed.amount > outstandingCents) {
+    throw AppError.badRequest("Payment amount exceeds the outstanding balance", {
+      outstandingCents,
+    });
+  }
+  return { checked: true, kind: "member", outstandingCents };
 }

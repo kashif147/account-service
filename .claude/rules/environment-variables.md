@@ -9,6 +9,7 @@
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Stripe API + webhook signature verification |
 | `PORTAL_BASE_URL` | Base URL for Stripe checkout success/cancel redirects |
 | `PROFILE_SERVICE_URL`, `SUBSCRIPTION_SERVICE_URL` | Upstream service URLs for `profileUpstream.client.js` etc. |
+| `PORTAL_SERVICE_URL` | portal-service base URL (`portalUpstream.client.js`): portal application payments are verified against the caller's own application (`GET /api/subscription-details/:applicationId`). Required for portal application payments; DEV value `http://portal-service:4001`. |
 | `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`, `AZURE_STORAGE_CONTAINER` | Azure Blob storage for `azure.blob.service.js` |
 | `MONGODB_MAX_POOL_SIZE` / `MONGODB_MIN_POOL_SIZE` / `MONGODB_MAX_IDLE_TIME_MS` | Mongo pool sizing (defaults: 150 / 20 / 30000) |
 | `GLOBAL_DB_OPERATIONS_LIMIT` | Global p-limit concurrency (default: 120, see `background-jobs.md`) |

@@ -17,6 +17,7 @@ process.env.LOG_ROOT =
 process.env.NODE_ENV = process.env.NODE_ENV || "test";
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "sk_test_dummy_phase2b";
 process.env.PROFILE_SERVICE_URL = "http://profile.invalid";
+process.env.PORTAL_SERVICE_URL = "http://portal.invalid";
 
 const { idempotency, clearIdempotencyCache, getIdempotencyCacheSize } = await import(
   "../middlewares/idempotency.js"
@@ -27,6 +28,7 @@ const { default: Payment } = await import("../models/payment.model.js");
 const { default: Product } = await import("../models/product.model.js");
 const { default: Pricing } = await import("../models/pricing.model.js");
 const { default: CoA } = await import("../models/coa.model.js");
+const { default: MaterializedBalance } = await import("../models/materializedBalance.model.js");
 const { default: GLTransaction } = await import("../models/glTransaction.model.js");
 const { default: BatchDetail } = await import("../models/batch.detail.model.js");
 const { default: User } = await import("../models/user.model.js");
@@ -237,9 +239,14 @@ test("C06-E reconcileStripeEvent with scopeToTenantId pins the lookup and refuse
 
 // ======================= H-11 intent pricing / ownership =======================
 
+// Corrected contract (Phase 2B-P2): application category/payment type come from the caller's
+// own application record (portal-service); member payments are capped at the outstanding
+// balance. Full matrix: paymentContract.test.js.
 const pricingDeps = (annualFee = 32600, mine = { profileId: "prof-A", membershipNumber: "M-A" }) => ({
   getMembershipPricing: async ({ tenantId }) => ({ annualFee: tenantId ? annualFee : null }),
   fetchMyPortalProfile: async () => mine,
+  fetchMyApplicationSubscription: async () => ({ membershipCategory: "General All Grades", paymentType: "Direct Debit" }),
+  getMemberOutstandingCents: async () => 10000,
 });
 const PORTAL = { userType: "PORTAL", internalRequest: false, req: {} };
 
@@ -366,6 +373,15 @@ test("H11-F CRM users and internal S2S calls are unchanged (no re-pricing)", asy
 });
 
 test("H11-G createIntent (real) rejects a 1-cent portal application payment before Stripe/Payment, using Tenant A catalogue", async () => {
+  const origFetch = globalThis.fetch;
+  const portalTenants = [];
+  globalThis.fetch = async (url, opts) => {
+    portalTenants.push(opts?.headers?.["x-tenant-id"]);
+    return new Response(
+      JSON.stringify({ status: "success", data: { applicationId: "app-1", subscriptionDetails: { membershipCategory: "General All Grades", paymentType: "Credit Card" } } }),
+      { status: 200 },
+    );
+  };
   const productFilters = [];
   const r1 = patch(Product, { findOne: (f) => (productFilters.push(f), q({ _id: "prod-1", code: "GAG", name: "General All Grades" })) });
   const r2 = patch(Pricing, { findOne: () => q({ _id: "pr-1", price: 32600, isActive: true }) });
@@ -376,21 +392,23 @@ test("H11-G createIntent (real) rejects a 1-cent portal application payment befo
       payments.createIntent(
         { purpose: "subscriptionFee", amount: 1, currency: "eur", metadata: { applicationId: "app-1", membershipCategory: "General All Grades", tenantId: B } },
         { tenantId: A, userId: "member-1" },
-        { userType: "PORTAL", internalRequest: false, req: { headers: {} } },
+        { userType: "PORTAL", internalRequest: false, req: { headers: {}, ctx: { tenantId: A }, tenantId: A } },
       ),
       (e) => e.status === 400,
     );
     assert.equal(productFilters[0].tenantId, A, "catalogue resolved in the trusted tenant, not metadata tenant");
+    assert.ok(portalTenants.every((t) => t === A), "application looked up under the trusted tenant");
     await assert.rejects(
       payments.createIntent(
         { purpose: "subscriptionFee", amount: 32600, currency: "eur", metadata: { applicationId: "app-1", membershipCategory: "General All Grades" } },
         { tenantId: A, userId: "member-1" },
-        { userType: "PORTAL", internalRequest: false, req: { headers: {} } },
+        { userType: "PORTAL", internalRequest: false, req: { headers: {}, ctx: { tenantId: A }, tenantId: A } },
       ),
       /STOP_AFTER_GUARD/,
       "correct price passes the guard and proceeds to the existing flow",
     );
   } finally {
+    globalThis.fetch = origFetch;
     r1(); r2(); r3(); r4();
   }
 });
@@ -403,6 +421,9 @@ test("H11-H createIntent (real) rejects a portal payment against another member 
     return new Response(JSON.stringify({ status: "success", data: { profileId: "prof-A", membershipNumber: "M-A" } }), { status: 200 });
   };
   const r4 = patch(Payment, { findOne: () => { throw new Error("STOP_AFTER_GUARD"); } });
+  const r5 = patch(MaterializedBalance, {
+    find: (f) => q(f.tenantId === A ? [{ memberId: "M-A", accountCode: "1400", bucket: "current", year: 2026, amount: 10000 }] : []),
+  });
   try {
     await assert.rejects(
       payments.createIntent(
@@ -424,7 +445,7 @@ test("H11-H createIntent (real) rejects a portal payment against another member 
     );
   } finally {
     globalThis.fetch = origFetch;
-    r4();
+    r4(); r5();
   }
 });
 
