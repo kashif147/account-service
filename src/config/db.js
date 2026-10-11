@@ -6,7 +6,8 @@ import Refund from "../models/refund.model.js";
 export async function connectDB(
   uri = process.env.MONGODB_URI ||
     process.env.MONGO_URI ||
-    "mongodb://localhost:27017/account-service"
+    "mongodb://localhost:27017/account-service",
+  { autoIndex = process.env.NODE_ENV !== "production" } = {},
 ) {
   // Parse pool size from environment variables with sensible defaults
   const maxPoolSize = parseInt(process.env.MONGODB_MAX_POOL_SIZE || "150", 10);
@@ -15,7 +16,7 @@ export async function connectDB(
 
   await mongoose.connect(uri, {
     serverSelectionTimeoutMS: 10000,
-    autoIndex: process.env.NODE_ENV !== "production",
+    autoIndex,
     maxPoolSize,
     minPoolSize,
     maxIdleTimeMS,
