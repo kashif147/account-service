@@ -5,10 +5,10 @@ import {
   consumer,
   EVENT_TYPES as MIDDLEWARE_EVENT_TYPES,
   shutdown,
-  connectionManager,
 } from "@projectShell/rabbitmq-middleware";
 
 import logger from "../config/logger.js";
+import { assertExchangeBindable } from "./exchangeGuard.js";
 import bizLogger from "../config/bizLogger.js";
 import { createRabbitStructuredLogHandlers } from "@projectShell/logging-lib";
 
@@ -137,23 +137,9 @@ export async function setupConsumers() {
       messageTtl: 3600000, // 1 hour
     });
 
-    // Ensure user.events exchange exists on consumer channel before binding
-    try {
-      const consumerChannel = await connectionManager.getNamedChannel(
-        "consumer",
-        10
-      );
-      await consumerChannel.assertExchange("user.events", "topic", {
-        durable: true,
-      });
-    } catch (error) {
-      logger.warn(
-        { error: error.message },
-        "Failed to assert user.events exchange, will attempt binding anyway"
-      );
-    }
 
     try {
+      await assertExchangeBindable("user.events");
       await consumer.bindQueue(USER_QUEUE, "user.events", [
         "user.crm.created.v1",
         "user.crm.updated.v1",
@@ -205,23 +191,9 @@ export async function setupConsumers() {
       messageTtl: 3600000, // 1 hour
     });
 
-    // Ensure application.events exchange exists on consumer channel before binding
-    try {
-      const consumerChannel = await connectionManager.getNamedChannel(
-        "consumer",
-        10
-      );
-      await consumerChannel.assertExchange("application.events", "topic", {
-        durable: true,
-      });
-    } catch (error) {
-      logger.warn(
-        { error: error.message },
-        "Failed to assert application.events exchange, will attempt binding anyway"
-      );
-    }
 
     try {
+      await assertExchangeBindable("application.events");
       await consumer.bindQueue(APPLICATION_QUEUE, "application.events", [
         "applications.review.processed.v1",
       ]);
@@ -270,24 +242,9 @@ export async function setupConsumers() {
       messageTtl: 3600000, // 1 hour
     });
 
-    // Ensure product.events exchange exists on consumer channel before binding
-    try {
-      const consumerChannel = await connectionManager.getNamedChannel(
-        "consumer",
-        10
-      );
-      await consumerChannel.assertExchange("product.events", "topic", {
-        durable: true,
-      });
-      logger.info("Product.events exchange asserted on consumer channel");
-    } catch (error) {
-      logger.warn(
-        { error: error.message },
-        "Failed to assert product.events exchange, will attempt binding anyway"
-      );
-    }
 
     try {
+      await assertExchangeBindable("product.events");
       await consumer.bindQueue(PRODUCT_QUEUE, "product.events", [
         "product.type.created.v1",
         "product.type.updated.v1",
@@ -363,24 +320,9 @@ export async function setupConsumers() {
       messageTtl: 3600000, // 1 hour
     });
 
-    // Ensure membership.events exchange exists on consumer channel before binding
-    try {
-      const consumerChannel = await connectionManager.getNamedChannel(
-        "consumer",
-        10
-      );
-      await consumerChannel.assertExchange("membership.events", "topic", {
-        durable: true,
-      });
-      logger.info("Membership.events exchange asserted on consumer channel");
-    } catch (error) {
-      logger.warn(
-        { error: error.message },
-        "Failed to assert membership.events exchange, will attempt binding anyway"
-      );
-    }
 
     try {
+      await assertExchangeBindable("membership.events");
       await consumer.bindQueue(MEMBERSHIP_QUEUE, "membership.events", [
         "members.subscription.current.updated.v1",
         "members.subscription.category.changed.v1",
@@ -458,14 +400,9 @@ export async function setupConsumers() {
 
     await consumer.createQueue(EVENTS_QUEUE, { durable: true, messageTtl: 3600000 });
 
-    try {
-      const consumerChannel = await connectionManager.getNamedChannel("consumer", 10);
-      await consumerChannel.assertExchange("events.events", "topic", { durable: true });
-    } catch (error) {
-      logger.warn({ error: error.message }, "Failed to assert events.events exchange, will attempt binding anyway");
-    }
 
     try {
+      await assertExchangeBindable("events.events");
       await consumer.bindQueue(EVENTS_QUEUE, "events.events", ["events.event.cancelled.v1"]);
 
       consumer.registerHandler("events.event.cancelled.v1", async (payload) => {
@@ -483,26 +420,13 @@ export async function setupConsumers() {
 
     // Batch detail processing (batch.events exchange)
     const BATCH_PROCESS_QUEUE = "accounts.batch.process";
-    try {
-      const consumerChannel = await connectionManager.getNamedChannel(
-        "consumer",
-        10
-      );
-      await consumerChannel.assertExchange("batch.events", "topic", {
-        durable: true,
-      });
-    } catch (error) {
-      logger.warn(
-        { error: error.message },
-        "Failed to assert batch.events exchange"
-      );
-    }
 
     await consumer.createQueue(BATCH_PROCESS_QUEUE, {
       durable: true,
       messageTtl: 86400000,
     });
 
+    await assertExchangeBindable("batch.events");
     await consumer.bindQueue(BATCH_PROCESS_QUEUE, "batch.events", [
       BATCH_PROCESS_EVENTS.BATCH_PROCESS_REQUESTED,
     ]);
