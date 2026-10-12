@@ -26,6 +26,10 @@ services:
     expose:
       - "4000"
 
+    environment:
+      LOG_ROOT: /var/log/projectshell
+      POLICY_MW_LOG_SERVICE_NAME: policy-middleware-account
+
     volumes:
       - ../../logs:/var/log/projectshell
 
