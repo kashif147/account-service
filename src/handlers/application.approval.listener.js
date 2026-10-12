@@ -759,12 +759,18 @@ export async function handleMemberCreated(payload) {
         "Skipping invoice creation for no-fee membership category"
       );
     } else {
-      // Idempotency check: Check if invoice already exists before creating
+      // Idempotency check: one membership invoice per tenant + application (or subscription),
+      // whatever year it was posted in. docNo embeds the POSTING year, so an exact-docNo check
+      // would let a redelivery processed in a later calendar year post INV-<year+1>-<id> as a
+      // second invoice. Anchored match on the indexed { tenantId, docNo } (excludes the
+      // "-PRORATA" adjustment). Same-year concurrent duplicates are still stopped by the unique
+      // { tenantId, docNo } index (E11000, handled below).
       // Wrap in global limiter to prevent connection pool exhaustion
+      const invoiceKey = String(applicationId ? applicationId : `SUB-${subscriptionId}`);
       const existingInvoice = await globalDBLimiter(async () => {
         return await GLTransaction.findOne({
           tenantId,
-          docNo: docNo,
+          docNo: { $regex: `^INV-\\d{4}-${escapeRegex(invoiceKey)}$` },
         }).lean();
       });
 
