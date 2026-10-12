@@ -55,8 +55,13 @@ export async function initEventSystem() {
       prefetch: 10,
       connectionName: "account-service",
       serviceName: "account-service",
+      // Not in the pinned middleware's default list (rabbitmq-middleware main/db70fb8;
+      // product.events was only added to the defaults on its develop/gateway line, 1913bdb).
+      // Must exist before accounts.product.events binds: a bind to a missing exchange makes
+      // RabbitMQ close the shared consumer channel. Same properties as those defaults.
       exchanges: [
         { name: "batch.events", type: "topic", options: { durable: true } },
+        { name: "product.events", type: "topic", options: { durable: true } },
       ],
     });
     logger.info("Event system initialized with middleware");
