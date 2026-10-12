@@ -78,7 +78,15 @@ const applications = {
                      "app-A-dd": { membershipCategory: "General All Grades", paymentType: "Direct Debit" } } },
   [B]: { "user-B": { "app-B": { membershipCategory: "General All Grades", paymentType: "Credit Card" } } },
 };
-const profiles = { [A]: { "user-A": { profileId: "prof-A", membershipNumber: "M-A1" } }, [B]: { "user-B": { profileId: "prof-B", membershipNumber: "M-B1" } } };
+const profiles = {
+  [A]: {
+    "user-A": { profileId: "prof-A", membershipNumber: "M-A1" },
+    "user-A2": { profileId: "prof-A2", membershipNumber: "M-A2" },
+    "user-A3": { profileId: "prof-A3", membershipNumber: "M-A3" },
+    "user-A4": { profileId: "prof-A4", membershipNumber: "M-A4" },
+    "user-A5": { profileId: "prof-A5", membershipNumber: "M-A5" },
+  },
+  [B]: { "user-B": { profileId: "prof-B", membershipNumber: "M-B1" } } };
 const upstreamCalls = [];
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, opts = {}) => {
@@ -168,6 +176,34 @@ test.before(async () => {
       { accountCode: "4000", dc: "C", amount: 10000, revenueSubType: "fee" },
     ],
   });
+  // Credit fixtures (tenant A): M-A2 paid 5000 on account and owes nothing; M-A3 owes 10000
+  // but holds 12000 unapplied credit; M-A4 owes 10000 and holds 3000 unapplied credit.
+  const post = (docNo, lines) =>
+    journal.postBalancedJournal({ date: `${year}-03-01`, tenantId: A, docType: "Receipt", docNo, memo: "fixture", lines });
+  const invoice = (docNo, memberId, amount) =>
+    journal.postBalancedJournal({
+      date: `${year}-02-01`, tenantId: A, docType: "Invoice", docNo, memo: "Subscription",
+      lines: [
+        { accountCode: "1400", dc: "D", amount, memberId, periodBucket: "current" },
+        { accountCode: "4000", dc: "C", amount, revenueSubType: "fee" },
+      ],
+    });
+  const onAccount = (docNo, memberId, amount) =>
+    post(docNo, [
+      { accountCode: "1220", dc: "D", amount },
+      { accountCode: "2020", dc: "C", amount, memberId, periodBucket: "advance" },
+    ]);
+  await onAccount("RCP-M-A2", "M-A2", 5000);
+  await invoice("INV-M-A3", "M-A3", 10000);
+  await onAccount("RCP-M-A3", "M-A3", 12000);
+  await invoice("INV-M-A4", "M-A4", 10000);
+  await onAccount("RCP-M-A4", "M-A4", 3000);
+  // M-A5: 2000 credit sitting on the 1400 arrears bucket, 10000 owed on current.
+  await post("RCP-M-A5", [
+    { accountCode: "1220", dc: "D", amount: 2000 },
+    { accountCode: "1400", dc: "C", amount: 2000, memberId: "M-A5", periodBucket: "arrears" },
+  ]);
+  await invoice("INV-M-A5", "M-A5", 10000);
 });
 test.after(async () => {
   globalThis.fetch = realFetch;
@@ -315,6 +351,26 @@ test("16 member payment still reconciles: receipt credits the member's AR in ten
   const r = await guardMember({ memberId: "M-A1", amount: 6000 });
   assert.equal(r.outstandingCents, 6000, "outstanding reflects the reconciled payment");
   await assert.rejects(guardMember({ memberId: "M-A1", amount: 6001 }), (e) => e.status === 400);
+});
+
+test("17 zero balance: a member who owes nothing cannot pay in advance", { skip }, async () => {
+  await assert.rejects(guardMember({ userId: "user-A2", memberId: "M-A2", amount: 100 }), (e) => e.status === 400);
+});
+
+test("18 account in credit: unapplied credit exceeding the amount owed rejects payment", { skip }, async () => {
+  await assert.rejects(guardMember({ userId: "user-A3", memberId: "M-A3", amount: 100 }), (e) => e.status === 400);
+});
+
+test("19 unapplied credit reduces the payable balance (no overpayment)", { skip }, async () => {
+  const r = await guardMember({ userId: "user-A4", memberId: "M-A4", amount: 7000 });
+  assert.equal(r.outstandingCents, 7000);
+  await assert.rejects(guardMember({ userId: "user-A4", memberId: "M-A4", amount: 7001 }), (e) => e.status === 400);
+});
+
+test("20 a credit on one AR bucket nets against the other", { skip }, async () => {
+  const r = await guardMember({ userId: "user-A5", memberId: "M-A5", amount: 8000 });
+  assert.equal(r.outstandingCents, 8000);
+  await assert.rejects(guardMember({ userId: "user-A5", memberId: "M-A5", amount: 8001 }), (e) => e.status === 400);
 });
 
 test("portal caller with neither applicationId nor memberId is rejected", { skip }, async () => {

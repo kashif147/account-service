@@ -13,7 +13,9 @@
 //    catalogue via getMembershipPricing(), the same resolver the approval listener uses.
 //  - MEMBER payments ON ACCOUNT (memberId = the caller's own membership number): the
 //    member chooses full or partial payment of their CURRENT outstanding balance
-//    (MaterializedBalance 1400 arrears + current, this tenant): 0 < amount <= outstanding.
+//    (MaterializedBalance 1400 arrears + current less unapplied 2020 credit, this
+//    tenant): 0 < amount <= outstanding. No advance payments: a zero balance or an
+//    account in credit is rejected.
 //  - Event/course registrations: price lives in events-service, which re-verifies amount
 //    and currency before attaching the intent; manual capture at CRM approval. Unchanged.
 //  - Any other portal payment (no applicationId and no memberId) is rejected: it could not
@@ -48,11 +50,34 @@ async function defaultFetchMyApplicationSubscription(req, applicationId) {
   return mod.fetchMyApplicationSubscription(req, applicationId);
 }
 
-/** Current outstanding membership AR (cents) for the member in this tenant. */
+/**
+ * Net amount the member owes on their membership account (cents) in this tenant: every
+ * 1400 arrears/current row (a credit on one bucket offsets the other) less any unapplied
+ * 2020 advance credit, all years. <= 0 means nothing is owed or the account is in credit.
+ */
 async function defaultGetMemberOutstandingCents(memberId, tenantId) {
-  const mod = await import("../helpers/paymentReceiptAllocation.js");
-  const { arrears, current } = await mod.memberOwed1400AllYears(memberId, { tenantId });
-  return Math.max(0, arrears || 0) + Math.max(0, current || 0);
+  const [{ default: MaterializedBalance }, { resolveMemberBalanceKeys }] = await Promise.all([
+    import("../models/materializedBalance.model.js"),
+    import("../helpers/memberIdentityResolver.js"),
+  ]);
+  const balanceKeys = await resolveMemberBalanceKeys(memberId);
+  const rows = await MaterializedBalance.find({
+    tenantId,
+    memberId: { $in: balanceKeys },
+    ledgerDomain: "membership",
+    $or: [
+      { accountCode: "1400", bucket: { $in: ["arrears", "current"] } },
+      { accountCode: "2020", bucket: "advance" },
+    ],
+  }).lean();
+  let receivable = 0;
+  let advance = 0;
+  for (const r of rows) {
+    const amt = Number(r.amount) || 0;
+    if (r.accountCode === "1400") receivable += amt;
+    else advance += amt;
+  }
+  return receivable + Math.min(0, advance);
 }
 
 const CARD_PAYMENT_TYPE = "credit card";
