@@ -366,6 +366,7 @@ async function resolveReusablePaymentAttempt({
  *   assertIntentAuthorized to verify portal callers' amount and member ownership.
  */
 export async function createIntent(input, ctx, caller = {}) {
+  requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const parsed = zCreateIntent.parse(input);
   ensureIntegerCents(parsed.amount);
 
@@ -1147,6 +1148,7 @@ export async function createIntent(input, ctx, caller = {}) {
 }
 
 export async function findByStripePaymentIntent(paymentIntentId, ctx) {
+  requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const doc = await Payment.findOne({
     tenantId: ctx.tenantId,
     "stripe.paymentIntentId": paymentIntentId,
@@ -1167,7 +1169,7 @@ export async function findLatestApplicationPayment(applicationId, ctx = {}) {
     isActiveAttempt: { $ne: false },
     "stripe.paymentIntentId": { $exists: true, $ne: null },
   };
-  if (ctx.tenantId) query.tenantId = ctx.tenantId;
+  query.tenantId = requireTenantId(ctx); // fail closed, never a global lookup
 
   let payment = await Payment.findOne(query)
     .sort({ attemptNumber: -1, createdAt: -1 })
@@ -1203,8 +1205,10 @@ export async function findLatestApplicationPayment(applicationId, ctx = {}) {
 }
 
 async function loadPaymentForIntent(paymentIntentId, ctx) {
-  const filter = { "stripe.paymentIntentId": paymentIntentId };
-  if (ctx?.tenantId) filter.tenantId = ctx.tenantId;
+  const filter = {
+    "stripe.paymentIntentId": paymentIntentId,
+    tenantId: requireTenantId(ctx), // fail closed, never a global lookup
+  };
   const payment = await Payment.findOne(filter);
   if (!payment) {
     throw AppError.notFound("Payment not found for PaymentIntent", {
@@ -1302,8 +1306,7 @@ async function publishApplicationPaymentUpdate(payment, parsed, ctx = {}) {
     paymentIntentId: parsed.payment.paymentIntentId,
     amount: parsed.payment.amount,
     currency: parsed.payment.currency,
-    tenantId:
-      payment?.tenantId || ctx.tenantId || metadata.tenantId || metadata.tenant_id,
+    tenantId: payment?.tenantId || ctx.tenantId, // never Stripe metadata
   };
 
   try {
@@ -1680,22 +1683,38 @@ export async function reconcileStripeEvent(input, ctx) {
       return { ok: true, duplicate: true };
     }
 
-    // If found, log tenantId comparison for debugging
-    if (
-      existingPayment &&
-      ctx.tenantId &&
-      existingPayment.tenantId !== ctx.tenantId
-    ) {
-      const logger = (await import("../config/logger.js")).default;
+  }
+
+  // Tenant authority (Phase 2C): the PERSISTED payment decides the tenant. Stripe metadata
+  // (ctx.metadataTenantId, webhook path) may only help locate the record; it can never create
+  // a payment in a tenant or move one. Unscoped callers (webhook, in-process capture/cancel)
+  // must find an existing payment, and neither the trusted caller tenant nor the metadata
+  // tenant may disagree with it.
+  if (!scopedTenantId) {
+    const logger = (await import("../config/logger.js")).default;
+    if (!existingPayment) {
+      logger.warn(
+        { paymentIntentId: parsed.payment.paymentIntentId, eventId: parsed.eventId, eventType: parsed.type },
+        "Stripe event rejected: no persisted payment for this PaymentIntent (metadata is not a tenant authority)",
+      );
+      return { ok: false, rejected: "unknown_payment_intent" };
+    }
+    const persistedTenant = String(existingPayment.tenantId);
+    const claims = [
+      ["caller", ctx?.tenantId],
+      ["stripe-metadata", ctx?.metadataTenantId],
+    ].filter(([, t]) => t != null && String(t) !== "" && String(t) !== persistedTenant);
+    if (claims.length) {
       logger.warn(
         {
           paymentId: existingPayment._id,
           paymentIntentId: parsed.payment.paymentIntentId,
-          existingTenantId: existingPayment.tenantId,
-          webhookTenantId: ctx.tenantId,
+          eventId: parsed.eventId,
+          mismatchedSources: claims.map(([src]) => src),
         },
-        "TenantId mismatch in webhook reconciliation - using existing payment's tenantId",
+        "Stripe event rejected: tenant does not match the persisted payment's tenant",
       );
+      return { ok: false, rejected: "tenant_mismatch" };
     }
   }
 
@@ -1726,17 +1745,30 @@ export async function reconcileStripeEvent(input, ctx) {
   // Use metadata values if present, otherwise preserve existing payment values
   // This ensures journal entries can be created even if webhook metadata is incomplete
   // Prioritize applicationId - if it exists in metadata, use it (even if existing payment has memberId)
+  // The persisted payment's links win: metadata may fill a missing link but never re-point
+  // a payment at another application/member.
   const applicationId =
-    applicationIdFromMetadata || existingPayment?.applicationId || undefined;
+    existingPayment?.applicationId || applicationIdFromMetadata || undefined;
   const memberId =
     // Only use memberId if applicationId is not present
-    (!applicationId && (memberIdFromMetadata || existingPayment?.memberId)) ||
+    (!applicationId && (existingPayment?.memberId || memberIdFromMetadata)) ||
     undefined;
+  if (
+    existingPayment &&
+    ((existingPayment.applicationId && applicationIdFromMetadata && String(applicationIdFromMetadata) !== String(existingPayment.applicationId)) ||
+      (existingPayment.memberId && memberIdFromMetadata && String(memberIdFromMetadata) !== String(existingPayment.memberId)))
+  ) {
+    const logger = (await import("../config/logger.js")).default;
+    logger.warn(
+      { paymentId: existingPayment._id, paymentIntentId: parsed.payment.paymentIntentId, eventId: parsed.eventId },
+      "Stripe metadata application/member differs from the persisted payment - keeping the persisted links",
+    );
+  }
 
   // Build filter - ALWAYS use existing payment's tenantId if found
   // This prevents creating duplicates when tenantId doesn't match
   const filter = {
-    tenantId: existingPayment?.tenantId || ctx.tenantId,
+    tenantId: existingPayment?.tenantId || scopedTenantId,
     "stripe.paymentIntentId": parsed.payment.paymentIntentId,
   };
 
@@ -1988,7 +2020,7 @@ export async function reconcileStripeEvent(input, ctx) {
         "../handlers/eventRegistration.approval.listener.js"
       );
       await publishPaymentStatusUpdated({
-        tenantId: ctx?.tenantId || doc.tenantId,
+        tenantId: doc.tenantId, // the persisted payment's tenant, never caller/metadata
         paymentId: String(doc._id),
         registrationId: doc.registrationId,
         status: "requires_capture",
@@ -2352,6 +2384,7 @@ export async function reconcilePaymentFromStripe(input, ctx = {}, deps = {}) {
 }
 
 export async function recordExternal(input, ctx) {
+  requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const parsed = zRecordExternal.parse(input);
   ensureIntegerCents(parsed.amount);
 
@@ -2490,6 +2523,7 @@ function paymentLikeForRefund(parsed, payment) {
 }
 
 export async function createRefund(input, ctx) {
+  requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const parsed = zCreateRefund.parse(input);
   const stripe = getStripe();
 
@@ -3007,6 +3041,7 @@ export async function postJournalForPayment(payment, ctx) {
  * @param {Object} options - from zListRefundsQuery
  */
 export async function listRefunds(ctx, options) {
+  requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const { limit, skip, memberId, mode, from, to } = options;
   const query = { tenantId: ctx.tenantId };
   if (mode) query.mode = mode;
@@ -3049,6 +3084,7 @@ export async function listRefunds(ctx, options) {
  * @returns {Promise<Object[]>} payments (lean)
  */
 export async function listByMemberIds(memberIds, ctx, options = {}) {
+  requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   if (!memberIds || memberIds.length === 0) return [];
   const query = {
     tenantId: ctx.tenantId,
@@ -3061,6 +3097,7 @@ export async function listByMemberIds(memberIds, ctx, options = {}) {
 }
 
 export async function associateMemberLinks(input, ctx) {
+  requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const {
     memberId,
     applicationId,

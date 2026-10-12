@@ -290,7 +290,8 @@ async function processStripeEvent(event) {
         type: event.type,
         payment: paymentData,
       },
-      { tenantId }
+      // Stripe metadata tenant is only a claim, checked against the persisted payment.
+      { metadataTenantId: tenantId }
     );
   }
 }
