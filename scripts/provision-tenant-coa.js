@@ -12,6 +12,7 @@
  */
 import mongoose from "mongoose";
 import { ensureTenantChartOfAccounts } from "../src/services/coaProvisioning.service.js";
+import { assertMigrationTarget } from "./lib/migrationTargetGuard.js";
 
 const args = process.argv.slice(2);
 const APPLY = args.includes("--apply");
@@ -25,6 +26,7 @@ async function main() {
   // autoIndex off: a report run must not build indexes as a side effect.
   await mongoose.connect(uri, { autoIndex: false });
   try {
+    assertMigrationTarget(mongoose.connection.name, args, { apply: APPLY });
     const out = await ensureTenantChartOfAccounts(tenantId, { apply: APPLY });
     console.log(JSON.stringify({ mode: APPLY ? "apply" : "dry-run", ...out }, null, 2));
   } finally {

@@ -40,6 +40,7 @@
  *   MONGO_URI=... node scripts/migrations/ledger-tenancy.js --backfill --tenant=<id> --confirm-single-tenant --apply
  */
 import mongoose from "mongoose";
+import { assertMigrationTarget } from "../lib/migrationTargetGuard.js";
 
 const LEGACY_TENANT_VALUES = ["default", "unknown"];
 const MISSING = { $or: [{ tenantId: { $exists: false } }, { tenantId: null }, { tenantId: "" }] };
@@ -292,6 +293,7 @@ async function main() {
   await mongoose.connect(uri, { autoIndex: false });
   const db = mongoose.connection.db;
   try {
+    assertMigrationTarget(mongoose.connection.name, process.argv.slice(2), { apply: args.apply });
     const report = await buildReport(db, args);
     const out = { mode: args.mode, apply: args.apply, report };
     if (args.mode === "backfill") out.backfill = await runBackfill(db, { ...args, report });

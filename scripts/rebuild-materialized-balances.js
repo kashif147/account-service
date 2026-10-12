@@ -12,6 +12,8 @@ import dotenvFlow from "dotenv-flow";
 import { connectDB, disconnectDB } from "../src/config/db.js";
 import GLTransaction from "../src/models/glTransaction.model.js";
 import MaterializedBalance from "../src/models/materializedBalance.model.js";
+import mongoose from "mongoose";
+import { assertMigrationTarget } from "./lib/migrationTargetGuard.js";
 
 dotenvFlow.config();
 
@@ -77,6 +79,7 @@ async function main() {
 
   await connectDB(undefined, { autoIndex: false });
   try {
+    assertMigrationTarget(mongoose.connection.name, process.argv.slice(2), { apply: !dryRun });
     const txns = await GLTransaction.find({ tenantId })
       .select("date entries")
       .sort({ date: 1, createdAt: 1 })
