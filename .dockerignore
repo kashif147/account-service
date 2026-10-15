@@ -1,0 +1,8 @@
+# Environment files hold credentials and must never be copied into an image. Runtime configuration
+# comes from Compose (env_file / environment). Excluded at any depth.
+.env
+.env.*
+**/.env
+**/.env.*
+*.env
+**/*.env
