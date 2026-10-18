@@ -318,7 +318,7 @@ export const authenticate = ensureAuthenticated;
  * EasyAuth (and forwarded-internal) tenant source remains an ENFORCE-mode
  * blocker to be resolved before switching mode away from "warn".
  */
-export const tenantContextWarn = tenantContextMiddleware({ mode: "warn" });
+export const tenantContextWarn = tenantContextMiddleware();
 
 /**
  * Smallest composed authenticated chain for adopting the WARN guard on a route:

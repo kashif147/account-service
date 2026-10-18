@@ -181,7 +181,8 @@ test("11 only adopted routers reference the guard; no other router changed", () 
 });
 test("12 mode remains warn", () => {
   const auth = read(path.join("middlewares", "auth.js"));
-  assert.match(auth, /tenantContextMiddleware\(\{\s*mode:\s*"warn"\s*\}\)/);
+  assert.match(auth, /tenantContextMiddleware\(\)/); // mode comes from TENANT_CONTEXT_MODE (default warn)
+  assert.ok(!/mode:\s*"warn"/.test(auth), "no hard-coded warn override");
   assert.ok(!/mode:\s*"enforce"/.test(auth), "no enforce mode");
 });
 
