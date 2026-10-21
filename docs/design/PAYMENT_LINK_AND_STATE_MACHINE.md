@@ -1,6 +1,9 @@
 # Deferred payment links and the payment state machine
 
-Status: **design, for review** (2026-10-21). Nothing here is implemented or deployed; active
+Status: **design, for review** (2026-10-21). **Superseded where it differs by
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)** (approved decisions: card-only full or
+first-instalment payment, no legacy `application.status.updated` for link payments,
+`capture_before`-based expiry warnings, full permission matrix). Nothing here is implemented or deployed; active
 payment processing is unchanged. Branch `feature/payment-link-design` (account-service).
 
 Approved architecture:
