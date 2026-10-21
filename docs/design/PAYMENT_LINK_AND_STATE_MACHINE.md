@@ -14,11 +14,11 @@ Approved architecture:
 
 ## 1. Stripe investigation (read-only findings)
 
-Read with the Stripe CLI (test-mode account `acct_1SBAG4…`), no writes:
+Read with the Stripe CLI (the test-mode account), no writes:
 
 | Item | Finding |
 |---|---|
-| Enabled webhook endpoint | **one**: `https://projectshell-vm.northeurope.cloudapp.azure.com:8443/account-service/api/webhook/stripe` (DEV gateway, `livemode: false`) |
+| Enabled webhook endpoint | **one**: `https://<dev-vm-host>:8443/account-service/api/webhook/stripe` (DEV gateway, `livemode: false`) |
 | Endpoint API version | **`2018-02-28`** - the SDK pins `2024-06-20` (`src/lib/stripe.js`) |
 | Subscribed events | `payment_intent.{amount_capturable_updated,succeeded,payment_failed,canceled,requires_action}` - **no** `checkout.session.*`, **no** `charge.refunded` / `refund.*` |
 | Second endpoint | legacy Azure App Service URL, `disabled` |
