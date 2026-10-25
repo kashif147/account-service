@@ -35,6 +35,6 @@ test("--apply needs --expect-db, and it must match the connected database", () =
 test("only target-env dev is approved", () => {
   const r = quiet();
   try {
-    assert.throws(() => assertMigrationTarget("account-service-dev", ["--target-env=uat"]), /not approved/);
+    assert.throws(() => assertMigrationTarget("account-service-dev", ["--target-env=uat"]), /requires DEPLOYMENT_ENV=uat/);
   } finally { r(); }
 });
