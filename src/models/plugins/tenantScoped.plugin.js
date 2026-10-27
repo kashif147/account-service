@@ -66,8 +66,18 @@ const UPDATE_OPS = [
 ];
 
 export function tenantScopedPlugin(schema, { modelName = "ledger model" } = {}) {
+  // Phase A / A15: immutable closes the one gap the query guards below cannot see -
+  // `doc.tenantId = other; doc.save()` now keeps the original tenant.
   schema.add({
-    tenantId: { type: String, required: true, trim: true, index: true },
+    tenantId: { type: String, required: true, trim: true, index: true, immutable: true },
+  });
+
+  // save() of an existing row skips query middleware, and doc.set(..., {overwriteImmutable}) skips
+  // the immutable setter: a tenantId change on an existing row is refused here as well.
+  schema.pre("save", function guardSave() {
+    if (!this.isNew && this.isModified("tenantId")) {
+      throw tenantScopeError(`${modelName}.save must not change tenantId`);
+    }
   });
 
   schema.pre(FILTER_OPS, function guardFilter() {

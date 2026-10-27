@@ -1,6 +1,11 @@
 import mongoose from "mongoose";
 import Template from "../models/template.model.js";
 import { AppError } from "../errors/AppError.js";
+import {
+  assertSharedTemplateDeleteAllowed,
+  assertSharedTemplateUpdateAllowed,
+  isFrozenSharedTemplate,
+} from "./sharedTemplateFreeze.js";
 
 function toTemplateResponse(doc) {
   const obj =
@@ -205,12 +210,17 @@ class GridFilterTemplateService {
         ? templateType
         : template.templateType || "creditnotes";
 
-    if (template.systemDefault && !allowSystemDefaultEdits) {
+    // Phase A / A14: a shared (null-tenant) default is write-frozen - 423 on any real change; the
+    // per-user isDefault preference still works and the shared row itself is never saved.
+    assertSharedTemplateUpdateAllowed(template, updateData);
+    const sharedFrozen = isFrozenSharedTemplate(template);
+
+    if (template.systemDefault && (!allowSystemDefaultEdits || sharedFrozen)) {
       if (isDefault === true) {
         await clearSisterIsDefaultFlags(userId, type, null, tenantId);
       }
       if (pinned !== undefined) template.pinned = pinned;
-      const saved = await template.save();
+      const saved = sharedFrozen ? template : await template.save();
       const response = toTemplateResponse(saved);
       if (isDefault === true) response.isDefault = true;
       return response;
@@ -246,6 +256,7 @@ class GridFilterTemplateService {
       throw AppError.notFound("Filter template not found");
     }
 
+    assertSharedTemplateDeleteAllowed(template); // Phase A / A14: shared default -> 423
     template.meta.deleted = true;
     template.meta.deletedAt = new Date();
     return template.save();
