@@ -1,11 +1,41 @@
 // Server-side price for an application payment link. The amount is never taken from a
 // client: the membership category and payment type come from profile-service's own
-// application record (in the requested event), and the fee from this tenant's synced
+// application record (in the requested event), and the annual fee from this tenant's synced
 // product catalogue via getMembershipPricing() - the resolver the approval listener and the
-// portal intent guard use. First release: card applications pay the full annual fee only
-// (no first-instalment links until instalments 2-4 have an owner). The inline portal guard
-// (paymentIntentGuard.service.js) is deliberately left untouched.
+// portal intent guard use.
+//
+// Owner rule (2026-10-29): Credit Card -> the full annual fee (ANNUAL); any other supported
+// payment type -> three months' fee, one quarter of the annual fee (THREE_MONTHS), rounded
+// with the same rule the portal guard already enforces (quarterlyInstalmentCents).
 const CARD_PAYMENT_TYPE = "credit card";
+// profile-service constants/enums.js PAYMENT_TYPE values.
+const SUPPORTED_PAYMENT_TYPES = new Set([
+  "credit card",
+  "salary deduction",
+  "direct debit",
+  "standing order",
+  "cheque",
+  "cash",
+]);
+
+/**
+ * Three months' fee in minor units: Math.round(annual / 4). The single rounding rule shared by
+ * payment links and the portal intent guard (paymentIntentGuard.service.js).
+ */
+export function quarterlyInstalmentCents(annualCents) {
+  return Math.round(annualCents / 4);
+}
+
+export function isCardPaymentType(paymentType) {
+  return String(paymentType || "").trim().toLowerCase() === CARD_PAYMENT_TYPE;
+}
+
+/** ANNUAL for card applications, THREE_MONTHS for every other supported type, else null. */
+export function pricingBasisFor(paymentType) {
+  const t = String(paymentType || "").trim().toLowerCase();
+  if (!SUPPORTED_PAYMENT_TYPES.has(t)) return null;
+  return t === CARD_PAYMENT_TYPE ? "ANNUAL" : "THREE_MONTHS";
+}
 
 export class PriceError extends Error {
   constructor(reason, message) {
@@ -21,19 +51,16 @@ async function defaultGetMembershipPricing(args) {
 }
 
 /**
- * @returns {Promise<{amount:number,currency:string,pricingBasis:object}>}
- * @throws {PriceError} reason PAYMENT_METHOD_NOT_SUPPORTED | INSTALMENTS_NOT_ALLOWED |
- *         PAYMENT_NOT_REQUIRED | PRICE_UNAVAILABLE
+ * @returns {Promise<{amount:number,currency:string,paymentOption:"FULL"|"FIRST_INSTALMENT",pricingBasis:object}>}
+ * @throws {PriceError} reason PAYMENT_METHOD_NOT_SUPPORTED | PAYMENT_NOT_REQUIRED | PRICE_UNAVAILABLE
  */
 export async function computeApplicationAmount(
-  { tenantId, applicationId, membershipCategory, paymentType, paymentOption = "FULL", now = new Date() },
+  { tenantId, applicationId, membershipCategory, paymentType, now = new Date() },
   deps = {},
 ) {
-  if (String(paymentType || "").trim().toLowerCase() !== CARD_PAYMENT_TYPE) {
-    throw new PriceError("PAYMENT_METHOD_NOT_SUPPORTED", "Payment links are for card applications only");
-  }
-  if (paymentOption !== "FULL") {
-    throw new PriceError("INSTALMENTS_NOT_ALLOWED", "Only full payment links are available");
+  const basis = pricingBasisFor(paymentType);
+  if (!basis) {
+    throw new PriceError("PAYMENT_METHOD_NOT_SUPPORTED", "Unknown payment type for this application");
   }
   const categoryName = String(membershipCategory || "").trim();
   if (!categoryName) throw new PriceError("PRICE_UNAVAILABLE", "Application has no membership category");
@@ -52,15 +79,19 @@ export async function computeApplicationAmount(
   } catch {
     annualFee = null;
   }
+  // A no-fee category is the only "not required" case; a non-card method is not.
   if (annualFee === 0) throw new PriceError("PAYMENT_NOT_REQUIRED", "No fee for this membership category");
   if (!Number.isInteger(annualFee) || annualFee <= 0) {
     throw new PriceError("PRICE_UNAVAILABLE", "No payable catalogue price for this membership category");
   }
+  const amount = basis === "ANNUAL" ? annualFee : quarterlyInstalmentCents(annualFee);
   return {
-    amount: annualFee,
+    amount,
     currency: "eur",
+    paymentOption: basis === "ANNUAL" ? "FULL" : "FIRST_INSTALMENT",
     pricingBasis: {
-      rule: "FULL_ANNUAL_FEE",
+      basis,
+      rule: basis === "ANNUAL" ? "ANNUAL_FEE" : "ANNUAL_FEE_DIV_4_MATH_ROUND",
       annualFee,
       membershipCategory: categoryName,
       paymentType,

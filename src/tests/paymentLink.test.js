@@ -180,7 +180,8 @@ test("issue: Checkout Session (manual capture, <=24h, server price, tenant metad
   const link = await PaymentLink.findOne({ tenantId: A, applicationId: "app-1" }).lean();
   assert.equal(link.status, "ISSUED");
   assert.match(link.checkoutUrl, /^https:\/\/checkout\.stripe\.com\//);
-  assert.equal(link.pricingBasis.rule, "FULL_ANNUAL_FEE");
+  assert.equal(link.pricingBasis.basis, "ANNUAL");
+  assert.equal(link.paymentOption, "FULL");
   const pay = await Payment.findById(link.paymentId).lean();
   assert.equal(pay.tenantId, A);
   assert.equal(pay.status, "requires_action");
@@ -219,8 +220,8 @@ test("resume after a crash between PENDING and ISSUED reuses the same Payment an
 
 test("business failures are published, not thrown", { skip }, async () => {
   const cases = [
-    [request(A, "app-f1", 1, { pricing: { membershipCategory: "General Nurse", paymentType: "Salary Deduction" } }), "PAYMENT_METHOD_NOT_SUPPORTED"],
-    [request(A, "app-f2", 1, { paymentOption: "FIRST_INSTALMENT" }), "INSTALMENTS_NOT_ALLOWED"],
+    [request(A, "app-f1", 1, { pricing: { membershipCategory: "General Nurse", paymentType: "Bitcoin" } }), "PAYMENT_METHOD_NOT_SUPPORTED"],
+    [request(A, "app-f2", 1, { pricing: { membershipCategory: "General Nurse", paymentType: null } }), "PAYMENT_METHOD_NOT_SUPPORTED"],
     [request(A, "app-f3", 1, { pricing: { membershipCategory: "Student", paymentType: "Credit Card" } }), "PAYMENT_NOT_REQUIRED"],
     [request(A, "app-f4", 1, { pricing: { membershipCategory: "Unknown Grade", paymentType: "Credit Card" } }), "PRICE_UNAVAILABLE"],
   ];
@@ -481,5 +482,94 @@ test("metadata fallback refuses forged or mismatched metadata", { skip }, async 
   const lb = await PaymentLink.findOne({ tenantId: B, applicationId: "app-meta-b" }).lean();
   await deliver(piEv("pi_f_cross", { ...md, paymentLinkId: String(lb._id) }));
   assert.equal((await Payment.findById(link.paymentId).lean()).stripe.paymentIntentId, undefined);
+});
+
+// ---------- pricing rule (owner decision 2026-10-29) ----------
+const pricing = await import("../services/applicationPrice.service.js");
+const guard = await import("../services/paymentIntentGuard.service.js");
+
+test("non-card supported methods -> three months (annual / 4); never PAYMENT_NOT_REQUIRED for being non-card", { skip }, async () => {
+  for (const [i, paymentType] of ["Salary Deduction", "Direct Debit", "Standing Order", "Cheque", "Cash"].entries()) {
+    const app = `app-q${i}`;
+    const before = fake.createCalls.length;
+    const r = await links.handlePaymentLinkRequested(request(A, app, 1, { pricing: { membershipCategory: "General Nurse", paymentType } }));
+    assert.equal(r.issued, true, paymentType);
+    const link = await PaymentLink.findOne({ tenantId: A, applicationId: app }).lean();
+    assert.equal(link.amount, 7475, `${paymentType}: Math.round(29900 / 4)`);
+    assert.equal(link.paymentOption, "FIRST_INSTALMENT");
+    assert.equal(link.pricingBasis.basis, "THREE_MONTHS");
+    assert.equal(link.pricingBasis.annualFee, 29900);
+    assert.equal(fake.createCalls[before].params.line_items[0].price_data.unit_amount, 7475);
+    assert.equal(fake.createCalls[before].params.payment_intent_data.capture_method, "manual");
+    assert.equal((await Payment.findById(link.paymentId).lean()).amount, 7475);
+  }
+});
+
+test("Credit Card -> full annual fee; client amount / paymentOption cannot override", { skip }, async () => {
+  await links.handlePaymentLinkRequested(request(A, "app-card-x", 1, {
+    amount: 100,
+    paymentOption: "FIRST_INSTALMENT",
+    pricing: { membershipCategory: "General Nurse", paymentType: "Credit Card", amount: 100, annualFee: 100 },
+  }));
+  const card = await PaymentLink.findOne({ tenantId: A, applicationId: "app-card-x" }).lean();
+  assert.equal(card.amount, 29900);
+  assert.equal(card.paymentOption, "FULL");
+  await links.handlePaymentLinkRequested(request(A, "app-dd-x", 1, {
+    amount: 29900,
+    paymentOption: "FULL",
+    pricing: { membershipCategory: "General Nurse", paymentType: "Direct Debit", amount: 29900 },
+  }));
+  const dd = await PaymentLink.findOne({ tenantId: A, applicationId: "app-dd-x" }).lean();
+  assert.equal(dd.amount, 7475, "derived from the payment type, not the client's option");
+  assert.equal(dd.paymentOption, "FIRST_INSTALMENT");
+});
+
+test("pricing is tenant/product scoped: same category, different tenant catalogue", { skip }, async () => {
+  await links.handlePaymentLinkRequested(request(B, "app-q-b", 1, { pricing: { membershipCategory: "General Nurse", paymentType: "Direct Debit" } }));
+  const lb = await PaymentLink.findOne({ tenantId: B, applicationId: "app-q-b" }).lean();
+  assert.equal(lb.amount, 12500, "tenant B annual 50000 / 4");
+  assert.equal(lb.pricingBasis.annualFee, 50000);
+});
+
+test("three-month link keeps its frozen price; REPLACE re-reads the catalogue with the same rule", { skip }, async () => {
+  await links.handlePaymentLinkRequested(request(A, "app-q-r", 1, { pricing: { membershipCategory: "General Nurse", paymentType: "Salary Deduction" } }));
+  catalogue["general nurse"] = 30001; // odd cents: 7500.25 -> 7500
+  try {
+    await links.handlePaymentLinkRequested(request(A, "app-q-r", 2, { pricing: { membershipCategory: "General Nurse", paymentType: "Salary Deduction" } }));
+  } finally {
+    catalogue["general nurse"] = 29900;
+  }
+  const v1 = await PaymentLink.findOne({ tenantId: A, applicationId: "app-q-r", linkVersion: 1 }).lean();
+  const v2 = await PaymentLink.findOne({ tenantId: A, applicationId: "app-q-r", linkVersion: 2 }).lean();
+  assert.equal(v1.status, "REPLACED");
+  assert.equal(v1.amount, 7475, "frozen");
+  assert.equal(v2.amount, 7500, "re-priced: Math.round(30001 / 4)");
+  assert.equal(v2.pricingBasis.annualFee, 30001);
+});
+
+test("rounding follows the existing portal guard rule exactly", async () => {
+  for (const annual of [29900, 30001, 30002, 30003, 1, 2, 3, 99999]) {
+    assert.equal(pricing.quarterlyInstalmentCents(annual), Math.round(annual / 4), String(annual));
+  }
+  // the guard accepts exactly the link's three-month amount for a non-card application
+  const r = await guard.assertIntentAuthorized(
+    {
+      parsed: { amount: pricing.quarterlyInstalmentCents(30002) },
+      metadata: {},
+      applicationId: "app-g",
+      isApplicationPayment: true,
+      isEventRegistrationPayment: false,
+      ctx: { tenantId: A },
+      caller: { userType: "PORTAL", req: {} },
+    },
+    {
+      fetchMyApplicationSubscription: async () => ({ membershipCategory: "General Nurse", paymentType: "Direct Debit" }),
+      getMembershipPricing: async () => ({ annualFee: 30002 }),
+    },
+  );
+  assert.deepEqual(r.allowed, [7501, 30002]);
+  assert.equal(pricing.pricingBasisFor("credit card"), "ANNUAL");
+  assert.equal(pricing.pricingBasisFor("Direct Debit"), "THREE_MONTHS");
+  assert.equal(pricing.pricingBasisFor("Bitcoin"), null);
 });
 

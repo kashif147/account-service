@@ -248,7 +248,6 @@ export async function handlePaymentLinkRequested(payload) {
           applicationId,
           membershipCategory: d.pricing?.membershipCategory,
           paymentType: d.pricing?.paymentType,
-          paymentOption: d.paymentOption || "FULL",
         },
         pricingDeps,
       );
@@ -262,7 +261,7 @@ export async function handlePaymentLinkRequested(payload) {
           ...ids,
           status: "PENDING",
           action,
-          paymentOption: "FULL",
+          paymentOption: price.paymentOption,
           amount: price.amount,
           currency: price.currency,
           pricingBasis: price.pricingBasis,
@@ -304,7 +303,9 @@ export async function handlePaymentLinkRequested(payload) {
           {
             price_data: {
               currency: link.currency,
-              product_data: { name: "Membership fee" },
+              product_data: {
+                name: link.paymentOption === "FULL" ? "Membership fee (annual)" : "Membership fee (three months)",
+              },
               unit_amount: link.amount,
             },
             quantity: 1,

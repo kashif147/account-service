@@ -17,7 +17,8 @@ const PaymentLinkSchema = new Schema(
       required: true,
     },
     action: { type: String, enum: ["ISSUE", "REPLACE"], required: true },
-    paymentOption: { type: String, enum: ["FULL"], default: "FULL" },
+    // Derived from the payment type: FULL (card, annual fee) | FIRST_INSTALMENT (three months).
+    paymentOption: { type: String, enum: ["FULL", "FIRST_INSTALMENT"], default: "FULL" },
     failureReason: { type: String },
     checkoutSessionId: { type: String },
     checkoutUrl: { type: String },
