@@ -129,6 +129,7 @@ const PaymentSchema = new Schema(
     linkVersion: { type: Number },
     // Card authorisation hold deadline (charge.payment_method_details.card.capture_before).
     capturableUntil: { type: Date },
+    authorisedAt: { type: Date },
     expiryWarnedAt: { type: Date },
     lastStripeEventAt: { type: Date },
     webhookEventIds: { type: [String], default: [], index: true },

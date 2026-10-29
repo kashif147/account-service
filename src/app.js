@@ -92,6 +92,7 @@ import {
   stopDirectDebitPrepareCron,
 } from "./services/directDebitPrepare.cron.service.js";
 import { startOutboxRelay, stopOutboxRelay } from "./services/outbox.service.js";
+import { registerPaymentLinkWebhookHooks } from "./services/paymentLink.service.js";
 import {
   startAuthorisationExpiryCron,
   stopAuthorisationExpiryCron,
@@ -138,6 +139,7 @@ export async function initializeMessagingMiddleware() {
 
 startBatchProcessingCron();
 startDirectDebitPrepareCron();
+registerPaymentLinkWebhookHooks();
 if (process.env.NODE_ENV !== "test") {
   startOutboxRelay();
   startAuthorisationExpiryCron();

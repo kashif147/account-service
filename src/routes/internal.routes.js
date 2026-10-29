@@ -42,4 +42,19 @@ router.post(
 );
 router.post("/members/writeoff", requireInternalOrFinanceWrite, internalWriteOff);
 
+// Payment-link diagnostics: the trusted tenant (req.ctx) only, never a query/body tenant.
+router.get("/payment-links", requireInternalOrFinanceRead, async (req, res, next) => {
+  try {
+    const tenantId = req.ctx?.tenantId;
+    if (!tenantId) return res.appError(AppError.unauthorized("Tenant context required"));
+    const applicationId = String(req.query.applicationId || "").trim();
+    if (!applicationId) return res.appError(AppError.badRequest("applicationId is required"));
+    const { listPaymentLinks } = await import("../services/paymentLink.service.js");
+    const links = await listPaymentLinks(String(tenantId), applicationId);
+    return res.success(links);
+  } catch (err) {
+    return next(err);
+  }
+});
+
 export default router;

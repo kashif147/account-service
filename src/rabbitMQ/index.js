@@ -138,6 +138,27 @@ export async function setupConsumers() {
   try {
     logger.info("Setting up RabbitMQ consumers...");
 
+    // Payment-link requests from profile-service (application.events exchange).
+    const PAYMENT_LINK_QUEUE = "accounts.payment-link.requests";
+    try {
+      await consumer.createQueue(PAYMENT_LINK_QUEUE, { durable: true, messageTtl: 3600000 });
+      await assertExchangeBindable("application.events");
+      await consumer.bindQueue(PAYMENT_LINK_QUEUE, "application.events", [
+        "applications.payment-link.requested.v1",
+      ]);
+      consumer.registerHandler("applications.payment-link.requested.v1", async (payload) => {
+        const { handlePaymentLinkRequested } = await import("../services/paymentLink.service.js");
+        await handlePaymentLinkRequested(payload);
+      });
+      await consumer.consume(PAYMENT_LINK_QUEUE, { prefetch: 5 });
+      logger.info("Payment link request consumer ready", { queue: PAYMENT_LINK_QUEUE });
+    } catch (error) {
+      logger.error(
+        { error: error.message, queue: PAYMENT_LINK_QUEUE },
+        "Failed to set up payment link consumer, continuing without it"
+      );
+    }
+
     // CRM user events queue (user.events exchange)
     const USER_QUEUE = "accounts.user.events";
     logger.info("Creating CRM user events queue...", {
