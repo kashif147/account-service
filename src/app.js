@@ -91,6 +91,11 @@ import {
   startDirectDebitPrepareCron,
   stopDirectDebitPrepareCron,
 } from "./services/directDebitPrepare.cron.service.js";
+import { startOutboxRelay, stopOutboxRelay } from "./services/outbox.service.js";
+import {
+  startAuthorisationExpiryCron,
+  stopAuthorisationExpiryCron,
+} from "./services/authorisationExpiry.cron.service.js";
 
 const app = express();
 
@@ -133,11 +138,17 @@ export async function initializeMessagingMiddleware() {
 
 startBatchProcessingCron();
 startDirectDebitPrepareCron();
+if (process.env.NODE_ENV !== "test") {
+  startOutboxRelay();
+  startAuthorisationExpiryCron();
+}
 
 // Graceful shutdown
 process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, shutting down gracefully...");
   stopBatchProcessingCron();
+  stopOutboxRelay();
+  stopAuthorisationExpiryCron();
   if (eventSystemInitialized) {
     await shutdownEventSystem();
   }
@@ -147,6 +158,8 @@ process.on("SIGTERM", async () => {
 process.on("SIGINT", async () => {
   logger.info("SIGINT received, shutting down gracefully...");
   stopBatchProcessingCron();
+  stopOutboxRelay();
+  stopAuthorisationExpiryCron();
   if (eventSystemInitialized) {
     await shutdownEventSystem();
   }
@@ -332,6 +345,8 @@ app.use(errorHandler);
 process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, shutting down gracefully");
   stopBatchProcessingCron();
+  stopOutboxRelay();
+  stopAuthorisationExpiryCron();
   stopDirectDebitPrepareCron();
   await shutdownEventSystem();
   process.exit(0);
@@ -340,6 +355,8 @@ process.on("SIGTERM", async () => {
 process.on("SIGINT", async () => {
   logger.info("SIGINT received, shutting down gracefully");
   stopBatchProcessingCron();
+  stopOutboxRelay();
+  stopAuthorisationExpiryCron();
   stopDirectDebitPrepareCron();
   await shutdownEventSystem();
   process.exit(0);

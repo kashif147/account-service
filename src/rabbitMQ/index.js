@@ -42,6 +42,16 @@ import {
 import { handleSubscriptionCategoryChanged } from "./listeners/subscription.category.change.listener.js";
 import { processEventCancellationRefunds } from "../services/eventCancellationRefund.service.js";
 
+export const PAYMENT_LINK_EXCHANGE_MAPPING = Object.freeze({
+  "applications.payment-link.requested.v1": "application.events",
+  "applications.payment-link.email.requested.v1": "application.events",
+  "payments.payment-link.issued.v1": "payment.events",
+  "payments.payment-link.failed.v1": "payment.events",
+  "payments.payment-link.expired.v1": "payment.events",
+  "payments.application-payment.status-changed.v1": "payment.events",
+  "payments.application-payment.authorisation-expiring.v1": "payment.events",
+});
+
 // Re-export for convenience
 export { APPLICATION_EVENTS, BATCH_PROCESS_EVENTS };
 
@@ -64,6 +74,10 @@ export async function initEventSystem() {
         { name: "product.events", type: "topic", options: { durable: true } },
       ],
     });
+    // The installed middleware (lockfile db70fb8) predates these routing keys; register them
+    // here so routing never depends on which middleware commit a build resolves. Same values
+    // as rabbitmq-middleware src/publisher.js exchangeMapping.
+    publisher.setExchangeMapping?.(PAYMENT_LINK_EXCHANGE_MAPPING);
     logger.info("Event system initialized with middleware");
   } catch (error) {
     logger.error({ error: error.message }, "Failed to initialize event system");
