@@ -437,3 +437,49 @@ test("a replaced link's session that still completes has its hold released, neve
   const v2 = await PaymentLink.findOne({ tenantId: A, applicationId: "app-orphan", linkVersion: 2 }).lean();
   assert.equal(v2.status, "ISSUED", "current link unaffected");
 });
+
+test("no checkout.session.completed: the PI event's metadata attaches the link Payment (endpoint not subscribed)", { skip }, async () => {
+  await links.handlePaymentLinkRequested(request(A, "app-meta", 1));
+  const link = await PaymentLink.findOne({ tenantId: A, applicationId: "app-meta" }).lean();
+  const md = fake.sessions[link.checkoutSessionId].metadata;
+  const res = await deliver(ev("payment_intent.amount_capturable_updated", { id: "pi_meta_1", object: "payment_intent", status: "requires_capture", amount: link.amount, currency: "eur", metadata: md }));
+  assert.equal(res.statusCode, 200);
+  const pay = await Payment.findById(link.paymentId).lean();
+  assert.equal(pay.stripe.paymentIntentId, "pi_meta_1");
+  assert.equal(pay.status, "requires_capture");
+  assert.equal((await PaymentLink.findById(link._id).lean()).status, "COMPLETED");
+  assert.ok(await OutboxEvent.findOne({ eventKey: `pay:${pay._id}:requires_capture` }));
+  // a later session event for the same PI is consistent, not a second payment
+  fake.sessions[link.checkoutSessionId].status = "complete";
+  fake.intents.pi_meta_1 = { id: "pi_meta_1", object: "payment_intent", status: "requires_capture", amount: link.amount, currency: "eur", metadata: md };
+  await deliver(ev("checkout.session.completed", { id: link.checkoutSessionId, object: "checkout.session", payment_intent: "pi_meta_1", metadata: md }));
+  assert.equal(await Payment.countDocuments({ tenantId: A, applicationId: "app-meta" }), 1);
+});
+
+test("metadata fallback refuses forged or mismatched metadata", { skip }, async () => {
+  await links.handlePaymentLinkRequested(request(A, "app-meta-f", 1));
+  const link = await PaymentLink.findOne({ tenantId: A, applicationId: "app-meta-f" }).lean();
+  const md = fake.sessions[link.checkoutSessionId].metadata;
+  const piEv = (id, metadata, amount = link.amount) => ev("payment_intent.amount_capturable_updated", { id, object: "payment_intent", status: "requires_capture", amount, currency: "eur", metadata });
+  const cases = [
+    ["pi_f_tenant", { ...md, tenantId: B }],
+    ["pi_f_link", { ...md, paymentLinkId: "aaaaaaaaaaaaaaaaaaaaaaaa" }],
+    ["pi_f_amount", md, 1],
+    ["pi_f_notid", { ...md, paymentId: "not-an-id" }],
+  ];
+  for (const [id, metadata, amount] of cases) {
+    const e = piEv(id, metadata, amount);
+    const res = await deliver(e);
+    assert.equal(res.statusCode, 200, id);
+    assert.ok(await StripeEventRejection.findOne({ stripeEventId: e.id }), `${id} rejected`);
+  }
+  const pay = await Payment.findById(link.paymentId).lean();
+  assert.equal(pay.stripe.paymentIntentId, undefined, "nothing attached");
+  assert.equal(pay.status, "requires_action");
+  // another tenant's payment id cannot be claimed through a B-tenant link either
+  await links.handlePaymentLinkRequested(request(B, "app-meta-b", 1));
+  const lb = await PaymentLink.findOne({ tenantId: B, applicationId: "app-meta-b" }).lean();
+  await deliver(piEv("pi_f_cross", { ...md, paymentLinkId: String(lb._id) }));
+  assert.equal((await Payment.findById(link.paymentId).lean()).stripe.paymentIntentId, undefined);
+});
+

@@ -1726,6 +1726,36 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
   };
 }
 
+/**
+ * Payment-link fallback for a PaymentIntent event that arrives without (or before)
+ * checkout.session.completed. The PI metadata written at session creation only LOCATES the
+ * link's Payment; the persisted record decides: it must be that link's Payment, not yet
+ * bound to another PaymentIntent, with the same amount and currency, and a metadata tenant
+ * (when present) must equal the persisted tenant. Otherwise nothing is attached.
+ */
+async function attachLinkPaymentFromIntentMetadata(parsed) {
+  const m = parsed.payment.metadata || {};
+  const isId = (v) => typeof v === "string" && /^[a-f0-9]{24}$/i.test(v);
+  if (!isId(m.paymentId) || !isId(m.paymentLinkId)) return null;
+  const candidate = await Payment.findOne({ _id: m.paymentId, paymentLinkId: m.paymentLinkId }).lean();
+  if (!candidate) return null;
+  if (m.tenantId && String(m.tenantId) !== String(candidate.tenantId)) return null;
+  if (candidate.stripe?.paymentIntentId) {
+    return candidate.stripe.paymentIntentId === parsed.payment.paymentIntentId ? candidate : null;
+  }
+  if (
+    Number(parsed.payment.amount) !== Number(candidate.amount) ||
+    String(parsed.payment.currency || "").toLowerCase() !== String(candidate.currency || "").toLowerCase()
+  ) {
+    return null;
+  }
+  return Payment.findOneAndUpdate(
+    { _id: candidate._id, tenantId: candidate.tenantId, "stripe.paymentIntentId": { $in: [null] } },
+    { $set: { "stripe.paymentIntentId": parsed.payment.paymentIntentId } },
+    { new: true },
+  ).lean();
+}
+
 export async function reconcileStripeEvent(input, ctx) {
   const parsed = zReconcile.parse(input);
   ensureIntegerCents(parsed.payment.amount);
@@ -1746,6 +1776,9 @@ export async function reconcileStripeEvent(input, ctx) {
   let existingPayment = null;
   if (parsed.payment.paymentIntentId) {
     existingPayment = await Payment.findOne(intentLookup).lean();
+    if (!existingPayment && !scopedTenantId) {
+      existingPayment = await attachLinkPaymentFromIntentMetadata(parsed);
+    }
     if (!existingPayment && scopedTenantId) {
       throw AppError.notFound("Payment not found for PaymentIntent");
     }
