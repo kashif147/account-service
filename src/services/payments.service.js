@@ -15,6 +15,13 @@ import {
 } from "./refundCredit.service.js";
 import { centsToEuros } from "../helpers/money.js";
 import { assertIntentAuthorized } from "./paymentIntentGuard.service.js";
+import {
+  nextPaymentStatus,
+  shadowComparison,
+  stateMachineMode,
+  applicationPaymentStatus,
+} from "./paymentStateMachine.js";
+import { enqueueOutboxEvent } from "./outbox.service.js";
 
 function ensureIntegerCents(value) {
   if (!Number.isInteger(value)) {
@@ -1218,7 +1225,7 @@ async function loadPaymentForIntent(paymentIntentId, ctx) {
   return payment;
 }
 
-function paymentDataFromIntent(pi) {
+export function paymentDataFromIntent(pi) {
   return {
     paymentIntentId: pi.id,
     amount: pi.amount_received || pi.amount,
@@ -1271,6 +1278,38 @@ function resolveWebhookStatus(existingPayment, incomingStatus) {
   return incomingStatus;
 }
 
+/**
+ * Legacy decision (resolveWebhookStatus) plus the lifecycle state machine's decision.
+ * Shadow mode: the legacy decision stays authoritative for existing payments and any
+ * disagreement is logged (ids and statuses only). Payment-link payments always use the
+ * state machine, so a late requires_action/processing/failed cannot regress them.
+ */
+export function decideWebhookStatus(existingPayment, parsed, { log } = {}) {
+  const legacy = resolveWebhookStatus(existingPayment, parsed.payment.status);
+  const machine = nextPaymentStatus(existingPayment?.status, parsed.payment.status, {
+    occurredAt: parsed.payment.occurredAt,
+    lastAppliedAt: existingPayment?.lastStripeEventAt,
+  });
+  const isLink = Boolean(existingPayment?.paymentLinkId);
+  const authoritative = isLink || stateMachineMode() === "authoritative";
+  const comparison = shadowComparison({
+    paymentId: existingPayment?._id,
+    eventId: parsed.eventId,
+    eventType: parsed.type,
+    current: existingPayment?.status,
+    incoming: parsed.payment.status,
+    legacy,
+    machine,
+  });
+  if (!comparison.agree && log) {
+    log(
+      { ...comparison, authoritative: authoritative ? "state-machine" : "legacy", paymentLink: isLink },
+      "Payment state machine disagrees with legacy webhook status",
+    );
+  }
+  return { status: authoritative ? machine.status : legacy, legacy, machine, authoritative, comparison };
+}
+
 function buildWebhookAuditEntry(parsed, finalStatus) {
   const failureMessage = parsed.payment.failureMessage;
   const cancellationReason = parsed.payment.cancellationReason;
@@ -1290,7 +1329,46 @@ function buildWebhookAuditEntry(parsed, finalStatus) {
   };
 }
 
+/**
+ * Link payments announce their state through the outbox as
+ * payments.application-payment.status-changed.v1 and never through the legacy
+ * application.status.updated (portal-service would act on it). Throws when the outbox write
+ * fails, so a webhook caller answers 500 and Stripe retries; the retry takes the duplicate
+ * path, which re-enqueues (idempotent on eventKey).
+ */
+export async function enqueueLinkPaymentStatus(payment, parsed = {}) {
+  const status = payment?.status;
+  if (!payment?.paymentLinkId || !applicationPaymentStatus(status)) return false;
+  const paymentId = String(payment._id);
+  await enqueueOutboxEvent({
+    eventKey: `pay:${paymentId}:${status}${parsed?.eventKeySuffix ? `:${parsed.eventKeySuffix}` : ""}`,
+    tenantId: String(payment.tenantId), // the persisted payment's tenant only
+    routingKey: "payments.application-payment.status-changed.v1",
+    data: {
+      applicationId: payment.applicationId,
+      paymentId,
+      paymentLinkId: String(payment.paymentLinkId),
+      paymentIntentId: payment.stripe?.paymentIntentId || null,
+      linkVersion: payment.linkVersion ?? null,
+      to: status,
+      applicationStatus: applicationPaymentStatus(status),
+      amount: payment.amount,
+      currency: payment.currency,
+      capturableUntil: payment.capturableUntil || null,
+      refund: parsed?.refund || null,
+      occurredAt: new Date().toISOString(),
+      stripeEventId: parsed?.eventId || null,
+    },
+  });
+  return true;
+}
+
 async function publishApplicationPaymentUpdate(payment, parsed, ctx = {}) {
+  if (payment?.paymentLinkId) {
+    const fresh =
+      (await Payment.findOne({ _id: payment._id, tenantId: payment.tenantId }).lean()) || payment;
+    return enqueueLinkPaymentStatus(fresh, parsed);
+  }
   const metadata = parsed?.payment?.metadata || {};
   const applicationId =
     payment?.applicationId || metadata.applicationId || metadata.application_id;
@@ -1389,6 +1467,10 @@ function appendDefinedStripeFields(set, parsed) {
   set["stripe.latestEventType"] = parsed.type;
 
   if (capturedAt) set["stripe.capturedAt"] = capturedAt;
+  const capturableUntil = normalizeOptionalDate(parsed.payment.capturableUntil);
+  if (capturableUntil) set.capturableUntil = capturableUntil;
+  const occurredAt = normalizeOptionalDate(parsed.payment.occurredAt);
+  if (occurredAt) set.lastStripeEventAt = occurredAt;
   if (canceledAt) set["stripe.canceledAt"] = canceledAt;
   if (parsed.payment.cancellationReason) {
     set["stripe.cancellationReason"] = parsed.payment.cancellationReason;
@@ -1644,6 +1726,36 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
   };
 }
 
+/**
+ * Payment-link fallback for a PaymentIntent event that arrives without (or before)
+ * checkout.session.completed. The PI metadata written at session creation only LOCATES the
+ * link's Payment; the persisted record decides: it must be that link's Payment, not yet
+ * bound to another PaymentIntent, with the same amount and currency, and a metadata tenant
+ * (when present) must equal the persisted tenant. Otherwise nothing is attached.
+ */
+async function attachLinkPaymentFromIntentMetadata(parsed) {
+  const m = parsed.payment.metadata || {};
+  const isId = (v) => typeof v === "string" && /^[a-f0-9]{24}$/i.test(v);
+  if (!isId(m.paymentId) || !isId(m.paymentLinkId)) return null;
+  const candidate = await Payment.findOne({ _id: m.paymentId, paymentLinkId: m.paymentLinkId }).lean();
+  if (!candidate) return null;
+  if (m.tenantId && String(m.tenantId) !== String(candidate.tenantId)) return null;
+  if (candidate.stripe?.paymentIntentId) {
+    return candidate.stripe.paymentIntentId === parsed.payment.paymentIntentId ? candidate : null;
+  }
+  if (
+    Number(parsed.payment.amount) !== Number(candidate.amount) ||
+    String(parsed.payment.currency || "").toLowerCase() !== String(candidate.currency || "").toLowerCase()
+  ) {
+    return null;
+  }
+  return Payment.findOneAndUpdate(
+    { _id: candidate._id, tenantId: candidate.tenantId, "stripe.paymentIntentId": { $in: [null] } },
+    { $set: { "stripe.paymentIntentId": parsed.payment.paymentIntentId } },
+    { new: true },
+  ).lean();
+}
+
 export async function reconcileStripeEvent(input, ctx) {
   const parsed = zReconcile.parse(input);
   ensureIntegerCents(parsed.payment.amount);
@@ -1664,6 +1776,9 @@ export async function reconcileStripeEvent(input, ctx) {
   let existingPayment = null;
   if (parsed.payment.paymentIntentId) {
     existingPayment = await Payment.findOne(intentLookup).lean();
+    if (!existingPayment && !scopedTenantId) {
+      existingPayment = await attachLinkPaymentFromIntentMetadata(parsed);
+    }
     if (!existingPayment && scopedTenantId) {
       throw AppError.notFound("Payment not found for PaymentIntent");
     }
@@ -1780,7 +1895,11 @@ export async function reconcileStripeEvent(input, ctx) {
     );
   }
 
-  const finalStatus = resolveWebhookStatus(existingPayment, parsed.payment.status);
+  const lifecycleLogger = (await import("../config/logger.js")).default;
+  const decision = decideWebhookStatus(existingPayment, parsed, {
+    log: (obj, msg) => lifecycleLogger.warn(obj, msg),
+  });
+  const finalStatus = decision.status;
   const auditEntry = buildWebhookAuditEntry(parsed, finalStatus);
 
   const update = {
@@ -2131,10 +2250,7 @@ export async function reconcileStripeEvent(input, ctx) {
         // Preserve existing memberId/applicationId if metadata doesn't have them
         const memberIdToUse = memberId || existing.memberId;
         const applicationIdToUse = applicationId || existing.applicationId;
-        const recoveryStatus = resolveWebhookStatus(
-          existing,
-          parsed.payment.status,
-        );
+        const recoveryStatus = decideWebhookStatus(existing, parsed).status;
         const recoveryAuditEntry = buildWebhookAuditEntry(
           parsed,
           recoveryStatus,
@@ -2311,6 +2427,11 @@ export async function reconcileStripeEvent(input, ctx) {
       },
       "reconcileStripeEvent failed - payment may need manual reconciliation",
     );
+
+    // Webhook callers (ctx.rethrowOnError) answer 500 so Stripe retries a transient failure;
+    // the retry is safe because the event id is only recorded on a successful update.
+    // Other callers (capture/cancel/HTTP reconcile) keep the existing swallow-and-log.
+    if (ctx?.rethrowOnError) throw error;
 
     // Return success to prevent webhook retries
     return {

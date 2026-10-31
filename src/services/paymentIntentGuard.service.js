@@ -25,6 +25,7 @@
 // members and any unknown user type). Genuine S2S calls (x-internal-request, no user JWT)
 // and CRM users are unchanged.
 import { AppError } from "../errors/AppError.js";
+import { quarterlyInstalmentCents } from "./applicationPrice.service.js";
 
 function norm(v) {
   return v == null ? "" : String(v).trim();
@@ -186,7 +187,7 @@ export async function assertIntentAuthorized(
       );
     }
     const isCard = norm(app?.paymentType).toLowerCase() === CARD_PAYMENT_TYPE;
-    const allowed = isCard ? [annualFee] : [Math.round(annualFee / 4), annualFee];
+    const allowed = isCard ? [annualFee] : [quarterlyInstalmentCents(annualFee), annualFee];
     if (!allowed.includes(parsed.amount)) {
       throw AppError.badRequest(
         "Payment amount does not match the membership fee for this application",

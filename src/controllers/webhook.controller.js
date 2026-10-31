@@ -1,6 +1,14 @@
 // src/controllers/webhook.controller.js
 import stripe from "../lib/stripe.js";
 import { reconcileStripeEvent } from "../services/payments.service.js";
+import {
+  handleCheckoutSessionCompleted,
+  handleCheckoutSessionExpired,
+  handleRefundEvent,
+  recordStripeRejection,
+  resolveCapturableUntil,
+} from "../services/stripeLifecycle.service.js";
+import { webhookHooks } from "../services/webhookHooks.js";
 import logger from "../config/logger.js";
 import bizLogger from "../config/bizLogger.js";
 
@@ -29,9 +37,21 @@ export async function handleStripeWebhook(req, res) {
   }
 
   try {
-    await processStripeEvent(event);
+    const result = await processStripeEvent(event);
+    if (result && result.ok === false && result.rejected) {
+      // Permanent: can never apply (unknown object, tenant mismatch). Recorded, then 2xx.
+      await recordStripeRejection(event, result.rejected, result);
+    }
     return res.json({ received: true });
   } catch (err) {
+    if (err?.name === "ZodError") {
+      try {
+        await recordStripeRejection(event, "invalid_event_shape");
+        return res.status(200).json({ received: true, rejected: "invalid_event_shape" });
+      } catch {
+        return res.status(500).json({ received: false });
+      }
+    }
     logger.error(
       {
         error: err.message,
@@ -43,13 +63,13 @@ export async function handleStripeWebhook(req, res) {
       },
       "Error processing Stripe webhook"
     );
-    // Don't return 500 - log the error but return 200 to prevent Stripe retries
-    // The payment can be reconciled manually if needed
-    return res.status(200).json({ received: true, error: err.message });
+    // Transient failure (database, Stripe API, outbox): 500 so Stripe retries. Retries are
+    // safe: an event id is only recorded on the payment once its update has succeeded.
+    return res.status(500).json({ received: false });
   }
 }
 
-async function processStripeEvent(event) {
+export async function processStripeEvent(event) {
   const obj = event?.data?.object || {};
   const metadata = obj?.metadata || {};
   const tenantId =
@@ -65,6 +85,15 @@ async function processStripeEvent(event) {
 
   let paymentData = {};
   switch (event.type) {
+    case "checkout.session.completed":
+    case "checkout.session.async_payment_succeeded":
+      return handleCheckoutSessionCompleted(event, webhookHooks);
+    case "checkout.session.expired":
+      return handleCheckoutSessionExpired(event, webhookHooks);
+    case "charge.refunded":
+    case "charge.refund.updated":
+    case "refund.updated":
+      return handleRefundEvent(event);
     case "payment_intent.amount_capturable_updated": {
       const pi = obj;
       paymentData = {
@@ -73,6 +102,7 @@ async function processStripeEvent(event) {
         currency: pi.currency,
         status: "requires_capture",
         stripeStatus: pi.status,
+        capturableUntil: await resolveCapturableUntil(pi),
         chargeId: pi.latest_charge || pi.charges?.data?.[0]?.id,
         customerId: pi.customer || undefined,
         paymentMethodId: pi.payment_method || undefined,
@@ -284,14 +314,20 @@ async function processStripeEvent(event) {
 
   // Only reconcile if paymentData was set (not all cases set it)
   if (paymentData && paymentData.paymentIntentId) {
-    await reconcileStripeEvent(
+    paymentData.occurredAt = new Date((event.created || Math.floor(Date.now() / 1000)) * 1000);
+    const result = await reconcileStripeEvent(
       {
         eventId: event.id,
         type: event.type,
         payment: paymentData,
       },
       // Stripe metadata tenant is only a claim, checked against the persisted payment.
-      { metadataTenantId: tenantId }
+      { metadataTenantId: tenantId, rethrowOnError: true }
     );
+    if (result?.ok && webhookHooks.afterIntentReconciled) {
+      await webhookHooks.afterIntentReconciled(paymentData.paymentIntentId, event);
+    }
+    return result;
   }
+  return { ok: true };
 }
