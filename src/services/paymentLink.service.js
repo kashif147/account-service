@@ -191,6 +191,28 @@ async function ensureLinkPayment(link) {
   }
 }
 
+/** Session expiry for a new PENDING link, whole seconds (Stripe takes a Unix timestamp). */
+function plannedCheckoutExpiry() {
+  return new Date((Math.floor(Date.now() / 1000) + LINK_TTL_SECONDS) * 1000);
+}
+
+/**
+ * The expires_at sent to Stripe, frozen on the PENDING link. Stripe rejects a reused
+ * idempotency key whose parameters differ, so a resumed request must send exactly the
+ * parameters of the first attempt; a fresh Date.now() would turn every resume into an
+ * idempotency_error -> STRIPE_ERROR while the first session is still open.
+ */
+async function frozenCheckoutExpiry(link) {
+  if (link.checkoutExpiresAt) return Math.floor(new Date(link.checkoutExpiresAt).getTime() / 1000);
+  // A PENDING row written before this field existed: freeze it once (first writer wins).
+  await PaymentLink.updateOne(
+    { _id: link._id, checkoutExpiresAt: { $exists: false } },
+    { $set: { checkoutExpiresAt: plannedCheckoutExpiry() } },
+  );
+  const fresh = await PaymentLink.findById(link._id).select({ checkoutExpiresAt: 1 }).lean();
+  return Math.floor(new Date(fresh.checkoutExpiresAt).getTime() / 1000);
+}
+
 function isRetryableStripeError(err) {
   return (
     ["StripeConnectionError", "StripeAPIError", "StripeRateLimitError"].includes(err?.type) ||
@@ -267,6 +289,7 @@ export async function handlePaymentLinkRequested(payload) {
           pricingBasis: price.pricingBasis,
           requestedBy,
           requestEventKey: d.eventKey || null,
+          checkoutExpiresAt: plannedCheckoutExpiry(),
         })
       ).toObject();
     } catch (err) {
@@ -282,6 +305,7 @@ export async function handlePaymentLinkRequested(payload) {
 
   // 4. Payment record (the ordinary Payment the PaymentIntent will attach to), then session.
   const payment = await ensureLinkPayment(link);
+  const expiresAtSeconds = await frozenCheckoutExpiry(link);
   const metadata = {
     tenantId,
     applicationId,
@@ -314,7 +338,7 @@ export async function handlePaymentLinkRequested(payload) {
         payment_intent_data: { capture_method: "manual", metadata },
         metadata,
         client_reference_id: applicationId,
-        expires_at: Math.floor(Date.now() / 1000) + LINK_TTL_SECONDS,
+        expires_at: expiresAtSeconds,
         success_url: `${base}/payments/success`,
         cancel_url: `${base}/payments/cancel`,
       },

@@ -23,6 +23,9 @@ const PaymentLinkSchema = new Schema(
     checkoutSessionId: { type: String },
     checkoutUrl: { type: String },
     expiresAt: { type: Date },
+    // expires_at sent to Stripe, frozen when the PENDING row is created so a resumed request
+    // repeats the first attempt's parameters under the same Stripe idempotency key.
+    checkoutExpiresAt: { type: Date },
     paymentId: { type: Schema.Types.ObjectId, ref: "Payment" },
     amount: { type: Number, min: 0 },
     currency: { type: String },

@@ -62,7 +62,7 @@ const { ensureTenantChartOfAccounts } = await import("../services/coaProvisionin
 
 // ---------- fake Stripe ----------
 const fake = {
-  sessions: {}, intents: {}, byKey: {}, createCalls: [], expireCalls: [], cancelCalls: [],
+  sessions: {}, intents: {}, byKey: {}, paramsByKey: {}, createCalls: [], expireCalls: [], cancelCalls: [],
   expireError: null, createError: null, n: 0,
 };
 const stripeFake = {
@@ -71,11 +71,17 @@ const stripeFake = {
       async create(params, opts) {
         fake.createCalls.push({ params, opts });
         if (fake.createError) throw fake.createError;
-        if (opts?.idempotencyKey && fake.byKey[opts.idempotencyKey]) return fake.byKey[opts.idempotencyKey];
+        if (opts?.idempotencyKey && fake.byKey[opts.idempotencyKey]) {
+          // Real Stripe: a reused key with different parameters is an idempotency_error.
+          if (JSON.stringify(fake.paramsByKey[opts.idempotencyKey]) !== JSON.stringify(params)) {
+            throw Object.assign(new Error("Keys for idempotent requests can only be used with the same parameters"), { type: "StripeIdempotencyError", statusCode: 400 });
+          }
+          return fake.byKey[opts.idempotencyKey];
+        }
         fake.n += 1;
         const s = { id: `cs_test_${fake.n}`, url: `https://checkout.stripe.com/c/pay/cs_test_${fake.n}`, status: "open", expires_at: params.expires_at, metadata: params.metadata, payment_intent: null };
         fake.sessions[s.id] = s;
-        if (opts?.idempotencyKey) fake.byKey[opts.idempotencyKey] = s;
+        if (opts?.idempotencyKey) { fake.byKey[opts.idempotencyKey] = s; fake.paramsByKey[opts.idempotencyKey] = params; }
         return s;
       },
       async expire(id) {
@@ -216,6 +222,29 @@ test("resume after a crash between PENDING and ISSUED reuses the same Payment an
   assert.equal(again.status, "ISSUED");
   assert.equal(again.checkoutSessionId, link.checkoutSessionId, "Stripe idempotency key returned the same session");
   assert.equal(await Payment.countDocuments({ tenantId: A, applicationId: "app-3" }), 1);
+});
+
+test("resume later sends the first attempt's expires_at (same Stripe idempotency parameters)", { skip }, async () => {
+  const msg = request(A, "app-3b", 1);
+  await links.handlePaymentLinkRequested(msg);
+  const link = await PaymentLink.findOne({ tenantId: A, applicationId: "app-3b" }).lean();
+  assert.ok(link.checkoutExpiresAt, "expiry frozen on the link");
+  await PaymentLink.updateOne({ _id: link._id }, { $set: { status: "PENDING" } });
+  const realNow = Date.now;
+  Date.now = () => realNow() + 90_000; // the consumer retry runs 90 s later
+  try {
+    await links.handlePaymentLinkRequested(msg);
+  } finally {
+    Date.now = realNow;
+  }
+  const again = await PaymentLink.findOne({ tenantId: A, applicationId: "app-3b" }).lean();
+  assert.equal(again.status, "ISSUED", `resume must not fail (failureReason=${again.failureReason})`);
+  assert.equal(again.checkoutSessionId, link.checkoutSessionId);
+  const calls = fake.createCalls.filter((c) => c.opts.idempotencyKey === `link:${A}:app-3b:v1`);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].params.expires_at, calls[0].params.expires_at);
+  const pay = await Payment.findById(link.paymentId).lean();
+  assert.equal(pay.status, "requires_action", "payment not cancelled by a spurious STRIPE_ERROR");
 });
 
 test("business failures are published, not thrown", { skip }, async () => {
