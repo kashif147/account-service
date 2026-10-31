@@ -35,13 +35,12 @@ function canEditSystemDefaultTemplate(req) {
   const normalizedRoles = roles.map(normalizeRoleValue).filter(Boolean);
   return normalizedRoles.some((role) =>
     [
-      "su",
+      // Phase B / Z9: the legacy tenant SU is retired - ASU is the tenant administrator (own tenant only;
+      // shared null-tenant defaults stay A14-frozen for every role).
       "asu",
-      "super user",
       "assistant super user",
       "system admin",
       "system administrator",
-      "superuser",
       "assistantsuperuser",
       "systemadmin",
     ].includes(role),
@@ -164,7 +163,7 @@ export async function updateTemplate(req, res, next) {
     ) {
       return next(
         AppError.forbidden(
-          "Access denied. Only System Administrator with Assistant Super User or Super User role can update system default templates.",
+          "Access denied. Only the tenant administrator (Assistant Super User) or a System Administrator can update system default templates.",
         ),
       );
     }
