@@ -16,6 +16,7 @@ process.env.NODE_ENV = "test";
 process.env.NOTIFICATION_SERVICE_URL = "";
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "sk_test_dummy_paylink";
 delete process.env.PAYMENT_STATE_MACHINE_MODE;
+process.env.PAYMENT_LINK_RETURN_BASE_URL = "https://portal.paylink.test/";
 
 const A = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const B = "bbbbbbbbbbbbbbbbbbbbbbbb";
@@ -441,6 +442,77 @@ test("tenant isolation: same application id in two tenants, own catalogue each; 
   // internal read is tenant-bound
   const listA = await links.listPaymentLinks(A, "app-shared");
   assert.ok(listA.every((l) => l.tenantId === A));
+});
+
+test("tenant envelope: body-only, malformed and mismatched tenants are refused before any write", { skip }, async () => {
+  const before = { create: fake.createCalls.length, out: await OutboxEvent.countDocuments() };
+  // body-only tenant (no envelope): previously accepted through the data fallback
+  const bodyOnly = request(undefined, "app-bodyonly", 1);
+  bodyOnly.data.tenantId = A;
+  const r1 = await links.handlePaymentLinkRequested(bodyOnly);
+  assert.deepEqual([r1.ignored, r1.reason], ["tenant", "missing_envelope_tenant"]);
+  // envelope that is not an internal tenant id (directory GUID / tenant code / object)
+  for (const bad of ["9188040d-6c67-4c5b-b112-36a304b66dad", "MULTIAUTH", "AAAAAAAAAAAAAAAAAAAAAAAA", { $ne: null }]) {
+    const m = request(A, "app-badenv", 1);
+    m.tenantId = bad;
+    const r = await links.handlePaymentLinkRequested(m);
+    assert.deepEqual([r.ignored, r.reason], ["tenant", "invalid_envelope_tenant"], JSON.stringify(bad));
+  }
+  // envelope and body disagree (either direction)
+  for (const [env, body] of [[A, B], [B, A]]) {
+    const m = request(env, "app-mismatch", 1);
+    m.data.tenantId = body;
+    const r = await links.handlePaymentLinkRequested(m);
+    assert.deepEqual([r.ignored, r.reason], ["tenant", "tenant_mismatch"]);
+  }
+  // matching body copy is accepted
+  const same = request(A, "app-sametenant", 1);
+  same.data.tenantId = A;
+  assert.equal((await links.handlePaymentLinkRequested(same)).issued, true);
+  assert.equal(await PaymentLink.countDocuments({ applicationId: { $in: ["app-bodyonly", "app-badenv", "app-mismatch"] } }), 0);
+  assert.equal(await Payment.countDocuments({ applicationId: { $in: ["app-bodyonly", "app-badenv", "app-mismatch"] } }), 0);
+  assert.equal(fake.createCalls.length, before.create + 1, "only the matching request reached Stripe");
+  assert.equal(await OutboxEvent.countDocuments(), before.out + 1, "no outcome event for a refused request");
+});
+
+test("return URL: PAYMENT_LINK_RETURN_BASE_URL is required and validated before any Payment or Stripe call", { skip }, async () => {
+  assert.deepEqual(links.paymentLinkReturnBase("https://portal.paylink.test/"), { ok: true, base: "https://portal.paylink.test" });
+  assert.deepEqual(links.paymentLinkReturnBase("https://portal.paylink.test/members//"), { ok: true, base: "https://portal.paylink.test/members" });
+  assert.equal(links.paymentLinkReturnBase("http://localhost:5173").ok, true);
+  const cases = [[null, "missing"], ["", "missing"], ["   ", "missing"], ["not a url", "invalid"], ["portal.paylink.test", "invalid"],
+    ["http://portal.paylink.test", "insecure"], ["javascript:alert(1)", "insecure"], ["https://user:pw@portal.paylink.test", "invalid"],
+    ["https://portal.paylink.test/?next=x", "invalid"], ["https://portal.paylink.test/#x", "invalid"], ["https://example.com", "placeholder"], ["https://www.example.org", "placeholder"]];
+  for (const [raw, reason] of cases) assert.deepEqual(links.paymentLinkReturnBase(raw), { ok: false, reason }, String(raw));
+
+  const saved = process.env.PAYMENT_LINK_RETURN_BASE_URL;
+  const savedPortal = process.env.PORTAL_BASE_URL;
+  try {
+    process.env.PORTAL_BASE_URL = "https://portal-fallback.paylink.test"; // never used as a fallback
+    for (const [i, value] of [undefined, "https://example.com", "http://portal.paylink.test"].entries()) {
+      if (value === undefined) delete process.env.PAYMENT_LINK_RETURN_BASE_URL;
+      else process.env.PAYMENT_LINK_RETURN_BASE_URL = value;
+      const appId = `app-cfg-${i}`;
+      const before = fake.createCalls.length;
+      const r = await links.handlePaymentLinkRequested(request(A, appId, 1));
+      assert.equal(r.failed, "PAYMENT_LINK_CONFIG_INVALID", String(value));
+      assert.equal(fake.createCalls.length, before, "no Stripe call");
+      assert.equal(await Payment.countDocuments({ tenantId: A, applicationId: appId }), 0, "no Payment record");
+      const link = await PaymentLink.findOne({ tenantId: A, applicationId: appId }).lean();
+      assert.equal(link.status, "FAILED");
+      const out = await OutboxEvent.findOne({ eventKey: `link:${A}:${appId}:v1:failed` }).lean();
+      assert.equal(out.data.reason, "PAYMENT_LINK_CONFIG_INVALID");
+    }
+  } finally {
+    process.env.PAYMENT_LINK_RETURN_BASE_URL = saved;
+    if (savedPortal === undefined) delete process.env.PORTAL_BASE_URL;
+    else process.env.PORTAL_BASE_URL = savedPortal;
+  }
+  // configured: the success/cancel URLs come from it exactly
+  const before = fake.createCalls.length;
+  await links.handlePaymentLinkRequested(request(A, "app-cfg-ok", 1));
+  const call = fake.createCalls[before];
+  assert.equal(call.params.success_url, "https://portal.paylink.test/payments/success");
+  assert.equal(call.params.cancel_url, "https://portal.paylink.test/payments/cancel");
 });
 
 test("checkout.session.completed with a forged metadata tenant is rejected", { skip }, async () => {

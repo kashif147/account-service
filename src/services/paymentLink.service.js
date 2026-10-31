@@ -14,7 +14,7 @@ import { getStripe } from "../lib/stripe.js";
 import logger from "../config/logger.js";
 import { enqueueOutboxEvent, republishOutboxEvent } from "./outbox.service.js";
 import { computeApplicationAmount, PriceError } from "./applicationPrice.service.js";
-import { resolveEventTenant } from "../helpers/eventTenant.js";
+import { requireEnvelopeTenant } from "../helpers/eventTenant.js";
 import { registerWebhookHooks } from "./webhookHooks.js";
 import { enqueueLinkPaymentStatus } from "./payments.service.js";
 
@@ -111,6 +111,29 @@ async function republishOutcome(link) {
     await publishIssued(link);
   }
   return { ok: true, redelivery: true, status: link.status };
+}
+
+/**
+ * Base for the Checkout success/cancel URLs: PAYMENT_LINK_RETURN_BASE_URL, required - there is no
+ * fallback. Must be an absolute https URL (http only for localhost), without credentials, query
+ * or fragment, and not a placeholder host. Trailing slashes are dropped so the URLs (part of the
+ * Stripe idempotent request parameters) are stable.
+ * @returns {{ ok: true, base: string } | { ok: false, reason: "missing"|"invalid"|"insecure"|"placeholder" }}
+ */
+export function paymentLinkReturnBase(raw = process.env.PAYMENT_LINK_RETURN_BASE_URL) {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  if (!value) return { ok: false, reason: "missing" };
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return { ok: false, reason: "invalid" };
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) return { ok: false, reason: "insecure" };
+  if (url.username || url.password || url.search || url.hash) return { ok: false, reason: "invalid" };
+  if (/(^|\.)example\.(com|org|net)$/i.test(url.hostname)) return { ok: false, reason: "placeholder" };
+  return { ok: true, base: `${url.origin}${url.pathname.replace(/\/+$/, "")}` };
 }
 
 /**
@@ -226,11 +249,12 @@ function isRetryableStripeError(err) {
  */
 export async function handlePaymentLinkRequested(payload) {
   const eventType = "applications.payment-link.requested.v1";
-  const { tenantId, mismatch } = resolveEventTenant(payload, { logger, eventType });
-  if (!tenantId || mismatch) {
-    logger.warn({ eventId: payload?.eventId, mismatch }, "Payment link request without a trusted tenant - ignored");
-    return { ok: false, ignored: "tenant" };
+  const tenant = requireEnvelopeTenant(payload);
+  if (!tenant.ok) {
+    logger.warn({ eventType, eventId: payload?.eventId, reason: tenant.reason }, "Payment link request without a trusted envelope tenant - ignored");
+    return { ok: false, ignored: "tenant", reason: tenant.reason };
   }
+  const { tenantId } = tenant;
   const d = payload?.data || {};
   const applicationId = String(d.applicationId || "").trim();
   const linkVersion = Number(d.linkVersion);
@@ -253,6 +277,13 @@ export async function handlePaymentLinkRequested(payload) {
   // A newer version exists: this request is stale.
   if (await PaymentLink.exists({ tenantId, applicationId, linkVersion: { $gt: linkVersion } })) {
     return { ok: true, ignored: "superseded" };
+  }
+
+  // Return URLs: configuration is checked before any Payment record or Stripe call.
+  const returnBase = paymentLinkReturnBase();
+  if (!returnBase.ok) {
+    logger.error({ ...ids, reason: returnBase.reason }, "PAYMENT_LINK_RETURN_BASE_URL missing or invalid - no Checkout Session created");
+    return failLink(ids, "PAYMENT_LINK_CONFIG_INVALID", { action, requestedBy });
   }
 
   // 2. One authorised/captured payment per application.
@@ -315,7 +346,7 @@ export async function handlePaymentLinkRequested(payload) {
     purpose: "applicationFee",
     source: "payment-link",
   };
-  const base = process.env.PAYMENT_LINK_RETURN_BASE_URL || process.env.PORTAL_BASE_URL || "https://example.com";
+  const base = returnBase.base;
   let session;
   try {
     session = await stripe().checkout.sessions.create(

@@ -72,3 +72,24 @@ export function resolveLedgerEventTenant(payload, { logger, eventType } = {}) {
   }
   return r.tenantId;
 }
+
+const INTERNAL_TENANT_ID = /^[0-9a-f]{24}$/;
+
+/**
+ * Strict tenant for the payment-link events (applications.payment-link.*, payments.payment-link.*,
+ * payments.application-payment.*). Unlike resolveEventTenant there is no body fallback: the
+ * envelope tenantId (set by the producer's publisher from its own trusted context) is required
+ * and must be an internal ProjectShell tenant id; a data.tenantId, when present, must equal it.
+ * A refused event is never written anywhere (the caller logs and acknowledges it).
+ *
+ * @returns {{ ok: true, tenantId: string } | { ok: false, reason: "missing_envelope_tenant"|"invalid_envelope_tenant"|"tenant_mismatch" }}
+ */
+export function requireEnvelopeTenant(payload) {
+  const clean = (v) => (typeof v === "string" ? v.trim() : v == null ? "" : null);
+  const envelope = clean(payload?.tenantId);
+  const body = payload?.data && typeof payload.data === "object" ? clean(payload.data.tenantId) : "";
+  if (envelope === null || (envelope && !INTERNAL_TENANT_ID.test(envelope))) return { ok: false, reason: "invalid_envelope_tenant" };
+  if (!envelope) return { ok: false, reason: "missing_envelope_tenant" };
+  if (body === null || (body && body !== envelope)) return { ok: false, reason: "tenant_mismatch" };
+  return { ok: true, tenantId: envelope };
+}
