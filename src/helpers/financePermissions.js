@@ -52,9 +52,8 @@ export function collectRequestPermissions(req) {
   return [...new Set(merged)];
 }
 
+// Phase B / Z9: the legacy tenant SU is retired; ASU is the tenant administrator (own tenant only).
 const FINANCE_ACTION_ROLES = new Set([
-  "SU",
-  "SUPER USER",
   "ASU",
   "ASSISTANT SUPER USER",
   "AM",

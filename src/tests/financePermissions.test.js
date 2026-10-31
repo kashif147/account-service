@@ -50,9 +50,11 @@ describe("financePermissions", () => {
     expect(hasFinanceActionRole(req)).toBe(true);
   });
 
-  test("hasFinanceActionRole allows Super User roles", () => {
-    expect(hasFinanceActionRole({ user: { roles: ["SU"] } })).toBe(true);
+  test("hasFinanceActionRole allows the tenant administrator (ASU); the retired SU grants nothing (Phase B / Z9)", () => {
     expect(hasFinanceActionRole({ user: { roles: ["ASU"] } })).toBe(true);
+    expect(hasFinanceActionRole({ user: { roles: [{ name: "Assistant Super User" }] } })).toBe(true);
+    expect(hasFinanceActionRole({ user: { roles: ["SU"] } })).toBe(false);
+    expect(hasFinanceActionRole({ user: { roles: [{ name: "Super User" }] } })).toBe(false);
   });
 
   test("hasFinanceActionRole allows Deputy Accounts Manager role name", () => {
