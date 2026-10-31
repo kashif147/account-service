@@ -123,6 +123,15 @@ const PaymentSchema = new Schema(
     external: { type: ExternalSubSchema, default: {} },
     metadata: { type: Map, of: String },
     audit: { type: AuditSubSchema, default: {} },
+    // Deferred payment link (PaymentLink._id) - set only for link payments, which use the
+    // lifecycle state machine authoritatively and never publish application.status.updated.
+    paymentLinkId: { type: Schema.Types.ObjectId, ref: "PaymentLink", default: null },
+    linkVersion: { type: Number },
+    // Card authorisation hold deadline (charge.payment_method_details.card.capture_before).
+    capturableUntil: { type: Date },
+    authorisedAt: { type: Date },
+    expiryWarnedAt: { type: Date },
+    lastStripeEventAt: { type: Date },
     webhookEventIds: { type: [String], default: [], index: true },
     auditHistory: { type: [PaymentAuditEventSubSchema], default: [] },
   },
@@ -147,6 +156,15 @@ PaymentSchema.index(
 );
 
 PaymentSchema.index({ tenantId: 1, memberId: 1, createdAt: -1 });
+PaymentSchema.index(
+  { paymentLinkId: 1 },
+  { partialFilterExpression: { paymentLinkId: { $type: "objectId" } } },
+);
+// Authorisation-expiry scheduler scan.
+PaymentSchema.index(
+  { status: 1, capturableUntil: 1 },
+  { partialFilterExpression: { capturableUntil: { $type: "date" } } },
+);
 PaymentSchema.index({
   tenantId: 1,
   applicationId: 1,
@@ -224,6 +242,8 @@ export const zReconcile = z.object({
     failureMessage: z.string().optional(),
     nextAction: z.any().optional(),
     metadata: z.record(z.string()).optional(),
+    capturableUntil: z.union([z.string(), z.date()]).optional(),
+    occurredAt: z.union([z.string(), z.date()]).optional(),
   }),
 });
 
