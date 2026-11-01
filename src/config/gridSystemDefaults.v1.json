@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "source": {
+    "kind": "dev-shared-row-snapshot",
+    "decision": "Owner decision 2026-11-01: ownership migration only - each tenant-owned default reproduces the currently effective live shared row exactly (columns, order, labels, filters, flags). The CRM grid-column-defaults.json differences are NOT applied.",
+    "database": "account-service-dev",
+    "rows": {
+      "creditnotes": "…d559bd",
+      "journaladjustments": "…43f8fe",
+      "onlinepayment": "…6ab7d3",
+      "reconciliation": "…f59ccf"
+    },
+    "snapshotTaken": "2026-11-01"
+  },
+  "templates": {
+    "creditnotes": {
+      "name": "System default",
+      "templateType": "creditnotes",
+      "columns": [
+        "docNo",
+        "invoiceDocNo",
+        "memberId",
+        "amount",
+        "status",
+        "effectiveDate",
+        "reason",
+        "createdAt"
+      ],
+      "columnLabels": {
+        "docNo": "CN ref",
+        "invoiceDocNo": "Invoice",
+        "memberId": "Member",
+        "amount": "Amount",
+        "status": "Status",
+        "effectiveDate": "Effective",
+        "reason": "Reason",
+        "createdAt": "Created At",
+        "createdBy": "Created By"
+      },
+      "filters": {},
+      "visibleFilters": [],
+      "isDefault": true,
+      "pinned": false
+    },
+    "journaladjustments": {
+      "name": "System default",
+      "templateType": "journaladjustments",
+      "columns": [
+        "approvalStatus",
+        "debitAccount",
+        "creditAccount",
+        "amount",
+        "memberId",
+        "reason",
+        "effectiveDate"
+      ],
+      "columnLabels": {
+        "approvalStatus": "Status",
+        "debitAccount": "Debit",
+        "creditAccount": "Credit",
+        "amount": "Amount",
+        "memberId": "Member",
+        "reason": "Reason",
+        "effectiveDate": "Effective",
+        "docNo": "Doc No",
+        "createdAt": "Created At",
+        "_actions": "Actions"
+      },
+      "filters": {},
+      "visibleFilters": [],
+      "isDefault": false,
+      "pinned": false
+    },
+    "onlinepayment": {
+      "name": "System default",
+      "templateType": "onlinepayment",
+      "columns": [
+        "memberNo",
+        "category",
+        "fullName",
+        "membershipStatus",
+        "renewalDate",
+        "transactionId",
+        "paidAmount",
+        "date",
+        "paymentMethod",
+        "paymentStatus",
+        "billingCycle",
+        "email",
+        "phone",
+        "joinDate"
+      ],
+      "columnLabels": {
+        "memberNo": "Member / Application No",
+        "category": "Category",
+        "fullName": "Full Name",
+        "membershipStatus": "Membership Status",
+        "renewalDate": "Renewal Date",
+        "transactionId": "Transaction ID",
+        "paidAmount": "Paid Amount",
+        "date": "Payment Date",
+        "paymentMethod": "Payment Method",
+        "paymentStatus": "Payment Status",
+        "billingCycle": "Billing Cycle",
+        "email": "Email",
+        "phone": "Phone",
+        "joinDate": "Join Date",
+        "_actions": "Actions"
+      },
+      "filters": {},
+      "visibleFilters": [],
+      "isDefault": false,
+      "pinned": false
+    },
+    "reconciliation": {
+      "name": "System default",
+      "templateType": "reconciliation",
+      "columns": [
+        "bankRef",
+        "memberId",
+        "amount",
+        "expectedAmount",
+        "amountDifference",
+        "matchConfidence",
+        "suggestedAction",
+        "clearingAccountCode",
+        "reconciliationStatus",
+        "matchedGlDocNo",
+        "sourceType",
+        "_actions"
+      ],
+      "columnLabels": {
+        "bankRef": "Bank ref",
+        "memberId": "Member",
+        "amount": "Amount",
+        "expectedAmount": "Expected",
+        "amountDifference": "Difference",
+        "matchConfidence": "Confidence",
+        "suggestedAction": "Suggested action",
+        "clearingAccountCode": "Clearing",
+        "reconciliationStatus": "Rec Status",
+        "matchedGlDocNo": "Matched GL",
+        "sourceType": "Source",
+        "_actions": "Actions"
+      },
+      "filters": {},
+      "visibleFilters": [],
+      "isDefault": false,
+      "pinned": false
+    }
+  }
+}

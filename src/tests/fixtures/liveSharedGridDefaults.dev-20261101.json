@@ -1,0 +1,159 @@
+{
+  "takenAt": "2026-11-01T11:22:55Z",
+  "database": "account-service-dev",
+  "collection": "templates",
+  "note": "Stored configuration of the live DEV shared (tenantless) account grid system defaults, field presence preserved (absent = not stored).",
+  "rows": {
+    "creditnotes": {
+      "id": "…d559bd",
+      "updatedAt": "2026-05-30T18:58:00.455Z",
+      "stored": {
+        "name": "System default",
+        "templateType": "creditnotes",
+        "columns": [
+          "docNo",
+          "invoiceDocNo",
+          "memberId",
+          "amount",
+          "status",
+          "effectiveDate",
+          "reason",
+          "createdAt"
+        ],
+        "columnLabels": {
+          "docNo": "CN ref",
+          "invoiceDocNo": "Invoice",
+          "memberId": "Member",
+          "amount": "Amount",
+          "status": "Status",
+          "effectiveDate": "Effective",
+          "reason": "Reason",
+          "createdAt": "Created At",
+          "createdBy": "Created By"
+        },
+        "isDefault": true,
+        "pinned": false,
+        "systemDefault": true,
+        "tenantId": null
+      }
+    },
+    "journaladjustments": {
+      "id": "…43f8fe",
+      "updatedAt": "2026-05-30T20:22:37.983Z",
+      "stored": {
+        "name": "System default",
+        "templateType": "journaladjustments",
+        "columns": [
+          "approvalStatus",
+          "debitAccount",
+          "creditAccount",
+          "amount",
+          "memberId",
+          "reason",
+          "effectiveDate"
+        ],
+        "columnLabels": {
+          "approvalStatus": "Status",
+          "debitAccount": "Debit",
+          "creditAccount": "Credit",
+          "amount": "Amount",
+          "memberId": "Member",
+          "reason": "Reason",
+          "effectiveDate": "Effective",
+          "docNo": "Doc No",
+          "createdAt": "Created At",
+          "_actions": "Actions"
+        },
+        "isDefault": false,
+        "pinned": false,
+        "systemDefault": true,
+        "tenantId": null
+      }
+    },
+    "onlinepayment": {
+      "id": "…6ab7d3",
+      "updatedAt": "2026-05-30T21:42:02.203Z",
+      "stored": {
+        "name": "System default",
+        "templateType": "onlinepayment",
+        "columns": [
+          "memberNo",
+          "category",
+          "fullName",
+          "membershipStatus",
+          "renewalDate",
+          "transactionId",
+          "paidAmount",
+          "date",
+          "paymentMethod",
+          "paymentStatus",
+          "billingCycle",
+          "email",
+          "phone",
+          "joinDate"
+        ],
+        "columnLabels": {
+          "memberNo": "Member / Application No",
+          "category": "Category",
+          "fullName": "Full Name",
+          "membershipStatus": "Membership Status",
+          "renewalDate": "Renewal Date",
+          "transactionId": "Transaction ID",
+          "paidAmount": "Paid Amount",
+          "date": "Payment Date",
+          "paymentMethod": "Payment Method",
+          "paymentStatus": "Payment Status",
+          "billingCycle": "Billing Cycle",
+          "email": "Email",
+          "phone": "Phone",
+          "joinDate": "Join Date",
+          "_actions": "Actions"
+        },
+        "isDefault": false,
+        "pinned": false,
+        "systemDefault": true,
+        "tenantId": null
+      }
+    },
+    "reconciliation": {
+      "id": "…f59ccf",
+      "updatedAt": "2026-05-31T10:27:28.513Z",
+      "stored": {
+        "name": "System default",
+        "templateType": "reconciliation",
+        "columns": [
+          "bankRef",
+          "memberId",
+          "amount",
+          "expectedAmount",
+          "amountDifference",
+          "matchConfidence",
+          "suggestedAction",
+          "clearingAccountCode",
+          "reconciliationStatus",
+          "matchedGlDocNo",
+          "sourceType",
+          "_actions"
+        ],
+        "columnLabels": {
+          "bankRef": "Bank ref",
+          "memberId": "Member",
+          "amount": "Amount",
+          "expectedAmount": "Expected",
+          "amountDifference": "Difference",
+          "matchConfidence": "Confidence",
+          "suggestedAction": "Suggested action",
+          "clearingAccountCode": "Clearing",
+          "reconciliationStatus": "Rec Status",
+          "matchedGlDocNo": "Matched GL",
+          "sourceType": "Source",
+          "_actions": "Actions"
+        },
+        "isDefault": false,
+        "pinned": false,
+        "systemDefault": true,
+        "tenantId": null
+      }
+    }
+  }
+}
