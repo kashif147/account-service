@@ -52,6 +52,7 @@ import express from "express";
 import multer from "multer";
 import compression from "compression";
 import pinoHttp from "pino-http";
+import { safeRequestLogFields, safeResponseLogFields } from "./helpers/requestLogFields.js";
 import helmet from "helmet";
 import bodyParser from "body-parser";
 import { corsMiddleware } from "./config/cors.js";
@@ -175,6 +176,9 @@ app.use(
     autoLogging: {
       ignore: (req) => req.path === "/health" || req.path.startsWith("/health/"),
     },
+    // Safe request metadata only: the default serializer logged every header (Authorization
+    // bearer tokens, the Stripe webhook signature, x-user-* identity) and the query string.
+    serializers: { req: safeRequestLogFields, res: safeResponseLogFields },
   })
 );
 
