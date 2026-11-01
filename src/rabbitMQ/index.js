@@ -40,7 +40,10 @@ import {
   handleMemberCreated,
 } from "../handlers/application.approval.listener.js";
 import { handleSubscriptionCategoryChanged } from "./listeners/subscription.category.change.listener.js";
+import provisioningStepListener from "./listeners/provisioning.step.listener.cjs";
 import { processEventCancellationRefunds } from "../services/eventCancellationRefund.service.js";
+
+const { setupProvisioningStepConsumer } = provisioningStepListener;
 
 export const PAYMENT_LINK_EXCHANGE_MAPPING = Object.freeze({
   "applications.payment-link.requested.v1": "application.events",
@@ -520,6 +523,15 @@ export async function setupConsumers() {
 
     await consumer.consume(BATCH_PROCESS_QUEUE, { prefetch: 1 });
     logger.info({ queue: BATCH_PROCESS_QUEUE }, "Batch process consumer ready");
+
+    // Phase B / P4: provisioning step consumer (account-service:grid-system-defaults / ensure-defaults only) -
+    // bound ONLY with PROVISIONING_CONSUMER=on (default off). Its own try/catch, like the other consumer sections.
+    try {
+      const r = await setupProvisioningStepConsumer(consumer, assertExchangeBindable);
+      if (r.bound) logger.info("Provisioning step consumer ready", { queue: r.queue });
+    } catch (error) {
+      logger.error("Provisioning step consumer not started", { error: error.message });
+    }
 
     logger.info("All consumers set up successfully");
   } catch (error) {
