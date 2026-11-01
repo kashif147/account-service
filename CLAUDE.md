@@ -33,7 +33,6 @@ node scripts/migrations/ledger-tenancy.js [--report|--backfill|--create-indexes|
 node scripts/migrate-money-to-cents.js
 node scripts/relink-refund-gl-for-application.js
 node scripts/seed-events-income-coa.js / seed-cpd-events-income-coa.js --tenant=<id>
-node scripts/seed-grid-system-default-template.js
 
 # Production
 npm start                # node bin/account-service.js
