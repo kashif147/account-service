@@ -1,0 +1,324 @@
+{
+  "version": 1,
+  "source": {
+    "kind": "crm-manifest",
+    "repo": "ProjectShell-1",
+    "path": "src/config/grid-column-defaults.json",
+    "commit": "7983fed",
+    "pages": [
+      "creditnotes",
+      "journaladjustments",
+      "onlinepayment",
+      "reconciliation"
+    ],
+    "pagesSha256": "6d2df960fd420f741fc3fc9c4e6d85e51e9bbd3db89db4863ae01bfef6fd1908"
+  },
+  "templates": {
+    "creditnotes": {
+      "name": "System default",
+      "templateType": "creditnotes",
+      "columns": [
+        "docNo",
+        "invoiceDocNo",
+        "memberId",
+        "amount",
+        "status",
+        "effectiveDate",
+        "reason",
+        "createdBy",
+        "createdAt",
+        "_actions"
+      ],
+      "columnLabels": {
+        "docNo": "CN ref",
+        "invoiceDocNo": "Invoice",
+        "memberId": "Member",
+        "amount": "Amount",
+        "status": "Status",
+        "effectiveDate": "Effective",
+        "reason": "Reason",
+        "createdBy": "Created By",
+        "createdAt": "Created At",
+        "_actions": "Actions"
+      },
+      "filters": {
+        "status": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "docNo": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "invoiceDocNo": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "memberId": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "effectiveDate": {
+          "operator": "between",
+          "values": []
+        },
+        "createdAt": {
+          "operator": "between",
+          "values": []
+        },
+        "amount": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "reason": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "createdBy": {
+          "operator": "equal_to",
+          "values": []
+        }
+      },
+      "visibleFilters": []
+    },
+    "journaladjustments": {
+      "name": "System default",
+      "templateType": "journaladjustments",
+      "columns": [
+        "docNo",
+        "approvalStatus",
+        "debitAccount",
+        "creditAccount",
+        "amount",
+        "memberId",
+        "reason",
+        "effectiveDate",
+        "createdAt",
+        "_actions"
+      ],
+      "columnLabels": {
+        "docNo": "Adjustment reference",
+        "approvalStatus": "Status",
+        "debitAccount": "Debit",
+        "creditAccount": "Credit",
+        "amount": "Amount",
+        "memberId": "Member",
+        "reason": "Reason",
+        "effectiveDate": "Effective",
+        "createdAt": "Created At",
+        "_actions": "Actions"
+      },
+      "filters": {
+        "approvalStatus": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "docNo": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "debitAccount": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "creditAccount": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "memberId": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "reason": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "effectiveDate": {
+          "operator": "between",
+          "values": []
+        },
+        "createdAt": {
+          "operator": "between",
+          "values": []
+        }
+      },
+      "visibleFilters": []
+    },
+    "onlinepayment": {
+      "name": "System default",
+      "templateType": "onlinepayment",
+      "columns": [
+        "memberNo",
+        "category",
+        "fullName",
+        "membershipStatus",
+        "renewalDate",
+        "transactionId",
+        "paidAmount",
+        "date",
+        "paymentMethod",
+        "paymentStatus",
+        "billingCycle",
+        "email",
+        "phone",
+        "joinDate",
+        "_actions"
+      ],
+      "columnLabels": {
+        "memberNo": "Member / Application No",
+        "category": "Membership Category",
+        "fullName": "Full Name",
+        "membershipStatus": "Membership Status",
+        "renewalDate": "Renewal Date",
+        "transactionId": "Transaction ID",
+        "paidAmount": "Paid Amount",
+        "date": "Payment Date",
+        "paymentMethod": "Payment Method",
+        "paymentStatus": "Payment Status",
+        "billingCycle": "Billing Cycle",
+        "email": "Email",
+        "phone": "Phone",
+        "joinDate": "Join Date",
+        "_actions": "Actions"
+      },
+      "filters": {
+        "membershipStatus": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "paymentStatus": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "paymentMethod": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "billingCycle": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "category": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "memberNo": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "transactionId": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "fullName": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "email": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "phone": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "renewalDate": {
+          "operator": "between",
+          "values": []
+        },
+        "date": {
+          "operator": "between",
+          "values": []
+        },
+        "joinDate": {
+          "operator": "between",
+          "values": []
+        },
+        "paidAmount": {
+          "operator": "equal_to",
+          "values": []
+        }
+      },
+      "visibleFilters": []
+    },
+    "reconciliation": {
+      "name": "System default",
+      "templateType": "reconciliation",
+      "columns": [
+        "bankRef",
+        "memberId",
+        "amount",
+        "expectedAmount",
+        "amountDifference",
+        "matchConfidence",
+        "suggestedAction",
+        "clearingAccountCode",
+        "reconciliationStatus",
+        "matchedGlDocNo",
+        "sourceType",
+        "_actions"
+      ],
+      "columnLabels": {
+        "bankRef": "Bank ref",
+        "memberId": "Member",
+        "amount": "Amount",
+        "expectedAmount": "Expected",
+        "amountDifference": "Difference",
+        "matchConfidence": "Confidence",
+        "suggestedAction": "Suggested action",
+        "clearingAccountCode": "Clearing",
+        "reconciliationStatus": "Rec Status",
+        "matchedGlDocNo": "Matched GL",
+        "sourceType": "Source",
+        "_actions": "Actions"
+      },
+      "filters": {
+        "bankRef": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "memberId": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "amount": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "expectedAmount": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "amountDifference": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "matchConfidence": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "suggestedAction": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "clearingAccountCode": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "reconciliationStatus": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "matchedGlDocNo": {
+          "operator": "equal_to",
+          "values": []
+        },
+        "sourceType": {
+          "operator": "equal_to",
+          "values": []
+        }
+      },
+      "visibleFilters": []
+    }
+  }
+}
