@@ -75,6 +75,9 @@ function loadCanonical(file = CANONICAL_PATH) {
     if (t.columnLabels != null && typeof t.columnLabels !== "object") throw new Error(`${type}: columnLabels must be an object`);
     if (t.filters != null && typeof t.filters !== "object") throw new Error(`${type}: filters must be an object`);
     if (t.aliases != null && !Array.isArray(t.aliases)) throw new Error(`${type}: aliases must be an array`);
+    for (const flag of ["isDefault", "pinned"]) {
+      if (t[flag] != null && typeof t[flag] !== "boolean") throw new Error(`${type}: ${flag} must be a boolean`);
+    }
   }
   return data;
 }
@@ -95,8 +98,9 @@ function buildTenantDefault(canonical, tenantId, type, now, _id) {
     columns: [...t.columns],
     columnLabels: { ...(t.columnLabels || {}) },
     visibleFilters: [...(t.visibleFilters || [])],
-    isDefault: false,
-    pinned: false,
+    // flags copied from the manifest so a migrated row behaves exactly like the row it replaces
+    isDefault: t.isDefault === true,
+    pinned: t.pinned === true,
     systemDefault: true,
     meta: { deleted: false, deletedAt: null },
     createdAt: now,
