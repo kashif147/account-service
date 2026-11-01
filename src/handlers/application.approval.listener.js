@@ -310,7 +310,7 @@ export async function getMembershipPricing({
       { categoryName, profileId, applicationId },
       "No-fee membership category resolved; annual fee set to zero"
     );
-    return { incomeCode: "4090", annualFee: 0 };
+    return { incomeCode: "4090", annualFee: 0, priceSource: "no_fee_category" };
   }
 
   if (!tenantId) {
@@ -521,6 +521,10 @@ export async function getMembershipPricing({
     incomeCode = await getIncomeCodeForCategory(categoryName, tenantId);
   }
 
+  // Where the fee came from, for callers that must not charge a default (payment links accept
+  // only "catalogue"). Additive: existing callers ignore it and keep the fallback below.
+  const priceSource = annualFee == null ? "fallback" : "catalogue";
+
   // Fallback to defaults only if no pricing found
   if (annualFee == null) {
     // fallback defaults if no pricing found (in cents to match pricing table format)
@@ -546,7 +550,7 @@ export async function getMembershipPricing({
 
   // Return annualFee in cents (as stored in pricing table)
   // Note: Caller should convert to base currency (divide by 100) when passing to invoice function
-  return { incomeCode, annualFee };
+  return { incomeCode, annualFee, priceSource };
 }
 
 /**

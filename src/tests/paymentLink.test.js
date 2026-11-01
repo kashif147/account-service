@@ -109,13 +109,17 @@ stripeClient.paymentIntents.capture = stripeFake.paymentIntents.capture;
 stripeClient.paymentIntents.cancel = stripeFake.paymentIntents.cancel;
 
 // ---------- stub catalogue ----------
-const catalogue = { "general nurse": 29900, student: 0 };
+// Mirrors the real resolver's contract (application.approval.listener.js getMembershipPricing): each
+// tenant has ITS OWN catalogue -> priceSource "catalogue"; nothing matched -> the legacy hardcoded
+// default (50000) with priceSource "fallback", which a payment link must never charge.
+const catalogue = { "general nurse": 29900, "postgraduate student": 32600, student: 0 };
+const catalogueB = { "general nurse": 41200 };
 links.setPaymentLinkPricingDeps({
   getMembershipPricing: async ({ categoryName, tenantId }) => {
-    if (tenantId === B && categoryName === "General Nurse") return { annualFee: 50000 };
-    const fee = catalogue[String(categoryName).toLowerCase()];
-    if (fee === undefined) throw new Error("no product");
-    return { annualFee: fee };
+    const own = tenantId === A ? catalogue : tenantId === B ? catalogueB : {};
+    const fee = own[String(categoryName).toLowerCase()];
+    if (fee === undefined) return { incomeCode: "4000", annualFee: 50000, priceSource: "fallback" };
+    return { incomeCode: "4000", annualFee: fee, priceSource: "catalogue" };
   },
 });
 links.registerPaymentLinkWebhookHooks();
@@ -423,7 +427,7 @@ test("tenant isolation: same application id in two tenants, own catalogue each; 
   const la = await PaymentLink.findOne({ tenantId: A, applicationId: "app-shared" }).lean();
   const lb = await PaymentLink.findOne({ tenantId: B, applicationId: "app-shared" }).lean();
   assert.equal(la.amount, 29900);
-  assert.equal(lb.amount, 50000);
+  assert.equal(lb.amount, 41200);
   assert.notEqual(String(la.paymentId), String(lb.paymentId));
   assert.equal((await Payment.findById(lb.paymentId).lean()).tenantId, B);
   // an authorisation in A does not block B
@@ -628,8 +632,8 @@ test("Credit Card -> full annual fee; client amount / paymentOption cannot overr
 test("pricing is tenant/product scoped: same category, different tenant catalogue", { skip }, async () => {
   await links.handlePaymentLinkRequested(request(B, "app-q-b", 1, { pricing: { membershipCategory: "General Nurse", paymentType: "Direct Debit" } }));
   const lb = await PaymentLink.findOne({ tenantId: B, applicationId: "app-q-b" }).lean();
-  assert.equal(lb.amount, 12500, "tenant B annual 50000 / 4");
-  assert.equal(lb.pricingBasis.annualFee, 50000);
+  assert.equal(lb.amount, 10300, "tenant B's own catalogue: annual 41200 / 4");
+  assert.equal(lb.pricingBasis.annualFee, 41200);
 });
 
 test("three-month link keeps its frozen price; REPLACE re-reads the catalogue with the same rule", { skip }, async () => {
@@ -674,3 +678,48 @@ test("rounding follows the existing portal guard rule exactly", async () => {
   assert.equal(pricing.pricingBasisFor("Bitcoin"), null);
 });
 
+
+test("no catalogue price in THIS tenant -> PRICE_UNAVAILABLE: failed link + failed event; no Payment, no Stripe call, never the 50000 fallback, never another tenant's price", { skip }, async () => {
+  const C = "cccccccccccccccccccccccc"; // a tenant with no catalogue at all
+  const cases = [
+    [B, "app-nocat-b", "Postgraduate Student"], // priced in A's catalogue only
+    [C, "app-nocat-c", "General Nurse"], // priced in A's and B's catalogues only
+  ];
+  for (const [tenant, app, category] of cases) {
+    const before = { create: fake.createCalls.length, payments: await Payment.countDocuments() };
+    const r = await links.handlePaymentLinkRequested(request(tenant, app, 1, { pricing: { membershipCategory: category, paymentType: "Credit Card" } }));
+    assert.equal(r.failed, "PRICE_UNAVAILABLE", app);
+    assert.equal(fake.createCalls.length, before.create, "no Stripe call / Checkout Session");
+    assert.equal(await Payment.countDocuments(), before.payments, "no Payment");
+    const link = await PaymentLink.findOne({ tenantId: tenant, applicationId: app }).lean();
+    assert.equal(link.status, "FAILED");
+    assert.equal(link.failureReason, "PRICE_UNAVAILABLE");
+    assert.equal(link.amount ?? null, null, "no amount recorded");
+    const out = await OutboxEvent.findOne({ eventKey: `link:${tenant}:${app}:v1:failed` }).lean();
+    assert.equal(out.tenantId, tenant);
+    assert.equal(out.data.reason, "PRICE_UNAVAILABLE", "the application does not stay pending");
+  }
+  assert.equal(await PaymentLink.countDocuments({ amount: 50000 }), 0, "no link at the hardcoded default");
+});
+
+test("real resolver: authoritative tenant catalogue price only (A: 32600 annual / 8150 three months); a tenant without catalogue -> PRICE_UNAVAILABLE while the legacy resolver still returns its 50000 fallback", { skip }, async () => {
+  const { getMembershipPricing } = await import("../handlers/application.approval.listener.js");
+  const { default: Product } = await import("../models/product.model.js");
+  const { default: Pricing } = await import("../models/pricing.model.js");
+  const start = new Date(Date.UTC(2020, 0, 1));
+  await Product.collection.insertOne({ _id: "p-real-4000", tenantId: A, name: "General (all grades)", code: "4000", productTypeId: "pt-mem", status: "Active", isActive: true, isDeleted: false });
+  await Pricing.collection.insertOne({ _id: "pr-real-4000", tenantId: A, productId: "p-real-4000", currency: "EUR", price: 32600, effectiveFrom: start, effectiveTo: null, status: "Active", isActive: true, isDeleted: false });
+  const annual = await pricing.computeApplicationAmount({ tenantId: A, applicationId: "real-1", membershipCategory: "General (all grades)", paymentType: "Credit Card" });
+  assert.deepEqual([annual.amount, annual.paymentOption, annual.pricingBasis.basis, annual.pricingBasis.annualFee], [32600, "FULL", "ANNUAL", 32600]);
+  const quarter = await pricing.computeApplicationAmount({ tenantId: A, applicationId: "real-2", membershipCategory: "General (all grades)", paymentType: "Direct Debit" });
+  assert.deepEqual([quarter.amount, quarter.paymentOption, quarter.pricingBasis.basis], [8150, "FIRST_INSTALMENT", "THREE_MONTHS"]);
+  await assert.rejects(
+    pricing.computeApplicationAmount({ tenantId: B, applicationId: "real-3", membershipCategory: "General (all grades)", paymentType: "Credit Card" }),
+    (e) => e.name === "PriceError" && e.reason === "PRICE_UNAVAILABLE",
+  );
+  // the shared legacy resolver itself is unchanged: still falls back for approval invoicing
+  const legacy = await getMembershipPricing({ categoryName: "General (all grades)", subscriptionDetails: {}, startDate: "2026-06-01", tenantId: B, applicationId: "real-3" });
+  assert.deepEqual([legacy.annualFee, legacy.priceSource], [50000, "fallback"]);
+  const own = await getMembershipPricing({ categoryName: "General (all grades)", subscriptionDetails: {}, startDate: "2026-06-01", tenantId: A, applicationId: "real-1" });
+  assert.deepEqual([own.annualFee, own.priceSource], [32600, "catalogue"]);
+});

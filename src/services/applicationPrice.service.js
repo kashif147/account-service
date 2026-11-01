@@ -67,8 +67,9 @@ export async function computeApplicationAmount(
   const getMembershipPricing = deps.getMembershipPricing || defaultGetMembershipPricing;
   const today = now.toISOString().split("T")[0];
   let annualFee = null;
+  let priceSource = null;
   try {
-    ({ annualFee } = await getMembershipPricing({
+    ({ annualFee, priceSource } = await getMembershipPricing({
       categoryName,
       subscriptionDetails: {},
       startDate: today,
@@ -78,8 +79,18 @@ export async function computeApplicationAmount(
     }));
   } catch {
     annualFee = null;
+    priceSource = null;
   }
-  // A no-fee category is the only "not required" case; a non-card method is not.
+  // Payment links charge only an authoritative price from THIS tenant's catalogue. The shared
+  // resolver falls back to a hardcoded default when no product/pricing matches (legacy approval
+  // invoicing relies on that); a link must never charge it.
+  if (priceSource === "no_fee_category" && annualFee === 0) {
+    throw new PriceError("PAYMENT_NOT_REQUIRED", "No fee for this membership category");
+  }
+  if (priceSource !== "catalogue") {
+    throw new PriceError("PRICE_UNAVAILABLE", "No catalogue price for this membership category in this tenant");
+  }
+  // A catalogue row priced at zero is also "not required"; a non-card method is not.
   if (annualFee === 0) throw new PriceError("PAYMENT_NOT_REQUIRED", "No fee for this membership category");
   if (!Number.isInteger(annualFee) || annualFee <= 0) {
     throw new PriceError("PRICE_UNAVAILABLE", "No payable catalogue price for this membership category");
