@@ -522,9 +522,15 @@ export async function createIntent(input, ctx, caller = {}) {
   }
   // Every reuse lookup below is scoped to this payer (and target) for portal-like callers.
   const ownerScope = portalLike ? payerOwnerFilter(payer.userId) : null;
+  // A portal-like caller only ever reuses its own still-UNATTACHED intent for the same
+  // event/course (an intent already bound to a registration is never handed out again).
   const targetScope =
     portalLike && target
-      ? { "target.entityType": target.entityType, "target.entityId": target.entityId }
+      ? {
+          "target.entityType": target.entityType,
+          "target.entityId": target.entityId,
+          registrationId: null,
+        }
       : null;
   const reuseScope = (query) => withAnd(withAnd(query, ownerScope), targetScope);
 

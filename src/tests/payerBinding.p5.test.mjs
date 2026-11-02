@@ -195,6 +195,15 @@ test("clientSecret non-disclosure: another payer replaying A's idempotency key n
   assert.equal(aRow.isActiveAttempt, true, "A's intent not superseded");
 });
 
+test("portal reuse never hands back an intent already attached to a registration", { skip }, async () => {
+  const key = "idem-key-attached-0002";
+  const a = await createPortalIntent(PORTAL_A, portalIntent(EVENT_2, { amount: 5300 }), { "x-idempotency-key": key });
+  const att = await call("POST", `/api/payments/intents/${a.paymentIntentId}/attach-registration`, { auth: PORTAL_A, body: attachBody(oid(0x77), { entityId: EVENT_2, amount: 5300 }) });
+  assert.equal(att.status, 200, att.text.slice(0, 200));
+  const r = await call("POST", "/api/payments/intents", { auth: PORTAL_A, body: portalIntent(EVENT_2, { amount: 5300 }), headers: { "x-idempotency-key": key } });
+  assert.ok(!r.text.includes(a.paymentIntentId), `attached intent handed out again: ${r.status}`);
+});
+
 test("portal event intent never supersedes unrelated registration payments of the tenant", { skip }, async () => {
   const otherReg = oid(0x51);
   seedPi("pi_other_51");
