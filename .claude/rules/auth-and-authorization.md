@@ -36,7 +36,11 @@ verified identity only: internal = `req.ctx.internalRequest === true`; CRM / POR
 the PDP) guards every `/reports/*` route except a member's own `statement` / `net-balance`
 (`requireCrmOrOwnMember`: PORTAL callers only for the membership number / profileId that
 profile-service `my-profile` returns for the verified principal, else 403 `NOT_OWNER`) and the
-`/batch-details` reads. `requireFinanceRead` (DD runs, reconciliation, journal adjustments,
+`/batch-details` reads. On `/journal/*`, `requireCrmUser` also runs before the PDP on the
+journal/credit-note reads (`GET /`, `/stripe-payments`, `/credit-notes`, `/credit-notes/:docNo`
+— CRM finance screens only) and on `POST /online-payment` (no caller anywhere; CRM finance only,
+a PORTAL token is denied whatever permissions it carries, and a bare `x-internal-request` is a
+401). `requireFinanceRead` (DD runs, reconciliation, journal adjustments,
 `GET /payments/refunds`) is CRM + a literal `payments:read`/`accounts.admin:read` claim, with no
 empty-claims bypass and no `accounts.reports:read` alias. On `/payments/*`: capture/cancel,
 `applications/:id/latest`, `batch` and the `/journal/events/manual-payment*` routes are

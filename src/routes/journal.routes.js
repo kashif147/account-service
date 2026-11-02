@@ -51,7 +51,10 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
 import { forwardedInternalContext } from "../middlewares/context.js";
-import { requireInternalOrCrm } from "../middlewares/callerScope.middleware.js";
+import {
+  requireCrmUser,
+  requireInternalOrCrm,
+} from "../middlewares/callerScope.middleware.js";
 import { AppError } from "../errors/AppError.js";
 import {
   postManualEventPaymentHandler,
@@ -74,10 +77,17 @@ function internalOrAuthenticated(req, res, next) {
   return res.appError(AppError.unauthorized("Authorization header required"));
 }
 
+// P5: journal / credit-note reads are CRM finance screens only (Write-offs summary, Online
+// Payments grid, Credit Notes summary, member finance tab). No portal flow reads them - a
+// member reads their own account via /reports/member/:memberId/statement | net-balance -
+// so requireCrmUser (403 CRM_ONLY) runs before the PDP: a PORTAL token holding
+// accounts.journals:read never reaches tenant-wide journal data.
+
 // Journals - list; single consolidated route with minimum AI role
 router.get(
   "/",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listJournalsRules,
   listJournals
@@ -87,6 +97,7 @@ router.get(
 router.get(
   "/stripe-payments",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listStripePaymentsRules,
   listStripePayments
@@ -130,6 +141,7 @@ router.post(
 router.get(
   "/credit-notes",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   listCreditNotesRules,
   validate,
@@ -139,6 +151,7 @@ router.get(
 router.get(
   "/credit-notes/:docNo",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   creditNoteDocNoParam,
   validate,
@@ -303,10 +316,16 @@ router.post(
   voidManualEventPaymentHandler,
 );
 
-// Online payment processing - allows MEMBER role for portal users
+// Manual GL receipt for an online payment (same controller as /receipt). P5: CRM finance
+// staff only. Nothing calls this route - no service, CRM screen or portal flow; online card
+// receipts are posted by payments.service (online_payment_receipt) on Stripe capture - so a
+// PORTAL member (whatever permissions the token carries) and an unknown userType are denied
+// by caller class BEFORE the PDP, and a bare x-internal-request is not accepted (401). The
+// ledger tenant is the authenticated req.ctx tenant only (requireTenantId), never the body.
 router.post(
   "/online-payment",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "create"),
   idempotency(),
   receiptRules, // Using receipt rules for payment processing
