@@ -14,7 +14,7 @@ import {
   getClaimRecipientMemberIdForApplication,
 } from "./refundCredit.service.js";
 import { centsToEuros } from "../helpers/money.js";
-import { assertIntentAuthorized } from "./paymentIntentGuard.service.js";
+import { assertIntentAuthorized, isPortalLikeCaller } from "./paymentIntentGuard.service.js";
 import {
   nextPaymentStatus,
   shadowComparison,
@@ -114,6 +114,106 @@ function isApplicationPaymentRequest({ purpose, applicationId, memberId }) {
 // confirm never completed) instead of it being permanently uncapturable.
 function isEventRegistrationPaymentRequest(purpose) {
   return purpose === "eventRegistration" || purpose === "courseRegistration";
+}
+
+// ---------------------------------------------------------------------------
+// P5 payer binding (event/course intents).
+//
+// payer  = the VERIFIED creator of the intent (never body/metadata), set once at creation.
+// target = what the intent pays for: the event/course (portal, before a Registration
+//          exists) or the registration (events-service CRM / retry-payment intents).
+// Reuse/dedupe lookups made for a portal-like caller are scoped to that payer, so intent
+// creation can never hand back (or supersede) another payer's PaymentIntent/clientSecret.
+// ---------------------------------------------------------------------------
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
+function normId(v) {
+  return v == null ? "" : String(v).trim();
+}
+
+function entityTypeForPurpose(purpose) {
+  return purpose === "courseRegistration" ? "course" : "event";
+}
+
+/** Verified payer of a new intent. Internal S2S calls carry no verified user. */
+export function payerFromCaller(ctx = {}, caller = {}) {
+  if (caller.internalRequest === true || ctx.internalRequest === true) {
+    return { userId: null, userType: "INTERNAL" };
+  }
+  const userType = normId(caller.userType).toUpperCase() || null;
+  return { userId: normId(ctx.userId) || null, userType };
+}
+
+/**
+ * Effective payer user id of a stored Payment: payer.userId, or for a legacy row created
+ * before the payer field existed, audit.createdBy.
+ */
+export function effectivePayerUserId(payment) {
+  if (payment?.payer) return normId(payment.payer.userId);
+  return normId(payment?.audit?.createdBy);
+}
+
+/** Mongo filter matching Payments whose effective payer is `userId` (incl. legacy rows). */
+export function payerOwnerFilter(userId) {
+  const uid = normId(userId);
+  return {
+    $or: [
+      { "payer.userId": uid },
+      { payer: { $exists: false }, "audit.createdBy": uid },
+    ],
+  };
+}
+
+function withAnd(query, extra) {
+  if (!extra) return query;
+  return { ...query, $and: [...(query.$and || []), extra] };
+}
+
+function bindingError(message, status, code) {
+  return new AppError(message, status, code);
+}
+
+/**
+ * Resolves the target of an event/course intent and enforces the portal creation rules:
+ * a portal-like caller may NOT put a registrationId on the intent (registration-backed
+ * intents are created by events-service as CRM), and must name the event/course it pays for
+ * (top-level entityId, or the live portal's metadata.eventId / metadata.courseId).
+ */
+export function resolveIntentTarget({ parsed, metadata = {}, registrationId, caller = {} }) {
+  const expectedType = entityTypeForPurpose(parsed.purpose);
+  if (parsed.entityType && parsed.entityType !== expectedType) {
+    throw bindingError(
+      "entityType does not match the payment purpose",
+      400,
+      "TARGET_PURPOSE_MISMATCH",
+    );
+  }
+  if (isPortalLikeCaller(caller)) {
+    if (normId(registrationId)) {
+      throw bindingError(
+        "registrationId cannot be supplied when creating a registration payment",
+        400,
+        "REGISTRATION_ID_NOT_ALLOWED",
+      );
+    }
+    const entityId = normId(
+      parsed.entityId ||
+        (expectedType === "course" ? metadata.courseId || metadata.eventId : metadata.eventId),
+    );
+    if (!OBJECT_ID_RE.test(entityId)) {
+      throw bindingError(
+        `A valid ${expectedType} id is required for this payment`,
+        400,
+        "TARGET_REQUIRED",
+      );
+    }
+    return { entityType: expectedType, entityId };
+  }
+  if (normId(registrationId)) {
+    return { entityType: "registration", entityId: normId(registrationId) };
+  }
+  const entityId = normId(parsed.entityId);
+  return entityId ? { entityType: expectedType, entityId } : undefined;
 }
 
 function stripeDetailsFromIntent(pi) {
@@ -411,6 +511,23 @@ export async function createIntent(input, ctx, caller = {}) {
   });
   const isEventRegistrationPayment = isEventRegistrationPaymentRequest(parsed.purpose);
 
+  // P5 payer binding: verified payer + target, before any lookup or Stripe call.
+  const portalLike = isPortalLikeCaller(caller);
+  const payer = payerFromCaller(ctx, caller);
+  const target = isEventRegistrationPayment
+    ? resolveIntentTarget({ parsed, metadata, registrationId, caller })
+    : undefined;
+  if (portalLike && isEventRegistrationPayment && !payer.userId) {
+    throw AppError.unauthorized("A verified user is required for this payment");
+  }
+  // Every reuse lookup below is scoped to this payer (and target) for portal-like callers.
+  const ownerScope = portalLike ? payerOwnerFilter(payer.userId) : null;
+  const targetScope =
+    portalLike && target
+      ? { "target.entityType": target.entityType, "target.entityId": target.entityId }
+      : null;
+  const reuseScope = (query) => withAnd(withAnd(query, ownerScope), targetScope);
+
   // H-11: portal callers may only pay for themselves, and application fees must match the
   // synced catalogue price (see paymentIntentGuard.service.js for the per-kind source).
   await assertIntentAuthorized({
@@ -453,10 +570,12 @@ export async function createIntent(input, ctx, caller = {}) {
   // Idempotency and duplicate protection: check for existing payments BEFORE Stripe API call
   // 1. Check by idempotency key (if provided)
   if (ctx.idempotencyKey) {
-    const existingByIdem = await Payment.findOne({
-      tenantId: ctx.tenantId,
-      idempotencyKey: ctx.idempotencyKey,
-    })
+    const existingByIdem = await Payment.findOne(
+      reuseScope({
+        tenantId: ctx.tenantId,
+        idempotencyKey: ctx.idempotencyKey,
+      }),
+    )
       .select("stripe status _id memberId applicationId isActiveAttempt")
       .lean();
     if (existingByIdem) {
@@ -528,7 +647,7 @@ export async function createIntent(input, ctx, caller = {}) {
       duplicateCheck.registrationId = registrationId;
     }
 
-    const existingDuplicate = await Payment.findOne(duplicateCheck)
+    const existingDuplicate = await Payment.findOne(reuseScope(duplicateCheck))
       .select("stripe status _id memberId applicationId isActiveAttempt")
       .sort({ createdAt: -1 })
       .lean();
@@ -619,7 +738,7 @@ export async function createIntent(input, ctx, caller = {}) {
       lastSecondCheck.registrationId = registrationId;
     }
 
-    const recentPayment = await Payment.findOne(lastSecondCheck)
+    const recentPayment = await Payment.findOne(reuseScope(lastSecondCheck))
       .select("stripe status _id memberId applicationId createdAt isActiveAttempt")
       .sort({ createdAt: -1 })
       .lean();
@@ -693,7 +812,16 @@ export async function createIntent(input, ctx, caller = {}) {
   const crypto = await import("crypto");
   let stripeIdempotencyKey = null;
 
-  if (ctx.idempotencyKey && persistIdempotencyKey) {
+  if (ctx.idempotencyKey && persistIdempotencyKey && portalLike) {
+    // P5: a portal caller's key is namespaced by tenant + verified payer, so replaying
+    // another member's Idempotency key can never make Stripe return that member's
+    // PaymentIntent (and client_secret) from its idempotency cache.
+    stripeIdempotencyKey = crypto
+      .createHash("sha256")
+      .update(["portal-intent", ctx.tenantId, payer.userId || "", ctx.idempotencyKey].join("-"))
+      .digest("hex")
+      .substring(0, 64);
+  } else if (ctx.idempotencyKey && persistIdempotencyKey) {
     // Use client's idempotency key - hash it to ensure it's valid format for Stripe
     // Stripe keys must be max 64 chars, so we hash if longer
     if (ctx.idempotencyKey.length <= 64) {
@@ -846,7 +974,7 @@ export async function createIntent(input, ctx, caller = {}) {
       if (applicationId) recentCheck.applicationId = applicationId;
       if (registrationId) recentCheck.registrationId = registrationId;
 
-      const recentWithIntent = await Payment.findOne(recentCheck)
+      const recentWithIntent = await Payment.findOne(reuseScope(recentCheck))
         .select("stripe status _id memberId applicationId isActiveAttempt")
         .lean();
 
@@ -949,10 +1077,12 @@ export async function createIntent(input, ctx, caller = {}) {
     // After creating Stripe payment intent, check if a payment with this intent ID already exists
     // This catches race conditions where two requests create intents simultaneously
     if (stripeIds.paymentIntentId) {
-      const existingByIntent = await Payment.findOne({
-        tenantId: ctx.tenantId,
-        "stripe.paymentIntentId": stripeIds.paymentIntentId,
-      })
+      const existingByIntent = await Payment.findOne(
+        reuseScope({
+          tenantId: ctx.tenantId,
+          "stripe.paymentIntentId": stripeIds.paymentIntentId,
+        }),
+      )
         .select("stripe status _id memberId applicationId")
         .lean();
       if (existingByIntent) {
@@ -1002,10 +1132,12 @@ export async function createIntent(input, ctx, caller = {}) {
     // Final check: if we just created a Stripe payment intent, check if another request
     // already created a payment document with this paymentIntentId (race condition)
     if (stripeIds.paymentIntentId) {
-      const existingByIntentId = await Payment.findOne({
-        tenantId: ctx.tenantId,
-        "stripe.paymentIntentId": stripeIds.paymentIntentId,
-      })
+      const existingByIntentId = await Payment.findOne(
+        reuseScope({
+          tenantId: ctx.tenantId,
+          "stripe.paymentIntentId": stripeIds.paymentIntentId,
+        }),
+      )
         .select("stripe status _id memberId applicationId")
         .lean();
 
@@ -1071,6 +1203,8 @@ export async function createIntent(input, ctx, caller = {}) {
         createdBy: ctx.userId || ctx.memberId || "system",
         updatedBy: ctx.userId || ctx.memberId || "system",
       },
+      payer,
+      ...(target ? { target } : {}),
     };
 
     // Only include idempotencyKey if it's actually provided (not null or undefined)
@@ -1079,7 +1213,15 @@ export async function createIntent(input, ctx, caller = {}) {
     }
 
     const payment = await Payment.create(paymentData);
-    if ((isApplicationPayment || isEventRegistrationPayment) && stripeIds.paymentIntentId) {
+    const supersedeMatchValue = isApplicationPayment ? applicationId : registrationId;
+    // Only supersede siblings of the SAME application/registration: without a match value
+    // (a portal event/course intent has no registrationId) there are no siblings, and an
+    // undefined filter value must never widen this to every payment of the purpose.
+    if (
+      (isApplicationPayment || isEventRegistrationPayment) &&
+      stripeIds.paymentIntentId &&
+      normId(supersedeMatchValue)
+    ) {
       await Payment.updateMany(
         {
           tenantId: ctx.tenantId,
@@ -1115,10 +1257,12 @@ export async function createIntent(input, ctx, caller = {}) {
     if (e && e.code === 11000) {
       // Try to find existing payment by idempotency key first
       if (ctx.idempotencyKey && persistIdempotencyKey) {
-        const existing = await Payment.findOne({
-          tenantId: ctx.tenantId,
-          idempotencyKey: ctx.idempotencyKey,
-        })
+        const existing = await Payment.findOne(
+          reuseScope({
+            tenantId: ctx.tenantId,
+            idempotencyKey: ctx.idempotencyKey,
+          }),
+        )
           .select("stripe status _id")
           .lean();
         if (existing) {
@@ -1128,10 +1272,12 @@ export async function createIntent(input, ctx, caller = {}) {
 
       // Try to find existing payment by Stripe payment intent ID
       if (stripeIds.paymentIntentId) {
-        const existingByPi = await Payment.findOne({
-          tenantId: ctx.tenantId,
-          "stripe.paymentIntentId": stripeIds.paymentIntentId,
-        })
+        const existingByPi = await Payment.findOne(
+          reuseScope({
+            tenantId: ctx.tenantId,
+            "stripe.paymentIntentId": stripeIds.paymentIntentId,
+          }),
+        )
           .select("stripe status _id")
           .lean();
         if (existingByPi) {
@@ -1139,6 +1285,14 @@ export async function createIntent(input, ctx, caller = {}) {
         }
       }
 
+      if (portalLike) {
+        // P5: the colliding row belongs to another payer (or another target); never return it.
+        throw new AppError(
+          "This payment request conflicts with an existing payment",
+          409,
+          "PAYMENT_CONFLICT",
+        );
+      }
       // If we can't find an existing payment, it's a real constraint violation
       console.error(
         "MongoDB duplicate key error but no existing payment found:",
@@ -1498,29 +1652,147 @@ function appendDefinedStripeFields(set, parsed) {
  * PaymentIntent's current live Stripe status so the caller can trust it
  * rather than assuming.
  */
-export async function attachRegistrationToPaymentIntent(paymentIntentId, ctx = {}, fields = {}) {
+export async function attachRegistrationToPaymentIntent(
+  paymentIntentId,
+  ctx = {},
+  fields = {},
+  caller = {},
+) {
   if (!paymentIntentId) {
     throw AppError.badRequest("paymentIntentId is required");
   }
+  // P5: attach binds a registration only. It never (re)assigns the person the money is
+  // attributed to - profileId/memberId are bound at CRM approval, never from this body.
+  for (const forbidden of ["profileId", "memberId"]) {
+    if (fields[forbidden] !== undefined && fields[forbidden] !== null && fields[forbidden] !== "") {
+      throw bindingError(`${forbidden} cannot be set when attaching a registration`, 400, "FIELD_NOT_ALLOWED");
+    }
+  }
+  const registrationId = normId(fields.registrationId);
+  if (!registrationId) {
+    throw bindingError("registrationId is required", 400, "REGISTRATION_ID_REQUIRED");
+  }
+  const tenantId = requireTenantId(ctx);
   const payment = await loadPaymentForIntent(paymentIntentId, ctx);
 
-  const set = {};
-  if (fields.registrationId) set.registrationId = fields.registrationId;
-  if (fields.productCode) set.productCode = fields.productCode;
-  if (fields.eventCategoryCode) set.eventCategoryCode = fields.eventCategoryCode;
-  if (fields.profileId) set.profileId = fields.profileId;
-  if (fields.memberId) set.memberId = fields.memberId;
-  if (Object.keys(set).length) {
-    set["audit.updatedBy"] = ctx.userId || ctx.memberId || "system";
-    await Payment.updateOne({ _id: payment._id }, { $set: set });
+  // Payer: a user caller may only attach an intent it created itself (payer.userId, or
+  // audit.createdBy for a legacy row). Applies to CRM too: no flow attaches another
+  // payer's authorised funds to a registration. Genuine internal S2S calls skip this.
+  const internal = caller.internalRequest === true || ctx.internalRequest === true;
+  if (!internal) {
+    const uid = normId(ctx.userId);
+    if (!uid || effectivePayerUserId(payment) !== uid) {
+      throw bindingError("Not permitted for this record", 403, "NOT_OWNER");
+    }
   }
 
+  // Purpose: only registration payments can be attached, and only to the matching kind.
+  if (!isEventRegistrationPaymentRequest(payment.purpose)) {
+    throw bindingError("This payment cannot be attached to a registration", 409, "PURPOSE_MISMATCH");
+  }
+  if (normId(fields.purpose) !== payment.purpose) {
+    throw bindingError("Registration purpose does not match this payment", 409, "PURPOSE_MISMATCH");
+  }
+
+  // Target: the registration's event/course (sent by events-service from its own
+  // Registration record) must equal the target bound at intent creation.
+  const entityType = normId(fields.entityType);
+  const entityId = normId(fields.entityId);
+  if (entityType !== entityTypeForPurpose(payment.purpose) || !entityId) {
+    throw bindingError("entityType/entityId for the registration are required", 400, "TARGET_REQUIRED");
+  }
+  const target = payment.target || null;
+  if (target && target.entityType === "registration") {
+    if (normId(target.entityId) !== registrationId) {
+      throw bindingError("This PaymentIntent is already attached to another registration", 409, "ALREADY_ATTACHED");
+    }
+  } else if (target) {
+    if (target.entityType !== entityType || normId(target.entityId) !== entityId) {
+      throw bindingError("Registration does not match the event/course this payment was made for", 409, "TARGET_MISMATCH");
+    }
+  } else {
+    // Legacy row (created before target existed): the only recorded hint is the portal's
+    // free-form metadata.eventId / courseId. When present it must agree.
+    const md = payment.metadata instanceof Map ? Object.fromEntries(payment.metadata) : payment.metadata || {};
+    const legacyHint = normId(md.courseId || md.eventId);
+    if (legacyHint && legacyHint !== entityId) {
+      throw bindingError("Registration does not match the event/course this payment was made for", 409, "TARGET_MISMATCH");
+    }
+  }
+
+  // Amount/currency: registration's server price == stored Payment row.
+  const wantAmount = Number(fields.amount);
+  const wantCurrency = normId(fields.currency).toLowerCase();
+  if (
+    !Number.isInteger(wantAmount) ||
+    wantAmount !== Number(payment.amount) ||
+    !wantCurrency ||
+    wantCurrency !== normId(payment.currency).toLowerCase()
+  ) {
+    throw bindingError("Registration amount/currency does not match this payment", 409, "AMOUNT_MISMATCH");
+  }
+
+  const alreadySame = normId(payment.registrationId) === registrationId;
+  if (payment.registrationId && !alreadySame) {
+    throw bindingError("This PaymentIntent is already attached to another registration", 409, "ALREADY_ATTACHED");
+  }
+
+  // A registration that already has a payment (CRM-created / retry-payment intents, a
+  // recorded manual payment, or an earlier attach) can never receive another payer's intent.
+  if (!alreadySame) {
+    const other = await Payment.findOne({
+      tenantId,
+      registrationId,
+      _id: { $ne: payment._id },
+    })
+      .select({ _id: 1 })
+      .lean();
+    if (other) {
+      throw bindingError("This registration already has a payment", 409, "REGISTRATION_ALREADY_HAS_PAYMENT");
+    }
+  }
+
+  // Live Stripe PaymentIntent must agree with the row too.
   const stripe = getStripe();
   const current = await stripe.paymentIntents.retrieve(paymentIntentId);
+  if (
+    Number(current.amount) !== Number(payment.amount) ||
+    normId(current.currency).toLowerCase() !== normId(payment.currency).toLowerCase()
+  ) {
+    throw bindingError("PaymentIntent amount/currency does not match this payment", 409, "STRIPE_MISMATCH");
+  }
+
+  // Single, atomic attach: binds only when unattached (or already bound to this same
+  // registration -> idempotent). A concurrent attach to a different registration loses.
+  const set = {
+    registrationId,
+    "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+  };
+  if (fields.productCode) set.productCode = String(fields.productCode);
+  if (fields.eventCategoryCode) set.eventCategoryCode = String(fields.eventCategoryCode);
+  const updated = await Payment.findOneAndUpdate(
+    {
+      _id: payment._id,
+      tenantId,
+      $or: [
+        { registrationId: { $exists: false } },
+        { registrationId: null },
+        { registrationId: "" },
+        { registrationId },
+      ],
+    },
+    { $set: set, $min: { attachedAt: new Date() } },
+    { new: true },
+  ).lean();
+  if (!updated) {
+    throw bindingError("This PaymentIntent is already attached to another registration", 409, "ALREADY_ATTACHED");
+  }
 
   return {
     ok: true,
     paymentId: payment._id.toString(),
+    registrationId,
+    alreadyAttached: alreadySame,
     status: normalizeStripeStatusForPayment(current.status),
     stripeStatus: current.status,
     amount: current.amount,
@@ -2141,6 +2413,7 @@ export async function reconcileStripeEvent(input, ctx) {
       await publishPaymentStatusUpdated({
         tenantId: doc.tenantId, // the persisted payment's tenant, never caller/metadata
         paymentId: String(doc._id),
+        paymentIntentId: doc.stripe?.paymentIntentId || null,
         registrationId: doc.registrationId,
         status: "requires_capture",
       });

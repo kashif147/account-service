@@ -29,10 +29,25 @@ function resolveEventIncomeCode(eventCategoryCode) {
   return EVENT_INCOME_CODE_BY_CATEGORY[eventCategoryCode] || DEFAULT_EVENTS_INCOME_CODE;
 }
 
-export async function publishPaymentStatusUpdated({ tenantId, paymentId, registrationId, status }) {
+// paymentIntentId (additive, P5 payer binding): lets events-service match the event to the
+// registration's own PaymentIntent, so a status for another intent never changes it.
+export async function publishPaymentStatusUpdated({
+  tenantId,
+  paymentId,
+  paymentIntentId,
+  registrationId,
+  status,
+}) {
   const result = await publisher.publish(
     "payments.events.status.updated.v1",
-    { tenantId, paymentId, registrationId, status, ledgerDomain: "events" },
+    {
+      tenantId,
+      paymentId,
+      ...(paymentIntentId ? { paymentIntentId: String(paymentIntentId) } : {}),
+      registrationId,
+      status,
+      ledgerDomain: "events",
+    },
     {
       tenantId,
       exchange: "accounts.events",
@@ -136,6 +151,7 @@ export async function postJournalForEventPayment(payment, ctx) {
   await publishPaymentStatusUpdated({
     tenantId,
     paymentId: String(payment._id),
+    paymentIntentId: payment.stripe?.paymentIntentId || null,
     registrationId: payment.registrationId,
     status: "succeeded",
   });
