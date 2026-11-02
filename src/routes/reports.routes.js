@@ -32,6 +32,7 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import {
   requireCrmUser,
   requireCrmOrOwnMember,
+  trustedInternalOnly,
 } from "../middlewares/callerScope.middleware.js";
 
 const router = express.Router();
@@ -103,6 +104,19 @@ router.post(
   requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   creditorsList
+);
+
+// GL replication feed (reporting-service scripts/sync-gl-journal-entries.js backfill).
+// Two registrations, tried in order:
+//  1. a genuine internal S2S call - x-internal-request: true, NO user identity header, and an
+//     explicit 24-hex x-tenant-id (400 if missing/malformed) - runs the feed for that tenant;
+//  2. anything else falls through (next("route")) to the normal user chain: CRM staff with
+//     accounts.reports:read only. A user token / gateway headers + a spoofed
+//     x-internal-request is judged here as that user (portal -> CRM_ONLY, unverified -> 401).
+router.post(
+  "/gl-journal-replication",
+  trustedInternalOnly,
+  glJournalReplicationFeed
 );
 
 router.post(
