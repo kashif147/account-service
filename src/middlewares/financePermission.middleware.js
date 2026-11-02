@@ -24,14 +24,41 @@ function canFinanceWrite(req) {
   );
 }
 
-/** Finance back-office read (reconciliation list, journal adjustments list). */
-export function requireFinanceRead(req, res, next) {
+// Finance datasets (direct-debit runs / PAIN.008, reconciliation, journal adjustments,
+// refunds) are readable only with an explicit finance permission claim. Literal match only:
+// hasFinancePermission()'s alias table maps accounts.reports:read -> payments:read, and
+// accounts.reports:read is also held by the portal MEMBER role, so it must never unlock these.
+const FINANCE_DATA_READ_CLAIMS = [
+  "*",
+  "admin",
+  "payments:*",
+  "payments:read",
+  "accounts.admin:*",
+  "accounts.admin:read",
+];
+
+function hasFinanceDataReadClaim(req) {
   const perms = collectRequestPermissions(req);
-  // Gateway/JWT without permission claims: allow read (matches accounts.reports access).
-  if (perms.length === 0 && (req.user?.id || req.ctx?.userId)) {
-    return next();
+  return FINANCE_DATA_READ_CLAIMS.some((p) => perms.includes(p));
+}
+
+function callerUserType(req) {
+  return String(req.user?.userType || "").trim().toUpperCase();
+}
+
+/**
+ * Finance back-office read (direct-debit runs, reconciliation, journal adjustments).
+ * CRM staff (verified userType) holding payments:read or accounts.admin:read only.
+ * A token with no permission claims, a PORTAL member, or a missing/unknown userType is
+ * denied (fail closed); accounts.reports:read alone does not qualify.
+ */
+export function requireFinanceRead(req, res, next) {
+  if (callerUserType(req) !== "CRM") {
+    return next(
+      new AppError("Finance read is restricted to CRM staff", 403, "CRM_ONLY"),
+    );
   }
-  if (canFinanceRead(req)) return next();
+  if (hasFinanceDataReadClaim(req)) return next();
   return next(
     AppError.forbidden(
       "Finance read permission required (payments:read or accounts.admin:read)",
@@ -80,6 +107,12 @@ export function requireFinanceReadStrict(req, res, next) {
 export function requireInternalOrFinanceWrite(req, res, next) {
   if (isTrustedInternalCall(req)) return next();
   return requireFinanceWrite(req, res, next);
+}
+
+/** Internal S2S call, or CRM staff with an explicit finance data read claim (see requireFinanceRead). */
+export function requireInternalOrFinanceDataRead(req, res, next) {
+  if (isTrustedInternalCall(req)) return next();
+  return requireFinanceRead(req, res, next);
 }
 
 /** Internal S2S call, or authenticated non-portal user with a finance read permission. */

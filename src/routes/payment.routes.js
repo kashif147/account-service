@@ -3,8 +3,14 @@ import { forwardedInternalContext } from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import {
   requireFinanceWrite,
+  requireInternalOrFinanceDataRead,
   requireInternalOrFinanceWrite,
 } from "../middlewares/financePermission.middleware.js";
+import {
+  requireCrmUser,
+  requireInternalOrCrm,
+  requireInternalOrCrmOrIntentOwner,
+} from "../middlewares/callerScope.middleware.js";
 import { AppError } from "../errors/AppError.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
@@ -45,6 +51,13 @@ function internalAuth(req, res, next) {
 }
 router.use(internalAuth);
 
+// P5 caller rules (internalAuth above only establishes identity). "Internal" below means a
+// genuine S2S call (x-internal-request, NO user JWT); events-/profile-/subscription-service
+// forward the originating user's identity, so those calls are judged as that user.
+//
+// POST /intents stays open to PORTAL members: assertIntentAuthorized (paymentIntentGuard)
+// already binds a portal caller's memberId/profileId/applicationId to the verified principal
+// and checks the amount server-side.
 router.post(
   "/intents",
   idempotency(),
@@ -63,17 +76,33 @@ router.post(
   reconcilePayment
 );
 
-router.get("/by-stripe/:paymentIntentId", getPaymentByStripeId);
-router.get("/applications/:applicationId/latest", getLatestApplicationPayment);
+// by-stripe: events-service (portal registration create, forwarding the member's identity),
+// audit-service, CRM. A PORTAL caller may only read a Payment it created itself.
+router.get(
+  "/by-stripe/:paymentIntentId",
+  requireInternalOrCrmOrIntentOwner,
+  getPaymentByStripeId
+);
+// profile-service application approval (CRM) only.
+router.get(
+  "/applications/:applicationId/latest",
+  requireInternalOrCrm,
+  getLatestApplicationPayment
+);
 
+// capture / cancel: CRM approval / rejection flows (profile-service applications,
+// events-service registrations) forwarding the CRM approver's identity, or internal S2S.
+// Never a PORTAL member: capturing posts the GL.
 router.post(
   "/intents/:paymentIntentId/capture",
+  requireInternalOrCrm,
   idempotency(),
   captureExistingPaymentIntent
 );
 
 router.post(
   "/intents/:paymentIntentId/cancel",
+  requireInternalOrCrm,
   idempotency(),
   cancelExistingPaymentIntent
 );
@@ -84,21 +113,31 @@ router.post(
 // attachRegistrationToPaymentIntent in payments.service.js.
 router.post(
   "/intents/:paymentIntentId/attach-registration",
+  requireInternalOrCrmOrIntentOwner,
   idempotency(),
   attachRegistrationToExistingIntent
 );
 
 // Gateway aggregation: list payments by member IDs (subscription service)
-router.post("/batch", listPaymentsBatch);
+// (CRM subscription grid aggregation, forwarding the CRM user's identity, or a worker.)
+router.post("/batch", requireInternalOrCrm, listPaymentsBatch);
 
+// CRM finance back-office manual backfill (AssociateMemberModal).
 router.post(
   "/associate-member",
+  requireCrmUser,
+  requireFinanceWrite,
   zodValidate(zAssociateMemberLink),
   associateMemberLinksForTransactions
 );
 
+// Creates a succeeded Payment + GL journal: genuine internal S2S, or CRM finance write
+// (Accounts Manager / Deputy / ASU role + finance write permission). Tenant is the trusted
+// req.ctx tenant (recordExternal never reads a body tenant).
 router.post(
   "/record-external",
+  requireInternalOrCrm,
+  requireInternalOrFinanceWrite,
   idempotency(),
   zodValidate(zRecordExternal),
   recordExternalPayment
@@ -106,6 +145,7 @@ router.post(
 
 router.get(
   "/refunds",
+  requireInternalOrFinanceDataRead,
   zodValidate(zListRefundsQuery),
   listPaymentRefunds
 );

@@ -29,13 +29,22 @@ import {
 import validate from "../middlewares/validate.js";
 import { ensureAuthenticatedWithTenantContext } from "../middlewares/auth.js";
 import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
+import {
+  requireCrmUser,
+  requireCrmOrOwnMember,
+} from "../middlewares/callerScope.middleware.js";
 
 const router = express.Router();
 
-// Reports require authentication and minimum User role
+// P5: accounts.reports:read is also held by the portal MEMBER role, so the PDP alone does
+// not keep members out of tenant-wide or other members' finance data. Every report is CRM
+// staff only (requireCrmUser, then the PDP), except a member's own statement / net balance,
+// which the portal reads for the signed-in member (requireCrmOrOwnMember resolves the
+// caller's own membership number from the verified principal).
 router.get(
   "/refunds",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   refundsListRules,
   validate,
@@ -45,6 +54,7 @@ router.get(
 router.get(
   "/general-ledger",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   generalLedgerRules,
   validate,
@@ -54,6 +64,7 @@ router.get(
 router.get(
   "/member/:memberId/statement",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmOrOwnMember,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberStatement
 );
@@ -61,6 +72,7 @@ router.get(
 router.get(
   "/member/:memberId/net-balance",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmOrOwnMember,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberNetBalanceRules,
   validate,
@@ -70,6 +82,7 @@ router.get(
 router.get(
   "/member/:memberId/summary",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberNetBalanceRules,
   validate,
@@ -79,6 +92,7 @@ router.get(
 router.post(
   "/members/summary-batch",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberSummaryBatch
 );
@@ -86,6 +100,7 @@ router.post(
 router.post(
   "/creditors-list",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   creditorsList
 );
@@ -93,6 +108,7 @@ router.post(
 router.post(
   "/gl-journal-replication",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   glJournalReplicationFeed
 );
@@ -100,6 +116,7 @@ router.post(
 router.get(
   "/member/:memberId/ledger",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberLedgerRules,
   validate,
@@ -109,6 +126,7 @@ router.get(
 router.get(
   "/member/:memberId/credit-notes",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberCreditNotesRules,
   validate,
@@ -118,6 +136,7 @@ router.get(
 router.get(
   "/member/:memberId/ledger-actions",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberLedgerActions,
 );
@@ -126,6 +145,7 @@ router.get(
 router.get(
   "/balances/snapshot",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   balancesSnapshot
 );
@@ -134,6 +154,7 @@ router.get(
 router.get(
   "/balances/as-of",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   balancesAsOfRules,
   validate,
@@ -144,6 +165,7 @@ router.get(
 router.get(
   "/month-end",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "write"),
   monthEndRules,
   validate,
@@ -152,6 +174,7 @@ router.get(
 router.get(
   "/year-end",
   ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "write"),
   yearEndRules,
   validate,

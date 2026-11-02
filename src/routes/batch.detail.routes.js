@@ -1,6 +1,7 @@
 import express from "express";
 import { ensureAuthenticated, tenantContextWarn } from "../middlewares/auth.js";
 import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
+import { requireCrmUser } from "../middlewares/callerScope.middleware.js";
 import { uploadSingleOptional } from "../middlewares/upload.mw.js";
 import {
   createBatchDetail,
@@ -18,15 +19,8 @@ const router = express.Router();
 
 router.use(ensureAuthenticated, tenantContextWarn);
 
-function requireCrm(req, res, next) {
-  if (req.user?.userType !== "CRM") {
-    return res.status(403).json({
-      success: false,
-      message: "Only CRM users can perform this action on batch details",
-    });
-  }
-  next();
-}
+// CRM staff only (403 CRM_ONLY in the standard envelope), then the PDP permission.
+const requireCrm = requireCrmUser;
 
 router.post(
   "/",
@@ -38,12 +32,14 @@ router.post(
 
 router.get(
   "/queue-stats",
+  requireCrm,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   getBatchQueueStats
 );
 
 router.get(
   "/",
+  requireCrm,
   defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
   getAllBatchDetails
 );
@@ -83,6 +79,11 @@ router.delete(
   deleteBatchDetail
 );
 
-router.get("/:batchDetailId", getBatchDetailById);
+router.get(
+  "/:batchDetailId",
+  requireCrm,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
+  getBatchDetailById
+);
 
 export default router;

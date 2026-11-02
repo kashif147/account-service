@@ -27,6 +27,26 @@ additionally go through `requireFinanceRead`/`requireFinanceWrite`
 (`src/middlewares/financePermission.middleware.js`), which require an Accounts Manager/Deputy
 Accounts Manager role plus a `payments`/`accounts.admin`/`accounts.journals` write permission.
 
+## 3. Caller class / object ownership — `src/middlewares/callerScope.middleware.js` (P5)
+
+`accounts.reports:read` (and `payments:*`) are also held by the portal MEMBER role, so the PDP
+alone does not keep portal members out of tenant-wide finance data. Caller class comes from the
+verified identity only: internal = `req.ctx.internalRequest === true`; CRM / PORTAL =
+`req.user.userType`; anything else is denied. `requireCrmUser` (403 `CRM_ONLY`, placed before
+the PDP) guards every `/reports/*` route except a member's own `statement` / `net-balance`
+(`requireCrmOrOwnMember`: PORTAL callers only for the membership number / profileId that
+profile-service `my-profile` returns for the verified principal, else 403 `NOT_OWNER`) and the
+`/batch-details` reads. `requireFinanceRead` (DD runs, reconciliation, journal adjustments,
+`GET /payments/refunds`) is CRM + a literal `payments:read`/`accounts.admin:read` claim, with no
+empty-claims bypass and no `accounts.reports:read` alias. On `/payments/*`: capture/cancel,
+`applications/:id/latest`, `batch` and the `/journal/events/manual-payment*` routes are
+internal or CRM; `attach-registration` / `by-stripe` also admit a PORTAL caller for a Payment it
+created (`audit.createdBy`); `record-external` / `associate-member` need CRM finance write (or
+internal for record-external); `POST /intents` stays open (bound by `paymentIntentGuard`).
+`ensureAuthenticated`'s gateway path falls back to the `userType` of a Bearer token that verifies
+with this service's secret and names the same user + tenant, because profile-, reporting- and
+audit-service clients forward gateway headers without `x-user-type`.
+
 ## Cross-service calls forward identity — never a shared API key
 
 The platform rule: forward the original caller's `Authorization` and gateway headers

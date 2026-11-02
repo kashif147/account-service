@@ -51,6 +51,7 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import { requireFinanceWrite } from "../middlewares/financePermission.middleware.js";
 import { idempotency } from "../middlewares/idempotency.js";
 import { forwardedInternalContext } from "../middlewares/context.js";
+import { requireInternalOrCrm } from "../middlewares/callerScope.middleware.js";
 import { AppError } from "../errors/AppError.js";
 import {
   postManualEventPaymentHandler,
@@ -266,12 +267,17 @@ router.post(
   claimApplicationCredit
 );
 
+// P5: the three /events/manual-payment routes are internal S2S or CRM staff only. The
+// caller is events-service forwarding the originating user's identity: CRM event staff
+// (Add Attendee comp/manual/invoice, approve, reject), already gated there by the events PDP
+// permission. A PORTAL member never records, posts or voids a manual event payment.
 // Events/courses manual (comp/manual/invoice) payment posting - called by
 // events-service, forwarding the original caller's gateway headers (same
 // pattern as internal.routes.js and profile-service's account.service.client.js)
 router.post(
   "/events/manual-payment",
   internalOrAuthenticated,
+  requireInternalOrCrm,
   idempotency(),
   postManualEventPaymentHandler,
 );
@@ -282,6 +288,7 @@ router.post(
 router.post(
   "/events/manual-payment/post",
   internalOrAuthenticated,
+  requireInternalOrCrm,
   idempotency(),
   postManualEventPaymentPostHandler,
 );
@@ -291,6 +298,7 @@ router.post(
 router.post(
   "/events/manual-payment/void",
   internalOrAuthenticated,
+  requireInternalOrCrm,
   idempotency(),
   voidManualEventPaymentHandler,
 );
