@@ -396,3 +396,94 @@ test("gateway headers without x-user-type (profile-service style forward): CRM r
     assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo", userType: "PORTAL" }) })).status, 403);
   });
 });
+
+// ---------------- journal: POST /online-payment (batch 2) ----------------
+// No service, CRM screen or portal flow calls this route (online card receipts are posted by
+// payments.service on Stripe capture), so its only legitimate caller is CRM finance staff.
+// PORTAL is denied by caller class BEFORE the PDP: holding accounts.journals:create (or "*")
+// must not matter, so these tokens carry every finance permission string.
+const EVERY_PERMISSION = [
+  "*",
+  "admin",
+  "accounts.journals:create",
+  "accounts.journals:read",
+  "accounts.journals:write",
+  "accounts.admin:*",
+  "accounts.reports:read",
+  "payments:*",
+  "payments:read",
+  "payments:write",
+];
+const PORTAL_MEMBER_ALL = bearer({ userType: "PORTAL", id: "member-a1", roles: ["MEMBER"], permissions: EVERY_PERMISSION });
+const PORTAL_NONMEMBER_ALL = bearer({ userType: "PORTAL", id: "member-a2", roles: ["NON-MEMBER"], permissions: EVERY_PERMISSION });
+const PORTAL_OTHER_TENANT_ALL = bearer({ tenantId: TENANT_C, userType: "PORTAL", id: "member-c1", roles: ["MEMBER"], permissions: EVERY_PERMISSION });
+const UNKNOWN_TYPE_ALL = bearer({ id: "who-all", permissions: EVERY_PERMISSION });
+const CRM_JOURNALS = bearer({ userType: "CRM", id: "staff-aa", roles: ["AA"], permissions: ["accounts.journals:create", "accounts.journals:read"] });
+
+const ONLINE_PAYMENT = "/api/journal/online-payment";
+const ONLINE_PAYMENT_BODY = { date: "2026-01-01", docNo: "OP-X", memberId: "M-A2", amount: 1000, clearingCode: "1220", provider: "stripe" };
+
+test("online-payment: PORTAL MEMBER / NON-MEMBER / other tenant with every permission incl. accounts.journals:create -> 403 CRM_ONLY before the PDP", async () => {
+  for (const auth of [PORTAL_MEMBER_ALL, PORTAL_NONMEMBER_ALL, PORTAL_OTHER_TENANT_ALL]) {
+    const before = pdpCalls.length;
+    const r = await call("POST", ONLINE_PAYMENT, { auth, body: ONLINE_PAYMENT_BODY });
+    assert.equal(r.status, 403);
+    assert.equal(r.code, "CRM_ONLY");
+    assert.equal(pdpCalls.length, before, "caller-class gate must deny before any PDP call");
+  }
+});
+
+test("online-payment: unknown / missing userType with every permission -> 403", async () => {
+  const r = await call("POST", ONLINE_PAYMENT, { auth: UNKNOWN_TYPE_ALL, body: ONLINE_PAYMENT_BODY });
+  assert.equal(r.status, 403);
+  assert.equal(r.code, "CRM_ONLY");
+});
+
+test("online-payment: user token + spoofed x-internal-request is judged as that user (PORTAL -> 403)", async () => {
+  const r = await call("POST", ONLINE_PAYMENT, { auth: PORTAL_MEMBER_ALL, headers: INTERNAL, body: ONLINE_PAYMENT_BODY });
+  assert.equal(r.status, 403);
+  assert.equal(r.code, "CRM_ONLY");
+});
+
+test("online-payment: bare x-internal-request (no user identity) is not a caller of this route -> 401", async () => {
+  const r = await call("POST", ONLINE_PAYMENT, { headers: INTERNAL, body: ONLINE_PAYMENT_BODY });
+  assert.equal(r.status, 401);
+});
+
+test("online-payment: CRM + accounts.journals:create passes authz; CRM without the permission denied by the PDP", async () => {
+  // Invalid body -> 400 from validation proves authz passed without posting anything.
+  const ok = await call("POST", ONLINE_PAYMENT, { auth: CRM_JOURNALS, body: {} });
+  assert.equal(ok.status, 400);
+  for (const auth of [CRM_MO, CRM_EMPTY, CRM_REPORTS]) {
+    assert.equal((await call("POST", ONLINE_PAYMENT, { auth, body: ONLINE_PAYMENT_BODY })).status, 403);
+  }
+});
+
+// ---------------- journal reads: CRM finance screens only (batch 2) ----------------
+// GET /journal (CRM Write-offs summary), /stripe-payments (CRM online payments grid),
+// /credit-notes (CRM credit notes summary / member finance tab), /credit-notes/:docNo (no
+// caller). No portal flow reads these; a member reads their own account via
+// /reports/member/:memberId/statement | net-balance only.
+const JOURNAL_READS = [
+  "/api/journal",
+  "/api/journal/stripe-payments",
+  "/api/journal/credit-notes",
+  "/api/journal/credit-notes/CN-X",
+];
+
+test("journal reads: PORTAL (MEMBER / NON-MEMBER, every permission) and unknown userType -> 403 CRM_ONLY", async () => {
+  for (const url of JOURNAL_READS) {
+    for (const auth of [PORTAL_MEMBER_ALL, PORTAL_NONMEMBER_ALL, PORTAL_A1, UNKNOWN_TYPE_ALL]) {
+      const r = await call("GET", url, { auth });
+      assert.equal(r.status, 403, url);
+      assert.equal(r.code, "CRM_ONLY", url);
+    }
+  }
+});
+
+test("journal reads: CRM + accounts.journals:read passes authz; CRM without it denied by the PDP", async () => {
+  for (const url of JOURNAL_READS) {
+    passed(await call("GET", url, { auth: CRM_JOURNALS }), `CRM journals ${url}`);
+    assert.equal((await call("GET", url, { auth: CRM_MO })).status, 403, `CRM MO ${url}`);
+  }
+});
