@@ -36,7 +36,14 @@ verified identity only: internal = `req.ctx.internalRequest === true`; CRM / POR
 the PDP) guards every `/reports/*` route except a member's own `statement` / `net-balance`
 (`requireCrmOrOwnMember`: PORTAL callers only for the membership number / profileId that
 profile-service `my-profile` returns for the verified principal, else 403 `NOT_OWNER`) and the
-`/batch-details` reads. On `/journal/*`, `requireCrmUser` also runs before the PDP on the
+`/batch-details` reads. `POST /reports/gl-journal-replication` (reporting-service
+`scripts/sync-gl-journal-entries.js` backfill) is registered twice: first `trustedInternalOnly`
+(callerScope) admits only a genuine internal call — `x-internal-request: true`, NO
+`Authorization`/`x-jwt-verified`/`x-auth-source`/`x-user-*`/EasyAuth header, and a 24-hex
+`x-tenant-id` (400 `TENANT_ID_REQUIRED` / `INVALID_TENANT_ID`) — then `forwardedInternalContext`;
+anything else `next("route")`s to the normal CRM chain (`ensureAuthenticatedWithTenantContext` →
+`requireCrmUser` → PDP `accounts.reports:read`), so a user token + spoofed `x-internal-request` is
+judged as that user. On `/journal/*`, `requireCrmUser` also runs before the PDP on the
 journal/credit-note reads (`GET /`, `/stripe-payments`, `/credit-notes`, `/credit-notes/:docNo`
 — CRM finance screens only) and on `POST /online-payment` (no caller anywhere; CRM finance only,
 a PORTAL token is denied whatever permissions it carries, and a bare `x-internal-request` is a
