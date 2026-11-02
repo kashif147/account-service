@@ -183,6 +183,7 @@ test("B: CRM + accounts.reports:read reaches the feed for its own trusted tenant
   // user token + internal header (other tenant): judged as the user; tenant stays the token's
   const r = await call({ auth: CRM_REPORTS, headers: { ...INTERNAL, "x-tenant-id": TENANT_C } });
   assert.ok(!r.glTenants.includes(TENANT_C), "a user call must never be scoped to a header tenant");
+  reachedFeed(r, TENANT_A, "CRM token (tenant A) + internal header for tenant C stays tenant A");
 });
 
 test("CRM without accounts.reports:read denied (PDP), also when sending x-internal-request", async () => {
