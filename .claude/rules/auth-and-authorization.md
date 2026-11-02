@@ -71,7 +71,15 @@ add `requireInternalOrFinanceWrite` / `requireInternalOrFinanceRead`
 (`financePermission.middleware.js`): a genuine internal call (`req.ctx.internalRequest === true`,
 only ever set by `forwardedInternalContext`) passes, while any user JWT/gateway caller needs finance
 write (role + permission) or a strict finance read permission (no empty-claims bypass, never
-PORTAL). Used on `POST /payments/reconcile` and all `/internal/members/*` routes. There is no remaining route in this service using a static shared-secret
+PORTAL). Used on `POST /payments/reconcile` and the `/internal/members/*reminder-eligibility*`
+routes. `POST /internal/members/writeoff` is INTERNAL ONLY (`requireTrustedInternalOnly`,
+callerScope: the `trustedInternalOnly` contract — `x-internal-request: true`, no
+`Authorization`/`x-jwt-verified`/`x-auth-source`/`x-user-*`/EasyAuth header, a 24-hex
+`x-tenant-id` — else 403 `INTERNAL_ONLY`); its only callers are subscription-service worker
+requests (year-end archive + suspended-reinstatement write-offs). `POST
+/reports/members/summary-batch` is registered twice: `trustedInternalOnly` (those same worker
+paths), then the unchanged CRM chain. Matrix: `src/tests/writeoffSummaryBatch.internal.http.test.mjs`
+(node:test). There is no remaining route in this service using a static shared-secret
 `x-api-key`/`*_API_KEY` check — `payment.routes.js` was the last one and now uses this same
 `internalAuth` pattern instead of the old default-export `context()` middleware (removed).
 

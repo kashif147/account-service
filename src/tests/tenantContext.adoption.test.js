@@ -200,11 +200,20 @@ test("13 reports authenticated routes run authenticate -> tenantContextWarn -> a
   const spreads = (rr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length;
   assert.equal(spreads, 15);
 });
-test("14 reports router has no internal/S2S/webhook routes (nothing to exclude)", () => {
+test("14 reports router: one deliberate S2S registration (members/summary-batch), nothing else", () => {
   const rr = read(path.join("routes", "reports.routes.js"));
   for (const bad of ["internalOrAuthenticated", "internalAuth", "forwardedInternalContext", "webhook"]) {
     assert.ok(!rr.includes(bad), `reports router must not contain ${bad}`);
   }
+  // The only internal branch: trustedInternalOnly on the first /members/summary-batch
+  // registration (no tenant guard), followed by the unchanged CRM registration of the same path.
+  const routeBlocks = [...rr.matchAll(/router\.(get|post|put|patch|delete)\(([\s\S]*?)\);/g)].map((m) => m[2]);
+  assert.equal(routeBlocks.filter((b) => b.includes("trustedInternalOnly")).length, 1, "trustedInternalOnly on exactly one route");
+  const regs = [...rr.matchAll(/router\.post\(\s*"\/members\/summary-batch",([\s\S]*?)\);/g)].map((m) => m[1]);
+  assert.equal(regs.length, 2, "two /members/summary-batch registrations");
+  assert.match(regs[0], /^\s*trustedInternalOnly,\s*memberSummaryBatch\s*$/);
+  assert.ok(!regs[0].includes("ensureAuthenticatedWithTenantContext"), "internal branch carries no tenant guard");
+  assert.match(regs[1], /\.\.\.ensureAuthenticatedWithTenantContext,\s*requireCrmUser,\s*defaultPolicyMiddleware\.requirePermission\("accounts\.reports", "read"\),\s*memberSummaryBatch/);
 });
 test("15 journal pilot unchanged (19 guarded routes, 3 S2S excluded)", () => {
   const jr = read(path.join("routes", "journal.routes.js"));
