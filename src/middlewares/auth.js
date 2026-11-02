@@ -64,6 +64,46 @@ function extractFromClientPrincipal(clientPrincipal) {
   };
 }
 
+function jwtSecret() {
+  return (
+    process.env.JWT_SECRET ||
+    process.env.ACCESS_TOKEN_SECRET ||
+    process.env.ACCESS_TOEKN_SECRET // tolerate legacy typo
+  );
+}
+
+/**
+ * userType for a gateway-header request that arrived WITHOUT x-user-type: some calling
+ * services (profile-service, reporting-service, audit-service clients) forward the gateway
+ * identity headers and the original Bearer token but not x-user-type. Taken only from a
+ * Bearer token that verifies with this service's own secret AND names the same user and
+ * tenant as the gateway headers; otherwise null (callers then fail closed on userType).
+ * Never trusts an unverified header or a decoded-but-unverified payload.
+ */
+export function verifiedBearerUserType(req, userId, tenantId) {
+  const header = req.headers.authorization || req.headers.Authorization;
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return null;
+  const secret = jwtSecret();
+  if (!secret) return null;
+  try {
+    const decoded = jwt.verify(header.slice(7), secret);
+    // The gateway sets x-user-id from the token's `id` and x-tenant-id from `tenantId`.
+    const uid = String(userId || "");
+    const tid = String(tenantId || "");
+    const tokenUsers = [decoded?.id, decoded?.sub].filter(Boolean).map(String);
+    const tokenTenant = String(
+      decoded?.tenantId || decoded?.tid || decoded?.tenantID || decoded?.tenant_id || "",
+    );
+    if (!uid || !tokenUsers.includes(uid)) return null;
+    if (!tid || tokenTenant !== tid) return null;
+    return typeof decoded.userType === "string" && decoded.userType
+      ? decoded.userType
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function ensureAuthenticated(req, res, next) {
   // 1) Gateway-verified JWT flow (trust gateway headers with validation)
   const jwtVerified = req.headers["x-jwt-verified"];
@@ -86,7 +126,9 @@ export async function ensureAuthenticated(req, res, next) {
     const userId = req.headers["x-user-id"];
     const tenantId = req.headers["x-tenant-id"];
     const userEmail = req.headers["x-user-email"];
-    const userType = req.headers["x-user-type"];
+    const userType =
+      req.headers["x-user-type"] ||
+      verifiedBearerUserType(req, userId, tenantId);
     const userRolesStr = req.headers["x-user-roles"] || "[]";
     const userPermissionsStr = req.headers["x-user-permissions"] || "[]";
 

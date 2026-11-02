@@ -40,7 +40,8 @@ npm start                # node bin/account-service.js
 
 Tests live in `src/tests/` and match `**/*.test.js`. Some files use Node's built-in runner
 (`import test from "node:test"`: `phase2bStream2.*`, `tenantContext.adoption`,
-`testPublishEventRemoved`, `ledgerTenancy`) and must be run with
+`testPublishEventRemoved`, `ledgerTenancy`, and the P5 route matrix
+`portalObjectAuthz.p5.http.test.mjs` — `.mjs` so jest's `*.test.js` match skips it) and must be run with
 `node --test --test-force-exit <file>` (jest cannot load them); the rest are jest.
 `ledgerTenancy.test.js` is the GL Tenant A/B suite: it starts a throwaway `mongod` from PATH
 (or uses `LEDGER_TEST_MONGO_URI`) and skips when neither is available. There is no lint script configured despite
