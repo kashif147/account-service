@@ -83,11 +83,14 @@ export async function getLatestApplicationPayment(req, res, next) {
 
 export async function captureExistingPaymentIntent(req, res, next) {
   try {
-    const { profileId, memberId } = req.body || {};
+    // Bound internal command (P5 S1): link fields only from the validated command.
+    const bound = req.boundPaymentCommand || null;
+    const { profileId, memberId } = bound ? bound.cmd.link || {} : req.body || {};
     const result = await capturePaymentIntent(
       req.params.paymentIntentId,
       req.ctx,
       { profileId, memberId },
+      { bound },
     );
     res.success(result);
   } catch (e) {
@@ -100,6 +103,7 @@ export async function cancelExistingPaymentIntent(req, res, next) {
     const result = await cancelPaymentIntent(
       req.params.paymentIntentId,
       req.ctx,
+      { bound: req.boundPaymentCommand || null },
     );
     res.success(result);
   } catch (e) {
@@ -109,11 +113,40 @@ export async function cancelExistingPaymentIntent(req, res, next) {
 
 export async function attachRegistrationToExistingIntent(req, res, next) {
   try {
-    const { registrationId, productCode, eventCategoryCode, profileId, memberId } = req.body || {};
+    // P5 payer binding: the body is an assertion of the registration's binding (event/course,
+    // purpose, amount, currency), compared against the stored Payment and live Stripe intent.
+    // profileId/memberId are passed through only so the service can refuse them.
+    const {
+      registrationId,
+      productCode,
+      eventCategoryCode,
+      entityType,
+      entityId,
+      purpose,
+      amount,
+      currency,
+      profileId,
+      memberId,
+    } = req.body || {};
     const result = await attachRegistrationToPaymentIntent(
       req.params.paymentIntentId,
       req.ctx,
-      { registrationId, productCode, eventCategoryCode, profileId, memberId },
+      {
+        registrationId,
+        productCode,
+        eventCategoryCode,
+        entityType,
+        entityId,
+        purpose,
+        amount,
+        currency,
+        profileId,
+        memberId,
+      },
+      {
+        userType: req.user?.userType || null,
+        internalRequest: req.ctx?.internalRequest === true,
+      },
     );
     res.success(result);
   } catch (e) {

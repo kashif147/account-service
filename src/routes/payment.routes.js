@@ -14,6 +14,7 @@ import {
 import { AppError } from "../errors/AppError.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
+import { createRequirePaymentMutationAuthority, rejectMixedInternalIdentity } from "../middlewares/paymentMutationAuthority.middleware.js";
 import {
   createPaymentIntent,
   captureExistingPaymentIntent,
@@ -49,6 +50,8 @@ function internalAuth(req, res, next) {
   }
   return res.appError(AppError.unauthorized("Authorization header required"));
 }
+// P5: mixed identity on a payment mutation is refused before authentication (contract negative case).
+router.post(["/intents/:paymentIntentId/capture", "/intents/:paymentIntentId/cancel"], rejectMixedInternalIdentity);
 router.use(internalAuth);
 
 // P5 caller rules (internalAuth above only establishes identity). "Internal" below means a
@@ -92,18 +95,22 @@ router.get(
 
 // capture / cancel: CRM approval / rejection flows (profile-service applications,
 // events-service registrations) forwarding the CRM approver's identity, or internal S2S.
-// Never a PORTAL member: capturing posts the GL.
+// Never a PORTAL member: capturing posts the GL. P5 containment: a CRM caller needs the exact
+// business permission of the stored row's domain (application:write / events:write), never
+// payments:write - see paymentMutationAuthority.middleware.js.
 router.post(
   "/intents/:paymentIntentId/capture",
   requireInternalOrCrm,
-  idempotency(),
+  createRequirePaymentMutationAuthority("capture"),
+  idempotency({ bindBody: true }),
   captureExistingPaymentIntent
 );
 
 router.post(
   "/intents/:paymentIntentId/cancel",
   requireInternalOrCrm,
-  idempotency(),
+  createRequirePaymentMutationAuthority("cancel"),
+  idempotency({ bindBody: true }),
   cancelExistingPaymentIntent
 );
 

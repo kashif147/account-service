@@ -45,8 +45,34 @@ a PORTAL token is denied whatever permissions it carries, and a bare `x-internal
 empty-claims bypass and no `accounts.reports:read` alias. On `/payments/*`: capture/cancel,
 `applications/:id/latest`, `batch` and the `/journal/events/manual-payment*` routes are
 internal or CRM; `attach-registration` / `by-stripe` also admit a PORTAL caller for a Payment it
-created (`audit.createdBy`); `record-external` / `associate-member` need CRM finance write (or
-internal for record-external); `POST /intents` stays open (bound by `paymentIntentGuard`).
+created (`payer.userId`, or `audit.createdBy` on a legacy row without `payer`);
+`record-external` / `associate-member` need CRM finance write (or internal for
+record-external); `POST /intents` stays open (bound by `paymentIntentGuard`).
+
+Payer binding (P5, event/course intents): `POST /intents` stores `payer` (verified creator;
+`userId: null, userType: "INTERNAL"` for a genuine S2S call) and `target` (`event`/`course`
+from top-level `entityId` or the portal's `metadata.eventId`/`courseId`; `registration` for
+intents events-service creates with a `registrationId`). A portal-like caller may not send a
+`registrationId` (400 `REGISTRATION_ID_NOT_ALLOWED`) and every reuse/dedupe lookup it triggers
+is scoped to its own payer + target, so it can never receive or supersede another payer's
+intent/clientSecret. `attach-registration` is a single atomic bind: user callers (CRM too)
+only on their own intent (403 `NOT_OWNER`); body must assert the registration's
+`entityType`/`entityId`/`purpose`/`amount`/`currency`, compared with the row (and live Stripe
+amount/currency); `profileId`/`memberId` in the body -> 400 `FIELD_NOT_ALLOWED`; a
+registration that already has a Payment -> 409 `REGISTRATION_ALREADY_HAS_PAYMENT`; a
+different registration on an attached intent -> 409 `ALREADY_ATTACHED`; same one -> 200
+idempotent. Matrix: `src/tests/payerBinding.p5.test.mjs` (node:test, throwaway mongod).
+Active registration binding (P5 batch 5): `Payment.registrationBinding` (= registrationId,
+unique per tenant via a partial index) marks the ONE Stripe Payment that holds a registration.
+It is claimed in the same update as attach (so two different intents racing onto one
+registration: one 200, the rest 409, nothing written for the losers) and at `Payment.create`
+for a registration-backed intent (a concurrent loser's PaymentIntent is cancelled, 409). The
+only hand-over is the named `REPLACE_RELEASED_BINDING` transition: the holder is released by a
+conditional update only when it can no longer take money (terminal unpaid status, or a
+superseded attempt holding no funds); a funds-held holder (authorised/processing/captured)
+makes a replacement 409 `REGISTRATION_PAYMENT_HELD` before Stripe is called. Attach of a dead
+intent -> 409 `INTENT_NOT_ACTIVE`. Legacy rows and manual payments carry no binding; the
+existing any-other-Payment read still refuses those.
 `ensureAuthenticated`'s gateway path falls back to the `userType` of a Bearer token that verifies
 with this service's secret and names the same user + tenant, because profile-, reporting- and
 audit-service clients forward gateway headers without `x-user-type`.

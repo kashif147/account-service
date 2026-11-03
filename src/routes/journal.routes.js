@@ -55,6 +55,7 @@ import {
   requireCrmUser,
   requireInternalOrCrm,
 } from "../middlewares/callerScope.middleware.js";
+import { createRequirePaymentMutationAuthority, rejectMixedInternalIdentity } from "../middlewares/paymentMutationAuthority.middleware.js";
 import { AppError } from "../errors/AppError.js";
 import {
   postManualEventPaymentHandler,
@@ -280,18 +281,35 @@ router.post(
   claimApplicationCredit
 );
 
-// P5: the three /events/manual-payment routes are internal S2S or CRM staff only. The
+// P5: the three /events/manual-payment routes are internal S2S or CRM staff only. P5 containment:
+// CRM callers also need the exact events business permission (events:create to record,
+// events:write to post / void) - never payments:write; see paymentMutationAuthority.middleware.js. The
 // caller is events-service forwarding the originating user's identity: CRM event staff
 // (Add Attendee comp/manual/invoice, approve, reject), already gated there by the events PDP
 // permission. A PORTAL member never records, posts or voids a manual event payment.
+// A cached manual-record response is replayed only while that payment is still the live record
+// (P5 record -> void -> record: after a void inside the cache window the next record is processed
+// fresh and creates a new manual_review record instead of replaying the voided id).
+const LIVE_RECORD_STATUSES = new Set(["manual_review", "processing", "succeeded", "payment_required"]);
+async function manualRecordStillLive(cached, req) {
+  const paymentId = cached?.body?.data?.paymentId;
+  const tenantId = req.ctx?.tenantId || req.tenantId;
+  if (!paymentId || !tenantId) return false;
+  const Payment = (await import("../models/payment.model.js")).default;
+  const row = await Payment.findOne({ _id: paymentId, tenantId }).select({ status: 1 }).lean();
+  return Boolean(row && LIVE_RECORD_STATUSES.has(row.status));
+}
+
 // Events/courses manual (comp/manual/invoice) payment posting - called by
 // events-service, forwarding the original caller's gateway headers (same
 // pattern as internal.routes.js and profile-service's account.service.client.js)
 router.post(
   "/events/manual-payment",
+  rejectMixedInternalIdentity,
   internalOrAuthenticated,
   requireInternalOrCrm,
-  idempotency(),
+  createRequirePaymentMutationAuthority("manual_record"),
+  idempotency({ bindBody: true, revalidate: manualRecordStillLive }),
   postManualEventPaymentHandler,
 );
 
@@ -300,9 +318,11 @@ router.post(
 // events-service's /registrations/:id/approve.
 router.post(
   "/events/manual-payment/post",
+  rejectMixedInternalIdentity,
   internalOrAuthenticated,
   requireInternalOrCrm,
-  idempotency(),
+  createRequirePaymentMutationAuthority("manual_post"),
+  idempotency({ bindBody: true }),
   postManualEventPaymentPostHandler,
 );
 
@@ -310,9 +330,11 @@ router.post(
 // events-service's /registrations/:id/reject.
 router.post(
   "/events/manual-payment/void",
+  rejectMixedInternalIdentity,
   internalOrAuthenticated,
   requireInternalOrCrm,
-  idempotency(),
+  createRequirePaymentMutationAuthority("manual_void"),
+  idempotency({ bindBody: true }),
   voidManualEventPaymentHandler,
 );
 

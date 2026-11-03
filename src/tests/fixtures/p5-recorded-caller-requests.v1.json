@@ -1,0 +1,250 @@
+{
+ "note": "Requests serialized by the REAL caller clients in bound mode (ACCOUNT_PAYMENT_COMMAND_MODE=bound), axios stubbed; recorded by scratchpad p5/b8/record-callers.cjs. Only the placeholder ids are substituted at replay. Re-record whenever a caller client changes.",
+ "recordedFrom": {
+  "events-service": "15643d6 services/accountService.client.js",
+  "profile-service": "f06ee55 services/account.service.client.js"
+ },
+ "placeholders": {
+  "tenantId": "aaaaaaaaaaaaaaaaaaaaaaaa",
+  "registrationId": "e0000000000000000000000a",
+  "paymentId": "e0000000000000000000000b",
+  "paymentIntentId": "pi_recorded_placeholder",
+  "applicationId": "e0000000000000000000000c",
+  "actorUserId": "e0000000000000000000000d",
+  "profileId": "e0000000000000000000000e",
+  "memberId": "M-RECORDED"
+ },
+ "requests": {
+  "events-service": [
+   {
+    "name": "manual_record.crm_add_attendee",
+    "path": "/api/journal/events/manual-payment",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:manual_record:e0000000000000000000000a:new"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration"
+     },
+     "transition": "manual_record",
+     "reason": "crm_add_attendee",
+     "actorUserId": "e0000000000000000000000d",
+     "record": {
+      "amount": 5000,
+      "currency": "eur",
+      "method": "manual",
+      "eventCategoryCode": "CPD"
+     },
+     "link": {
+      "profileId": "e0000000000000000000000e",
+      "memberId": "M-RECORDED"
+     }
+    }
+   },
+   {
+    "name": "manual_post.approve",
+    "path": "/api/journal/events/manual-payment/post",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:manual_post:e0000000000000000000000a:e0000000000000000000000b"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "manual_post",
+     "reason": "approve",
+     "actorUserId": "e0000000000000000000000d",
+     "link": {
+      "profileId": "e0000000000000000000000e",
+      "memberId": "M-RECORDED"
+     }
+    }
+   },
+   {
+    "name": "manual_void.reject",
+    "path": "/api/journal/events/manual-payment/void",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:manual_void:e0000000000000000000000a:e0000000000000000000000b"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "manual_void",
+     "reason": "reject",
+     "actorUserId": "e0000000000000000000000d"
+    }
+   },
+   {
+    "name": "manual_void.event_cancelled",
+    "path": "/api/journal/events/manual-payment/void",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:manual_void:e0000000000000000000000a:e0000000000000000000000b"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "manual_void",
+     "reason": "event_cancelled",
+     "actorUserId": "e0000000000000000000000d"
+    }
+   },
+   {
+    "name": "manual_void.payment_method_switched",
+    "path": "/api/journal/events/manual-payment/void",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:manual_void:e0000000000000000000000a:e0000000000000000000000b"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "manual_void",
+     "reason": "payment_method_switched",
+     "actorUserId": "e0000000000000000000000d"
+    }
+   },
+   {
+    "name": "capture.approve",
+    "path": "/api/payments/intents/pi_recorded_placeholder/capture",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:capture:e0000000000000000000000a:pi_recorded_placeholder"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "capture",
+     "reason": "approve",
+     "actorUserId": "e0000000000000000000000d",
+     "link": {
+      "profileId": "e0000000000000000000000e",
+      "memberId": "M-RECORDED"
+     }
+    }
+   },
+   {
+    "name": "cancel.reject",
+    "path": "/api/payments/intents/pi_recorded_placeholder/cancel",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:cancel:e0000000000000000000000a:pi_recorded_placeholder"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "cancel",
+     "reason": "reject",
+     "actorUserId": "e0000000000000000000000d"
+    }
+   },
+   {
+    "name": "cancel.event_cancelled",
+    "path": "/api/payments/intents/pi_recorded_placeholder/cancel",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "registration:cancel:e0000000000000000000000a:pi_recorded_placeholder"
+    },
+    "body": {
+     "binding": {
+      "domain": "registration",
+      "registrationId": "e0000000000000000000000a",
+      "purpose": "eventRegistration",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "cancel",
+     "reason": "event_cancelled",
+     "actorUserId": "e0000000000000000000000d"
+    }
+   }
+  ],
+  "profile-service": [
+   {
+    "name": "application.capture.approve",
+    "path": "/api/payments/intents/pi_recorded_placeholder/capture",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "application:capture:e0000000000000000000000c:pi_recorded_placeholder"
+    },
+    "body": {
+     "binding": {
+      "domain": "application",
+      "applicationId": "e0000000000000000000000c",
+      "purpose": "applicationFee",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "capture",
+     "reason": "approve",
+     "actorUserId": "e0000000000000000000000d"
+    }
+   },
+   {
+    "name": "application.cancel.reject",
+    "path": "/api/payments/intents/pi_recorded_placeholder/cancel",
+    "headers": {
+     "Content-Type": "application/json",
+     "x-internal-request": "true",
+     "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa",
+     "Idempotency-Key": "application:cancel:e0000000000000000000000c:pi_recorded_placeholder"
+    },
+    "body": {
+     "binding": {
+      "domain": "application",
+      "applicationId": "e0000000000000000000000c",
+      "purpose": "applicationFee",
+      "paymentId": "e0000000000000000000000b"
+     },
+     "transition": "cancel",
+     "reason": "reject",
+     "actorUserId": "e0000000000000000000000d"
+    }
+   }
+  ]
+ }
+}
