@@ -437,7 +437,9 @@ async function releaseRegistrationBinding({ tenantId, registrationId, selfId, re
     const m = await Payment.updateOne(
       { _id: holder._id, tenantId, registrationBinding: registrationId, ...UNPOSTED_MANUAL_FILTER },
       {
-        $unset: { registrationBinding: "" },
+        // also frees the per-registration manual record key (#22), so a later manual record of this
+        // registration is not refused ALREADY_RECORDED by a cancelled row
+        $unset: { registrationBinding: "", idempotencyKey: "" },
         $set: {
           status: "canceled",
           bindingReleasedAt: new Date(),
@@ -2382,6 +2384,16 @@ export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields
   }
   if (NOT_CAPTURABLE_ROW.has(payment.status)) {
     throw new AppError(`A ${payment.status} payment cannot be captured`, 409, "TRANSITION_NOT_ALLOWED");
+  }
+  // P5 payer binding: a registration payment may be captured only while it is the registration's
+  // CURRENT holder (legacy pre-binding rows are adopted first). A released/replaced row never captures.
+  if (payment.registrationId && payment.registrationBinding !== String(payment.registrationId)) {
+    await adoptLegacyRegistrationHolder({ tenantId: payment.tenantId, registrationId: String(payment.registrationId) });
+    const fresh = await Payment.findOne({ _id: payment._id, tenantId: payment.tenantId }).select({ registrationBinding: 1 }).lean();
+    if (fresh?.registrationBinding !== String(payment.registrationId)) {
+      throw new AppError("This payment is no longer the registration's payment", 409, "PAYMENT_NOT_BOUND");
+    }
+    payment.registrationBinding = fresh.registrationBinding;
   }
 
   // Callers resolving profileId/memberId only at approval (e.g. events-service
