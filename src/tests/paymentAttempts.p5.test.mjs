@@ -2,6 +2,9 @@
 // REAL app router + REAL throwaway mongod; fake PDP (PERMIT iff the test token carries
 // `${resource}:${action}`), fake profile-/subscription-service for display enrichment, no Stripe
 // network calls. Rows are inserted raw so createdAt / secrets / metadata are controlled.
+// Requests go through the REAL app (real payment router, real ensureAuthenticatedWithTenantContext
+// -> requireCrmUser -> policy middleware chain) via supertest. Identity: HS256 user tokens signed
+// with a random secret generated in this process (JWT_SECRET below), never a real secret.
 //
 //   node --test --test-force-exit src/tests/paymentAttempts.p5.test.mjs
 import test, { after } from "node:test";
@@ -17,7 +20,7 @@ import jwt from "jsonwebtoken";
 process.env.LOG_ROOT = process.env.LOG_ROOT || fs.mkdtempSync(path.join(os.tmpdir(), "as-pay-attempts-"));
 process.env.NODE_ENV = "test";
 process.env.NOTIFICATION_SERVICE_URL = "";
-process.env.JWT_SECRET = "p5-payment-attempts-test-secret";
+process.env.JWT_SECRET = `attempts-test-${(await import("node:crypto")).randomBytes(24).toString("hex")}`;
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "sk_test_dummy_attempts";
 delete process.env.AUTH_BYPASS_ENABLED;
 
@@ -55,6 +58,7 @@ const pdp = http.createServer(async (req, res) => {
   const body = JSON.parse((await readBody(req)) || "{}");
   const claims = decode(body.token);
   const permit = Boolean(claims && (claims.permissions || []).includes(`${body.resource}:${body.action}`));
+  pdpCalls.push(`${body.resource}:${body.action}`);
   res.setHeader("content-type", "application/json");
   res.end(JSON.stringify(permit
     ? { success: true, decision: "PERMIT", user: { id: claims.id, tenantId: claims.tenantId, userType: claims.userType, roles: claims.roles || [], permissions: claims.permissions || [] } }
@@ -65,9 +69,12 @@ const pdp = http.createServer(async (req, res) => {
 // Contact details are returned on purpose: the endpoint must never pass them through.
 const upstreamCalls = [];
 const upstreamAuth = [];
+const upstreamIdentity = []; // {tenantHeader, tokenTenant} per enrichment call
+const pdpCalls = [];
 const profileSvc = http.createServer((req, res) => {
   upstreamCalls.push(req.url);
   upstreamAuth.push(req.headers.authorization ? "bearer" : "none");
+  upstreamIdentity.push({ tenantHeader: req.headers["x-tenant-id"] || null, tokenTenant: decode(req.headers.authorization)?.tenantId || null });
   res.setHeader("content-type", "application/json");
   const m = /^\/api\/applications\/([^/?]+)/.exec(req.url);
   if (m) {
@@ -108,8 +115,16 @@ const { default: Refund } = await import("../models/refund.model.js");
 const { default: GLTransaction } = await import("../models/glTransaction.model.js");
 const { processStripeEvent } = await import("../controllers/webhook.controller.js");
 const { default: app } = await import("../app.js");
+const { default: request } = await import("supertest");
+// ONE app server bound explicitly to 127.0.0.1. supertest(app) would listen on the dual-stack "::"
+// wildcard, which on macOS can be handed a port another 127.0.0.1 listener (the fake PDP / profile
+// server) already owns; the request then lands on that listener (a 200 with data:null). Binding
+// to 127.0.0.1 makes such a collision impossible.
+const appServer = app.listen(0, "127.0.0.1");
+await new Promise((r) => appServer.once("listening", r));
 
 after(async () => {
+  await new Promise((r) => appServer.close(r));
   pdp.close();
   profileSvc.close();
   try { await mongoose.disconnect(); } catch { /* ignore */ }
@@ -126,19 +141,14 @@ const CRM_NOPERM = bearer({ userType: "CRM", id: "staff-mo", permissions: ["prof
 const PORTAL_ALL = bearer({ userType: "PORTAL", id: "member-a", permissions: ["accounts.journals:read", "payments:read", "accounts.reports:read"] });
 
 async function call(url, { auth, headers = {} } = {}) {
-  const server = app.listen(0, "127.0.0.1");
-  await new Promise((r) => server.once("listening", r));
-  try {
-    const h = { ...headers };
-    if (auth) h.authorization = auth;
-    const res = await fetch(`http://127.0.0.1:${server.address().port}${url}`, { headers: h });
-    const text = await res.text();
-    let json = null;
-    try { json = JSON.parse(text); } catch { json = null; }
-    return { status: res.status, code: json?.code ?? json?.error?.code ?? null, data: json?.data ?? null, text };
-  } finally {
-    await new Promise((r) => server.close(r));
-  }
+  let req = request(appServer).get(url);
+  for (const [k, v] of Object.entries(headers)) req = req.set(k, v);
+  if (auth) req = req.set("authorization", auth);
+  const res = await req;
+  const text = res.text || "";
+  let json = null;
+  try { json = JSON.parse(text); } catch { json = null; }
+  return { status: res.status, code: json?.code ?? json?.error?.code ?? null, data: json?.data ?? null, text };
 }
 
 // ---- fixtures ----
@@ -204,7 +214,7 @@ function receipt(paymentKey, { tenantId = TA, status = "PENDING", amount = 5000,
 
 const ALLOWED_KEYS = [
   "id", "attemptNumber", "isActiveAttempt", "supersededAt", "purpose", "ledgerDomain", "source", "mode",
-  "amount", "currency", "lifecycleStatus", "providerStatus", "amountCaptured", "amountRefunded",
+  "amount", "currency", "lifecycleStatus", "providerStatus", "amountCaptured", "amountRefunded", "refundableAmount",
   "applicationId", "registrationId", "profileId", "memberId", "payerUserType", "createdAt", "authorisedAt",
   "capturedAt", "canceledAt", "capturableUntil", "failureCode", "cancellationReason", "paymentIntentId",
   "receipt", "membershipNumber", "fullName", "membershipCategory", "membershipStatus", "joinDate",
@@ -233,6 +243,8 @@ if (!skip) {
     pay("manual", { status: "manual_review", mode: "external", purpose: "eventRegistration", ledgerDomain: "events", registrationId: "REG-2", stripe: { paymentIntentId: undefined }, createdAt: at(120) }),
     pay("expired", { status: "authorization_expired", applicationId: "APP-EXP", createdAt: at(130) }),
     pay("refundReq", { status: "refund_required", applicationId: "APP-RREQ", createdAt: at(140) }),
+    // stored partially_refunded with NO Refund rows (Stripe-side refund): refunded total unknown
+    pay("partialUnknown", { status: "partially_refunded", applicationId: "APP-PUNK", createdAt: at(150) }),
   ];
   // Fillers share ONE createdAt so the _id tie-break is exercised across page boundaries.
   for (let i = 0; i < FILLERS; i += 1) {
@@ -254,6 +266,9 @@ if (!skip) {
     receipt("member"),
     receipt("refunded"),
     receipt("bCap", { tenantId: TB }),
+    receipt("partialUnknown"),
+    // tenant-B receipt carrying a tenant-A payment's docNo: must never attach to the A row
+    { ...receipt("auth", { tenantId: TB }), memo: "foreign" },
   ]);
   await Refund.collection.insertMany([
     { tenantId: TA, paymentId: ids.refunded, mode: "stripe", amount: 5000, currency: "eur", createdAt: at(55) },
@@ -262,6 +277,9 @@ if (!skip) {
     { tenantId: TA, paymentId: ids.partialFull, mode: "stripe", amount: 2500, currency: "eur", createdAt: at(74) },
     // a refund recorded under ANOTHER tenant for a tenant-A payment id is never counted
     { tenantId: TB, paymentId: ids.partial, mode: "stripe", amount: 3000, currency: "eur", createdAt: at(64) },
+    // tenant-B refund rows for tenant-A captured / partialUnknown payments: never counted
+    { tenantId: TB, paymentId: ids.captured, mode: "stripe", amount: 5000, currency: "eur", createdAt: at(38) },
+    { tenantId: TB, paymentId: ids.partialUnknown, mode: "stripe", amount: 1000, currency: "eur", createdAt: at(149) },
   ]);
 }
 
@@ -328,11 +346,49 @@ test("captured payment: captured + receipt link (grid fields), canRefund true on
   assert.equal(m.actions.canRefund, false);
   assert.equal(m.membershipNumber, "M-100");
   assert.equal(m.membershipStatus, "Active");
-  // refund_required = captured funds owed back; refund endpoint refuses it, so canRefund false
-  const rr = byId(all, "refundReq");
-  assert.equal(rr.lifecycleStatus, "captured");
+  assert.equal(c.refundableAmount, 5000, "tenant B's refund row for this payment id is not counted");
+  assert.equal(m.refundableAmount, 5000);
+});
+
+test("refund_required: own lifecycle label, captured amount kept, no refundable amount, canRefund false", { skip }, async () => {
+  const r = await call(`${URL}?applicationId=APP-RREQ`, { auth: CRM_A });
+  assert.equal(r.status, 200);
+  const rr = byId(r.data.items, "refundReq");
+  assert.equal(rr.lifecycleStatus, "refund_required");
+  assert.equal(rr.providerStatus, "refund_required");
   assert.equal(rr.amountCaptured, 5000);
-  assert.equal(rr.actions.canRefund, false);
+  assert.equal(rr.amountRefunded, 0);
+  assert.equal(rr.refundableAmount, null);
+  assert.deepEqual(rr.actions, { canRefund: false });
+  const f = (await call(`${URL}?status=refund_required&limit=200`, { auth: CRM_A })).data;
+  assert.deepEqual(f.items.map((i) => i.id), [String(ids.refundReq)]);
+  assert.equal(f.total, 1);
+});
+
+test("partial refund with Refund rows: refundableAmount = captured - refunded, canRefund true; unknown partial: nulls, canRefund false", { skip }, async () => {
+  const all = (await call(`${URL}?limit=200`, { auth: CRM_A })).data.items;
+  const part = byId(all, "partial");
+  assert.equal(part.lifecycleStatus, "partially_refunded");
+  assert.equal(part.amountCaptured, 5000);
+  assert.equal(part.amountRefunded, 2000);
+  assert.equal(part.refundableAmount, 3000);
+  assert.ok(part.receipt && part.receipt.settlementStatus === "PENDING" && part.memberId === null && part.applicationId);
+  assert.equal(part.actions.canRefund, true);
+  // stored partially_refunded, no tenant-A Refund rows (tenant B has one for the same id - ignored)
+  const unk = byId(all, "partialUnknown");
+  assert.equal(unk.lifecycleStatus, "partially_refunded");
+  assert.equal(unk.amountCaptured, 5000);
+  assert.equal(unk.amountRefunded, null);
+  assert.equal(unk.refundableAmount, null);
+  assert.ok(unk.receipt && unk.receipt.settlementStatus === "PENDING", "the other refund conditions hold");
+  assert.equal(unk.actions.canRefund, false);
+  // refunded -> 0; non-captured -> 0
+  assert.equal(byId(all, "refunded").refundableAmount, 0);
+  assert.equal(byId(all, "partialFull").refundableAmount, 0);
+  for (const k of ["auth", "authOld", "cancel", "failed", "event", "enrichFail", "manual", "expired"]) {
+    assert.equal(byId(all, k).refundableAmount, 0, k);
+    assert.equal(byId(all, k).actions.canRefund, false, k);
+  }
 });
 
 test("failed -> failed; full refund -> refunded; partial -> partially_refunded with Refund-derived amounts", { skip }, async () => {
@@ -427,13 +483,17 @@ test("pagination: keyset cursor walks every tenant-A row exactly once in stable 
 });
 
 test("filters: status (lifecycle), purpose, registrationId, mode, dates", { skip }, async () => {
-  const st = async (s) => (await call(`${URL}?status=${s}&limit=200`, { auth: CRM_A })).data.items.map((i) => i.id).sort();
+  const st = async (s) => {
+    const r = await call(`${URL}?status=${s}&limit=200`, { auth: CRM_A });
+    assert.equal(r.status, 200, `status=${s}: ${r.status} ${r.code}`);
+    return r.data.items.map((i) => i.id).sort();
+  };
   assert.deepEqual(await st("authorised"), [ids.auth, ids.event].map(String).sort());
   assert.deepEqual(await st("refunded"), [ids.refunded, ids.partialFull].map(String).sort());
-  assert.deepEqual(await st("partially_refunded"), [String(ids.partial)]);
-  assert.deepEqual(await st("refunded,partially_refunded"), [ids.refunded, ids.partialFull, ids.partial].map(String).sort());
+  assert.deepEqual(await st("partially_refunded"), [ids.partial, ids.partialUnknown].map(String).sort());
+  assert.deepEqual(await st("refunded,partially_refunded"), [ids.refunded, ids.partialFull, ids.partial, ids.partialUnknown].map(String).sort());
   assert.deepEqual(await st("cancelled"), [ids.authOld, ids.cancel, ids.expired].map(String).sort());
-  assert.deepEqual(await st("captured"), [ids.captured, ids.member, ids.refundReq].map(String).sort());
+  assert.deepEqual(await st("captured"), [ids.captured, ids.member].map(String).sort());
   assert.deepEqual(await st("unknown"), [String(ids.manual)]);
   assert.deepEqual(await st("failed,authorised"), [ids.failed, ids.auth, ids.event].map(String).sort());
   const statusCount = (await call(`${URL}?status=refunded`, { auth: CRM_A })).data.total;
@@ -471,13 +531,84 @@ test("invalid / unknown query params -> 400", { skip }, async () => {
   }
 });
 
-test("authz: unauthenticated 401, internal header 401, PORTAL 403 CRM_ONLY, missing permission 403", { skip }, async () => {
+const noData = (r, msg) => {
+  assert.ok(r.status === 401 || r.status === 403, `${msg}: expected 401/403, got ${r.status}`);
+  assert.ok(!r.data?.items, `${msg}: no items`);
+  assert.ok(!r.text.includes(String(ids.auth)) && !r.text.includes(String(ids.bAuth)), `${msg}: no row ids`);
+};
+const UNKNOWN_TYPE = bearer({ userType: "SERVICE", id: "svc", permissions: ["accounts.journals:read"] });
+const NO_TYPE = `Bearer ${jwt.sign({ id: "nt", sub: "nt", tenantId: TA, roles: [], permissions: ["accounts.journals:read"] }, SECRET, { expiresIn: "1h" })}`;
+const WRONG_SECRET = `Bearer ${jwt.sign({ id: "staff-a", sub: "staff-a", tenantId: TA, userType: "CRM", roles: [], permissions: ["accounts.journals:read"] }, "not-the-service-secret", { expiresIn: "1h" })}`;
+const FORGED_INTERNAL = {
+  "x-internal-request": "true",
+  "x-tenant-id": TA,
+  "x-user-id": "staff-a",
+  "x-user-type": "CRM",
+  "x-user-roles": "ASU",
+  "x-user-permissions": "accounts.journals:read",
+};
+
+test("real route chain: 401 unauthenticated; 403 PORTAL / unknown userType; 403 CRM without accounts.journals:read; 200 CRM", { skip }, async () => {
+  noData(await call(URL), "no auth");
   assert.equal((await call(URL)).status, 401);
-  assert.equal((await call(URL, { headers: { "x-internal-request": "true", "x-tenant-id": TA } })).status, 401);
   const p = await call(URL, { auth: PORTAL_ALL });
   assert.equal(p.status, 403);
   assert.equal(p.code, "CRM_ONLY");
-  assert.equal((await call(URL, { auth: CRM_NOPERM })).status, 403);
+  noData(p, "portal");
+  const u = await call(URL, { auth: UNKNOWN_TYPE });
+  assert.equal(u.status, 403);
+  noData(u, "unknown userType");
+  noData(await call(URL, { auth: NO_TYPE }), "missing userType");
+  // fresh principals so the policy-middleware decision cache cannot answer for the PDP
+  const freshNoPerm = bearer({ userType: "CRM", id: "staff-mo-fresh", permissions: ["profiles:read", "payments:read"] });
+  const freshOk = bearer({ userType: "CRM", id: "staff-a-fresh", permissions: ["accounts.journals:read"] });
+  pdpCalls.length = 0;
+  const np = await call(URL, { auth: freshNoPerm });
+  assert.equal(np.status, 403);
+  noData(np, "CRM without permission");
+  assert.deepEqual(pdpCalls, ["accounts.journals:read"], "the PDP decided on accounts.journals:read");
+  pdpCalls.length = 0;
+  const ok = await call(URL, { auth: freshOk });
+  assert.equal(ok.status, 200);
+  assert.ok(ok.data.items.length > 0);
+  assert.deepEqual(pdpCalls, ["accounts.journals:read"]);
+});
+
+test("real route chain: x-internal-request + forged x-user-* / x-tenant-id never bypasses user auth", { skip }, async () => {
+  noData(await call(URL, { headers: FORGED_INTERNAL }), "forged internal, no token");
+  assert.equal((await call(URL, { headers: FORGED_INTERNAL })).status, 401);
+  noData(await call(URL, { headers: { ...FORGED_INTERNAL, "x-tenant-id": TB } }), "forged internal tenant B");
+  noData(await call(URL, { auth: WRONG_SECRET, headers: FORGED_INTERNAL }), "bad-signature token + internal");
+  noData(await call(URL, { headers: { ...FORGED_INTERNAL, "x-jwt-verified": "true", "x-auth-source": "gateway" } }), "forged gateway headers");
+  // a PORTAL token plus internal headers is still the PORTAL caller
+  const pi = await call(URL, { auth: PORTAL_ALL, headers: { "x-internal-request": "true" } });
+  noData(pi, "portal + internal header");
+});
+
+test("enrichment is tenant-scoped: foreign-tenant receipt / refunds never attach; upstream calls carry tenant A only", { skip }, async () => {
+  upstreamIdentity.length = 0;
+  const r = await call(`${URL}?limit=200`, { auth: CRM_A });
+  assert.equal(r.status, 200);
+  // tenant-B GL receipt with docNo RCP-<tenant-A auth id> is not attached
+  assert.equal(byId(r.data.items, "auth").receipt, null);
+  // tenant-B refund rows for tenant-A ids are not counted
+  assert.equal(byId(r.data.items, "captured").amountRefunded, 0);
+  assert.equal(byId(r.data.items, "partialUnknown").amountRefunded, null);
+  assert.equal(byId(r.data.items, "partial").amountRefunded, 2000);
+  assert.ok(upstreamIdentity.length > 0, "enrichment called upstream");
+  for (const c of upstreamIdentity) {
+    assert.equal(c.tenantHeader, TA);
+    assert.equal(c.tokenTenant, TA);
+  }
+  // and a tenant-B request forwards tenant B only, seeing its own receipt
+  upstreamIdentity.length = 0;
+  const b = await call(`${URL}?limit=200`, { auth: CRM_B });
+  assert.equal(byId(b.data.items, "bCap").receipt.docNo, `RCP-${ids.bCap}`);
+  assert.ok(upstreamIdentity.length > 0);
+  for (const c of upstreamIdentity) {
+    assert.equal(c.tenantHeader, TB);
+    assert.equal(c.tokenTenant, TB);
+  }
 });
 
 test("tenant scope: only the verified tenant's rows; tenant header / query cannot change it", { skip }, async () => {

@@ -20,6 +20,7 @@ export const LIFECYCLE_STATUSES = Object.freeze([
   "failed",
   "refunded",
   "partially_refunded",
+  "refund_required",
   "unknown",
 ]);
 
@@ -34,7 +35,7 @@ export const LIFECYCLE_BY_PROVIDER_STATUS = Object.freeze({
   processing: "pending",
   requires_capture: "authorised",
   succeeded: "captured",
-  refund_required: "captured", // captured, then cancel requested: funds held, refund owed
+  refund_required: "refund_required", // captured, then cancel requested: funds held, refund owed
   canceled: "cancelled",
   authorization_expired: "cancelled", // the hold lapsed; no money was taken
   failed: "failed",
@@ -204,7 +205,13 @@ function receiptView(r) {
   };
 }
 
-/** Lifecycle + money for one stored Payment (pure; exported for tests). */
+/**
+ * Lifecycle + money for one stored Payment (pure; exported for tests).
+ * refundableAmount is non-null only when the remaining refundable amount is established
+ * authoritatively (amountCaptured minus the Refund-row sum, for a captured /
+ * partially_refunded payment); 0 for refunded and for statuses without captured money;
+ * null when the refunded total is not reliably known (stored partially_refunded, no Refund rows).
+ */
 export function deriveAttemptMoney(p, refundTotal) {
   const providerStatus = p.status || null;
   const amount = Number(p.amount) || 0;
@@ -217,11 +224,22 @@ export function deriveAttemptMoney(p, refundTotal) {
   else if (providerStatus === "partially_refunded") amountRefunded = null; // refunded at Stripe, amount not stored here
   else amountRefunded = 0;
 
+  let refundableAmount;
+  if (providerStatus === "succeeded" || providerStatus === "partially_refunded") {
+    refundableAmount = amountRefunded == null ? null : Math.max(0, amountCaptured - amountRefunded);
+  } else if (providerStatus === "refund_required") {
+    // Funds captured, but this is not a captured / partially_refunded payment (the refund
+    // endpoint refuses it), so no refundable amount is established here.
+    refundableAmount = null;
+  } else {
+    refundableAmount = 0; // refunded, or no captured money
+  }
+
   let lifecycleStatus = LIFECYCLE_BY_PROVIDER_STATUS[providerStatus] || "unknown";
   if (providerStatus === "partially_refunded" && hasRefundRows && amountCaptured > 0 && refundTotal >= amountCaptured) {
     lifecycleStatus = "refunded";
   }
-  return { providerStatus, lifecycleStatus, amountCaptured, amountRefunded };
+  return { providerStatus, lifecycleStatus, amountCaptured, amountRefunded, refundableAmount };
 }
 
 /**
@@ -231,8 +249,7 @@ export function deriveAttemptMoney(p, refundTotal) {
  */
 export function computeCanRefund(p, money, receipt) {
   if (!REFUNDABLE_PROVIDER_STATUSES.has(p.status)) return false;
-  if (money.amountRefunded == null) return false;
-  if ((Number(p.amount) || 0) - money.amountRefunded <= 0) return false;
+  if (money.refundableAmount === null || !(money.refundableAmount > 0)) return false;
   if (!receipt || String(receipt.settlementStatus || "").toUpperCase() !== "PENDING") return false;
   if (str(p.memberId)) return false;
   if (!str(p.applicationId)) return false;
@@ -270,6 +287,7 @@ function toItem(p, { refundTotal, receipt, display }) {
     providerStatus: money.providerStatus,
     amountCaptured: money.amountCaptured,
     amountRefunded: money.amountRefunded,
+    refundableAmount: money.refundableAmount,
     applicationId: str(p.applicationId),
     registrationId: str(p.registrationId),
     profileId: str(p.profileId),
