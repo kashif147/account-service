@@ -152,6 +152,14 @@ const PaymentSchema = new Schema(
     target: { type: TargetSubSchema, default: undefined },
     // Set when attach-registration binds registrationId (single attach, never re-bound).
     attachedAt: { type: Date },
+    // P5 active registration binding: equals registrationId on the ONE Stripe Payment that
+    // currently holds the registration (unique per tenant, index below). Claimed atomically
+    // at creation (events-service CRM/retry intents) or attach (portal intents); released
+    // only by the named replacement transition (holder can no longer take money - see
+    // payments.service.js releasableBindingFilter). Absent on legacy rows and manual payments.
+    registrationBinding: { type: String, default: undefined },
+    bindingReleasedAt: { type: Date },
+    bindingReleaseReason: { type: String },
     // Deferred payment link (PaymentLink._id) - set only for link payments, which use the
     // lifecycle state machine authoritatively and never publish application.status.updated.
     paymentLinkId: { type: Schema.Types.ObjectId, ref: "PaymentLink", default: null },
@@ -209,6 +217,12 @@ PaymentSchema.index({
   attemptNumber: -1,
   createdAt: -1,
 });
+
+// P5: at most one Payment holds the active binding of a registration (see registrationBinding).
+PaymentSchema.index(
+  { tenantId: 1, registrationBinding: 1 },
+  { unique: true, partialFilterExpression: { registrationBinding: { $type: "string" } } }
+);
 
 PaymentSchema.index(
   { tenantId: 1, idempotencyKey: 1 },

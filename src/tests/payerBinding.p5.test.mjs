@@ -79,6 +79,13 @@ stripeClient.paymentIntents.retrieve = async (id) => {
   if (!pi) throw Object.assign(new Error("No such payment_intent"), { statusCode: 404 });
   return { ...pi };
 };
+const CANCELLED = [];
+stripeClient.paymentIntents.cancel = async (id) => {
+  CANCELLED.push(id);
+  const pi = PIS.get(id);
+  if (pi) pi.status = "canceled";
+  return { ...(pi || { id }), status: "canceled" };
+};
 function seedPi(id, { amount = 5000, currency = "eur", status = "requires_capture" } = {}) {
   PIS.set(id, { id, client_secret: `${id}_secret_seed`, amount, currency, status, metadata: {} });
 }
@@ -373,4 +380,124 @@ test("A13 (account side) requires_capture status event carries the PaymentIntent
   assert.equal(ev.data.registrationId, reg);
   assert.equal(ev.data.paymentIntentId, "pi_status_13");
   assert.ok(ev.data.paymentId);
+});
+
+// ---------------------------------------------------------------- P5 batch 5: active registration binding
+const holders = (reg) => Payment.find({ tenantId: TA, registrationBinding: reg }).lean();
+
+test("B1 two (and three) DIFFERENT intents concurrently attached to ONE registration -> exactly one binding survives", { skip }, async () => {
+  for (let round = 0; round < 6; round += 1) {
+    const reg = oid(0xb1000 + round);
+    const callers = round % 2 ? [PORTAL_A, PORTAL_B, PORTAL_A] : [PORTAL_A, PORTAL_B];
+    const intents = [];
+    for (const auth of callers) {
+      const d = await createPortalIntent(auth, portalIntent(EVENT_1, { amount: 5100 + round }));
+      PIS.get(d.paymentIntentId).status = "requires_capture";
+      intents.push({ auth, d });
+    }
+    const statusBefore = await Promise.all(intents.map(({ d }) => row(d.paymentIntentId).then((p) => p.status)));
+    const rs = await Promise.all(intents.map(({ auth, d }) =>
+      call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth, body: attachBody(reg, { amount: 5100 + round }) })));
+    const ok = rs.filter((r) => r.status === 200);
+    assert.equal(ok.length, 1, `round ${round}: ${rs.map((r) => `${r.status}/${r.code}`)}`);
+    for (const r of rs.filter((x) => x.status !== 200)) {
+      assert.equal(r.status, 409);
+      assert.ok(["REGISTRATION_ALREADY_HAS_PAYMENT", "ALREADY_ATTACHED"].includes(r.code), r.code);
+    }
+    const h = await holders(reg);
+    assert.equal(h.length, 1, "exactly one active binding");
+    assert.equal(await Payment.countDocuments({ tenantId: TA, registrationId: reg }), 1, "exactly one Payment carries the registration");
+    for (let i = 0; i < intents.length; i += 1) {
+      const p = await row(intents[i].d.paymentIntentId);
+      assert.equal(p.status, statusBefore[i], "attach never changes a payment's status");
+      if (rs[i].status !== 200) {
+        assert.equal(p.registrationId, undefined, "loser stays unattached");
+        assert.equal(p.registrationBinding, undefined);
+        for (const other of intents) assert.ok(!rs[i].text.includes(other.d.clientSecret), "no clientSecret in a 409");
+      }
+    }
+  }
+});
+
+test("B2 concurrent CRM createIntent for one registration -> one binding holder; a losing PaymentIntent is cancelled, never returned", { skip }, async () => {
+  for (let round = 0; round < 4; round += 1) {
+    const reg = oid(0xb2000 + round);
+    const body = { purpose: "eventRegistration", amount: 5000, currency: "eur", registrationId: reg, ledgerDomain: "events" };
+    CANCELLED.length = 0;
+    const rs = await Promise.all([CRM, bearer({ userType: "CRM", id: "staff-2" }), CRM].map((auth) =>
+      call("POST", "/api/payments/intents", { auth, body })));
+    const h = await holders(reg);
+    assert.equal(h.length, 1, `round ${round}: ${rs.map((r) => `${r.status}/${r.code}`)}`);
+    for (const r of rs) {
+      if (r.status === 200) assert.equal(r.data.paymentIntentId, h[0].stripe.paymentIntentId, "every 200 is the holder's intent");
+      else { assert.equal(r.status, 409); assert.equal(r.code, "REGISTRATION_ALREADY_HAS_PAYMENT"); assert.ok(!r.text.includes("_secret_")); }
+    }
+    const active = await Payment.find({ tenantId: TA, registrationId: reg, isActiveAttempt: { $ne: false } }).lean();
+    assert.equal(active.length, 1, "one active attempt");
+    for (const id of CANCELLED) assert.notEqual(id, h[0].stripe.paymentIntentId, "the holder is never cancelled");
+  }
+});
+
+test("B3 legitimate replacement: a cancelled holder is released (REPLACE_RELEASED_BINDING) and the retry intent takes the binding", { skip }, async () => {
+  const reg = oid(0xb3);
+  const body = { purpose: "eventRegistration", amount: 5000, currency: "eur", registrationId: reg, ledgerDomain: "events" };
+  const r1 = await call("POST", "/api/payments/intents", { auth: CRM, body });
+  assert.equal(r1.status, 200, r1.text.slice(0, 200));
+  PIS.get(r1.data.paymentIntentId).status = "canceled";
+  const r2 = await call("POST", "/api/payments/intents", { auth: CRM, body });
+  assert.equal(r2.status, 200, r2.text.slice(0, 200));
+  assert.notEqual(r2.data.paymentIntentId, r1.data.paymentIntentId);
+  const old = await row(r1.data.paymentIntentId);
+  assert.equal(old.registrationBinding, undefined);
+  assert.match(old.bindingReleaseReason, /^REPLACE_RELEASED_BINDING:/);
+  const h = await holders(reg);
+  assert.equal(h.length, 1);
+  assert.equal(h[0].stripe.paymentIntentId, r2.data.paymentIntentId);
+  // a requires_payment_method retry still reuses the SAME intent (no replacement)
+  const r3 = await call("POST", "/api/payments/intents", { auth: CRM, body });
+  assert.equal(r3.data.paymentIntentId, r2.data.paymentIntentId);
+});
+
+test("B4 a holder that holds funds is never replaced: amount change on an authorised registration -> 409, holder intact, no new intent", { skip }, async () => {
+  const reg = oid(0xb4);
+  const body = { purpose: "eventRegistration", amount: 5000, currency: "eur", registrationId: reg, ledgerDomain: "events" };
+  const r1 = await call("POST", "/api/payments/intents", { auth: CRM, body });
+  PIS.get(r1.data.paymentIntentId).status = "requires_capture";
+  await Payment.updateOne({ tenantId: TA, "stripe.paymentIntentId": r1.data.paymentIntentId }, { $set: { status: "requires_capture" } });
+  const before = piSeq;
+  const r2 = await call("POST", "/api/payments/intents", { auth: CRM, body: { ...body, amount: 6500 } });
+  assert.equal(r2.status, 409, r2.text.slice(0, 200));
+  assert.equal(r2.code, "REGISTRATION_PAYMENT_HELD");
+  assert.equal(piSeq, before, "no Stripe PaymentIntent created");
+  const p = await row(r1.data.paymentIntentId);
+  assert.equal(p.registrationBinding, reg);
+  assert.equal(p.isActiveAttempt, true, "the funds-holding attempt is not left superseded");
+  assert.equal(p.status, "requires_capture");
+});
+
+test("B5 a portal attach can never take over a registration held by a bound intent, and a dead intent cannot attach", { skip }, async () => {
+  const reg = oid(0xb5);
+  const crm = await call("POST", "/api/payments/intents", { auth: CRM, body: { purpose: "eventRegistration", amount: 5000, currency: "eur", registrationId: reg, ledgerDomain: "events" } });
+  assert.equal(crm.status, 200);
+  const d = await createPortalIntent(PORTAL_A, portalIntent(EVENT_1));
+  const r = await call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth: PORTAL_A, body: attachBody(reg) });
+  assert.equal(r.status, 409); assert.equal(r.code, "REGISTRATION_ALREADY_HAS_PAYMENT");
+  assert.equal((await holders(reg))[0].stripe.paymentIntentId, crm.data.paymentIntentId);
+  // own cancelled intent
+  const dead = await createPortalIntent(PORTAL_A, portalIntent(EVENT_1, { amount: 5005 }));
+  await Payment.updateOne({ tenantId: TA, "stripe.paymentIntentId": dead.paymentIntentId }, { $set: { status: "canceled" } });
+  const r2 = await call("POST", `/api/payments/intents/${dead.paymentIntentId}/attach-registration`, { auth: PORTAL_A, body: attachBody(oid(0xb51), { amount: 5005 }) });
+  assert.equal(r2.status, 409); assert.equal(r2.code, "INTENT_NOT_ACTIVE");
+});
+
+test("B6 idempotent attach keeps the single binding; the same intent to a different registration is still 409", { skip }, async () => {
+  const d = await createPortalIntent(PORTAL_A, portalIntent(EVENT_1, { amount: 5006 }));
+  const reg = oid(0xb6);
+  const a1 = await call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth: PORTAL_A, body: attachBody(reg, { amount: 5006 }) });
+  const a2 = await call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth: PORTAL_A, body: attachBody(reg, { amount: 5006 }) });
+  assert.equal(a1.status, 200); assert.equal(a2.status, 200); assert.equal(a2.data.alreadyAttached, true);
+  assert.equal((await holders(reg)).length, 1);
+  const a3 = await call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth: PORTAL_A, body: attachBody(oid(0xb61), { amount: 5006 }) });
+  assert.equal(a3.status, 409); assert.equal(a3.code, "ALREADY_ATTACHED");
+  assert.equal((await holders(oid(0xb61))).length, 0);
 });

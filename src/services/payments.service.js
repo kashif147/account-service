@@ -173,6 +173,68 @@ function bindingError(message, status, code) {
   return new AppError(message, status, code);
 }
 
+// ---------------------------------------------------------------------------
+// P5 active registration binding (Payment.registrationBinding, unique per tenant).
+//
+// Exactly one Stripe Payment may hold a registration at a time. The holder is claimed
+// atomically by the unique index - by createIntent for a registration-backed intent
+// (events-service CRM create / retry-payment) and by attach-registration for a portal
+// intent - so two different intents racing onto one registration cannot both win.
+//
+// The ONLY way a registration moves to another intent is the named replacement transition
+// REPLACE_RELEASED_BINDING: the current holder is released (conditional update, so a
+// concurrent release/claim cannot double-release) and only when it can no longer take
+// money: a terminal unpaid status, or a superseded attempt that holds no funds.
+// Funds-held holders (authorised / processing / captured) are never released here.
+// ---------------------------------------------------------------------------
+const TERMINAL_UNPAID_STATUSES = ["canceled", "failed", "authorization_expired", "payment_required"];
+const FUNDS_HELD_STATUSES = ["requires_capture", "processing", "succeeded", "partially_refunded", "refund_required", "manual_review"];
+
+export function releasableBindingFilter() {
+  return {
+    $or: [
+      { status: { $in: TERMINAL_UNPAID_STATUSES } },
+      { isActiveAttempt: false, status: { $nin: FUNDS_HELD_STATUSES } },
+    ],
+  };
+}
+
+function isBindingDuplicateKey(e) {
+  if (!e || e.code !== 11000) return false;
+  if (e.keyPattern && Object.prototype.hasOwnProperty.call(e.keyPattern, "registrationBinding")) return true;
+  return /registrationBinding/.test(String(e.message || ""));
+}
+
+/**
+ * Releases the current holder of `registrationId` if (and only if) it is releasable.
+ * Returns { holder: null } when nobody holds it, { self: true } when `selfId` holds it,
+ * { released: true } after a successful release, or { blocked: true, holderId } when the
+ * holder still holds (or may still take) money.
+ */
+async function releaseRegistrationBinding({ tenantId, registrationId, selfId, reason, ctx = {} }) {
+  const holder = await Payment.findOne({ tenantId, registrationBinding: registrationId })
+    .select({ _id: 1, status: 1, isActiveAttempt: 1 })
+    .lean();
+  if (!holder) return { holder: null };
+  if (selfId && String(holder._id) === String(selfId)) return { self: true };
+  const r = await Payment.updateOne(
+    { _id: holder._id, tenantId, registrationBinding: registrationId, ...releasableBindingFilter() },
+    {
+      $unset: { registrationBinding: "" },
+      $set: {
+        bindingReleasedAt: new Date(),
+        bindingReleaseReason: `REPLACE_RELEASED_BINDING:${reason}`,
+        "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+      },
+    },
+  );
+  if (r.modifiedCount === 1) return { released: true, holderId: holder._id };
+  // Either not releasable, or a concurrent request already changed it: re-check once.
+  const still = await Payment.findOne({ tenantId, registrationBinding: registrationId }).select({ _id: 1 }).lean();
+  if (!still) return { holder: null };
+  return { blocked: true, holderId: still._id };
+}
+
 /**
  * Resolves the target of an event/course intent and enforces the portal creation rules:
  * a portal-like caller may NOT put a registrationId on the intent (registration-backed
@@ -571,6 +633,35 @@ export async function createIntent(input, ctx, caller = {}) {
     }
     attemptNumber = attemptDecision.attemptNumber || 1;
     supersededPaymentId = attemptDecision.supersededPaymentId || null;
+  }
+
+  // P5 active registration binding: a registration-backed intent may only be created when
+  // the registration has no holder or its holder is releasable (REPLACE_RELEASED_BINDING).
+  // Checked BEFORE Stripe is called; the unique index is the final guard at Payment.create.
+  const claimsRegistrationBinding =
+    isEventRegistrationPayment && !parsed.useCheckout && Boolean(normId(registrationId));
+  if (claimsRegistrationBinding) {
+    const rel = await releaseRegistrationBinding({
+      tenantId: ctx.tenantId,
+      registrationId: normId(registrationId),
+      reason: "replacement_attempt",
+      ctx,
+    });
+    if (rel.blocked) {
+      if (supersededPaymentId && String(supersededPaymentId) === String(rel.holderId)) {
+        // resolveReusablePaymentAttempt marked the funds-holding attempt superseded; undo it,
+        // it remains the registration's payment.
+        await Payment.updateOne(
+          { _id: rel.holderId, tenantId: ctx.tenantId },
+          { $set: { isActiveAttempt: true, supersededAt: null, supersededReason: null } },
+        );
+      }
+      throw bindingError(
+        "This registration already has a payment that holds funds",
+        409,
+        "REGISTRATION_PAYMENT_HELD",
+      );
+    }
   }
 
   // Idempotency and duplicate protection: check for existing payments BEFORE Stripe API call
@@ -1211,6 +1302,7 @@ export async function createIntent(input, ctx, caller = {}) {
       },
       payer,
       ...(target ? { target } : {}),
+      ...(claimsRegistrationBinding ? { registrationBinding: normId(registrationId) } : {}),
     };
 
     // Only include idempotencyKey if it's actually provided (not null or undefined)
@@ -1259,6 +1351,16 @@ export async function createIntent(input, ctx, caller = {}) {
       id: payment._id.toString(),
     };
   } catch (e) {
+    if (isBindingDuplicateKey(e)) {
+      // P5: a concurrent request claimed this registration first. Never return its intent;
+      // cancel the PaymentIntent this request just created (it was never persisted).
+      if (stripeIds.paymentIntentId) {
+        await stripe.paymentIntents
+          .cancel(stripeIds.paymentIntentId, { cancellation_reason: "duplicate" })
+          .catch(() => {});
+      }
+      throw bindingError("This registration already has a payment", 409, "REGISTRATION_ALREADY_HAS_PAYMENT");
+    }
     // Handle MongoDB duplicate key errors (11000) by returning existing payment
     if (e && e.code === 11000) {
       // Try to find existing payment by idempotency key first
@@ -1745,6 +1847,8 @@ export async function attachRegistrationToPaymentIntent(
 
   // A registration that already has a payment (CRM-created / retry-payment intents, a
   // recorded manual payment, or an earlier attach) can never receive another payer's intent.
+  // This read covers legacy rows and manual payments (no registrationBinding); the atomic
+  // guard against a CONCURRENT attach/create is the registrationBinding unique index below.
   if (!alreadySame) {
     const other = await Payment.findOne({
       tenantId,
@@ -1756,6 +1860,10 @@ export async function attachRegistrationToPaymentIntent(
     if (other) {
       throw bindingError("This registration already has a payment", 409, "REGISTRATION_ALREADY_HAS_PAYMENT");
     }
+  }
+  // The intent itself must still be able to take money.
+  if (TERMINAL_UNPAID_STATUSES.includes(payment.status) || payment.isActiveAttempt === false) {
+    throw bindingError("This PaymentIntent can no longer be used", 409, "INTENT_NOT_ACTIVE");
   }
 
   // Live Stripe PaymentIntent must agree with the row too.
@@ -1770,26 +1878,50 @@ export async function attachRegistrationToPaymentIntent(
 
   // Single, atomic attach: binds only when unattached (or already bound to this same
   // registration -> idempotent). A concurrent attach to a different registration loses.
+  // Both directions in ONE document update: the intent's registrationId is set-once
+  // (filter), and the registration's active binding is claimed through the
+  // {tenantId, registrationBinding} unique index - so of two different intents racing onto
+  // one registration exactly one wins and the other gets E11000 -> 409, with nothing written.
   const set = {
     registrationId,
+    registrationBinding: registrationId,
     "audit.updatedBy": ctx.userId || ctx.memberId || "system",
   };
   if (fields.productCode) set.productCode = String(fields.productCode);
   if (fields.eventCategoryCode) set.eventCategoryCode = String(fields.eventCategoryCode);
-  const updated = await Payment.findOneAndUpdate(
-    {
-      _id: payment._id,
-      tenantId,
-      $or: [
-        { registrationId: { $exists: false } },
-        { registrationId: null },
-        { registrationId: "" },
-        { registrationId },
-      ],
-    },
-    { $set: set, $min: { attachedAt: new Date() } },
-    { new: true },
-  ).lean();
+  let updated;
+  try {
+    updated = await Payment.findOneAndUpdate(
+      {
+        _id: payment._id,
+        tenantId,
+        $and: [
+          {
+            $or: [
+              { registrationId: { $exists: false } },
+              { registrationId: null },
+              { registrationId: "" },
+              { registrationId },
+            ],
+          },
+          {
+            $or: [
+              { registrationBinding: { $exists: false } },
+              { registrationBinding: null },
+              { registrationBinding: registrationId },
+            ],
+          },
+        ],
+      },
+      { $set: set, $min: { attachedAt: new Date() } },
+      { new: true },
+    ).lean();
+  } catch (e) {
+    if (isBindingDuplicateKey(e)) {
+      throw bindingError("This registration already has a payment", 409, "REGISTRATION_ALREADY_HAS_PAYMENT");
+    }
+    throw e;
+  }
   if (!updated) {
     throw bindingError("This PaymentIntent is already attached to another registration", 409, "ALREADY_ATTACHED");
   }

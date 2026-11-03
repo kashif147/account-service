@@ -62,6 +62,17 @@ amount/currency); `profileId`/`memberId` in the body -> 400 `FIELD_NOT_ALLOWED`;
 registration that already has a Payment -> 409 `REGISTRATION_ALREADY_HAS_PAYMENT`; a
 different registration on an attached intent -> 409 `ALREADY_ATTACHED`; same one -> 200
 idempotent. Matrix: `src/tests/payerBinding.p5.test.mjs` (node:test, throwaway mongod).
+Active registration binding (P5 batch 5): `Payment.registrationBinding` (= registrationId,
+unique per tenant via a partial index) marks the ONE Stripe Payment that holds a registration.
+It is claimed in the same update as attach (so two different intents racing onto one
+registration: one 200, the rest 409, nothing written for the losers) and at `Payment.create`
+for a registration-backed intent (a concurrent loser's PaymentIntent is cancelled, 409). The
+only hand-over is the named `REPLACE_RELEASED_BINDING` transition: the holder is released by a
+conditional update only when it can no longer take money (terminal unpaid status, or a
+superseded attempt holding no funds); a funds-held holder (authorised/processing/captured)
+makes a replacement 409 `REGISTRATION_PAYMENT_HELD` before Stripe is called. Attach of a dead
+intent -> 409 `INTENT_NOT_ACTIVE`. Legacy rows and manual payments carry no binding; the
+existing any-other-Payment read still refuses those.
 `ensureAuthenticated`'s gateway path falls back to the `userType` of a Bearer token that verifies
 with this service's secret and names the same user + tenant, because profile-, reporting- and
 audit-service clients forward gateway headers without `x-user-type`.
