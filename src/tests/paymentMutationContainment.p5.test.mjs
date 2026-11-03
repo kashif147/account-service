@@ -205,6 +205,21 @@ test("K4 unbound / ambiguous-purpose rows fail closed (409 PAYMENT_UNBOUND), eve
   }
 });
 
+test("K4b legacy application row stored as subscriptionFee + applicationId is an application payment (application:write); without applicationId it stays unbound", { skip }, async () => {
+  const legacy = await stripeRow({ purpose: "applicationFee", extra: { purpose: "subscriptionFee" } });
+  assert.equal((await fresh(legacy.id)).purpose, "subscriptionFee");
+  for (const auth of [CRM_EVW, CRM_FIN]) {
+    const res = await call("POST", `/api/payments/intents/${legacy.pi}/capture`, { auth });
+    assert.equal(res.status, 403); assert.equal(res.code, "PAYMENT_MUTATION_PERMISSION_REQUIRED");
+  }
+  const link = await call("POST", `/api/payments/intents/${legacy.pi}/capture`, { auth: CRM_APP, body: { profileId: oid() } });
+  assert.equal(link.status, 400); assert.equal(link.code, "LINK_NOT_ALLOWED");
+  assert.equal((await call("POST", `/api/payments/intents/${legacy.pi}/capture`, { auth: CRM_APP })).status, 200);
+  const bare = await stripeRow({ purpose: "subscriptionFee", extra: { ledgerDomain: "membership" } });
+  const res = await call("POST", `/api/payments/intents/${bare.pi}/cancel`, { auth: ASU });
+  assert.equal(res.status, 409); assert.equal(res.code, "PAYMENT_UNBOUND");
+});
+
 test("K5 tenant: another tenant's PaymentIntent is 404 PAYMENT_NOT_FOUND (indistinguishable), untouched", { skip }, async () => {
   const r = await stripeRow({ purpose: "eventRegistration", tenantId: TC });
   const res = await call("POST", `/api/payments/intents/${r.pi}/capture`, { auth: CRM_EVW });

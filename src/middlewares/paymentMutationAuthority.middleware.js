@@ -53,12 +53,24 @@ function norm(v) {
  * Business domain a stored Payment row is bound to, or null when it is not bound to exactly one
  * business object of a known purpose (fail closed).
  */
+// Webhook-upserted application payments are stored with the schema default purpose
+// "subscriptionFee" (payments.service.js reconcileStripeEvent $setOnInsert) while carrying the
+// applicationId - on DEV most open application holds look like this. Such a row is an
+// application payment for authorization purposes; a subscriptionFee row WITHOUT an
+// applicationId stays unbound.
+export const APPLICATION_ROW_PURPOSES = new Set(["applicationFee", "subscriptionFee"]);
+
 export function bindingDomainOfRow(row) {
   if (!row) return null;
   const purpose = norm(row.purpose);
   const hasApp = norm(row.applicationId) !== "";
   const hasReg = norm(row.registrationId) !== "";
-  if (purpose === "applicationFee" && hasApp && !hasReg) return "application";
+  if (
+    APPLICATION_ROW_PURPOSES.has(purpose) && hasApp && !hasReg &&
+    (norm(row.ledgerDomain) || "membership") === "membership"
+  ) {
+    return "application";
+  }
   if (REGISTRATION_PURPOSES.has(purpose) && hasReg && !hasApp && norm(row.ledgerDomain) === "events") {
     return "registration";
   }
