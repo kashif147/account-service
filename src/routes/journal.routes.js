@@ -55,7 +55,7 @@ import {
   requireCrmUser,
   requireInternalOrCrm,
 } from "../middlewares/callerScope.middleware.js";
-import { createRequirePaymentMutationAuthority } from "../middlewares/paymentMutationAuthority.middleware.js";
+import { createRequirePaymentMutationAuthority, rejectMixedInternalIdentity } from "../middlewares/paymentMutationAuthority.middleware.js";
 import { AppError } from "../errors/AppError.js";
 import {
   postManualEventPaymentHandler,
@@ -305,6 +305,7 @@ async function manualRecordStillLive(cached, req) {
 // pattern as internal.routes.js and profile-service's account.service.client.js)
 router.post(
   "/events/manual-payment",
+  rejectMixedInternalIdentity,
   internalOrAuthenticated,
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("manual_record"),
@@ -317,6 +318,7 @@ router.post(
 // events-service's /registrations/:id/approve.
 router.post(
   "/events/manual-payment/post",
+  rejectMixedInternalIdentity,
   internalOrAuthenticated,
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("manual_post"),
@@ -328,6 +330,7 @@ router.post(
 // events-service's /registrations/:id/reject.
 router.post(
   "/events/manual-payment/void",
+  rejectMixedInternalIdentity,
   internalOrAuthenticated,
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("manual_void"),

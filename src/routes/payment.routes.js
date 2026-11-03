@@ -14,7 +14,7 @@ import {
 import { AppError } from "../errors/AppError.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
-import { createRequirePaymentMutationAuthority } from "../middlewares/paymentMutationAuthority.middleware.js";
+import { createRequirePaymentMutationAuthority, rejectMixedInternalIdentity } from "../middlewares/paymentMutationAuthority.middleware.js";
 import {
   createPaymentIntent,
   captureExistingPaymentIntent,
@@ -50,6 +50,8 @@ function internalAuth(req, res, next) {
   }
   return res.appError(AppError.unauthorized("Authorization header required"));
 }
+// P5: mixed identity on a payment mutation is refused before authentication (contract negative case).
+router.post(["/intents/:paymentIntentId/capture", "/intents/:paymentIntentId/cancel"], rejectMixedInternalIdentity);
 router.use(internalAuth);
 
 // P5 caller rules (internalAuth above only establishes identity). "Internal" below means a

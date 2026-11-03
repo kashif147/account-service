@@ -127,6 +127,25 @@ function permissionDenied(code) {
   );
 }
 
+/**
+ * Runs BEFORE authentication on the five payment mutation routes only: an internal call
+ * (x-internal-request) carrying user identity headers but no token is a mixed identity -> 403
+ * MIXED_IDENTITY (contract p5-bound-payment-commands v1, negative case). Without this, the generic
+ * #19 internal-path guard answers the same request 401 UNVERIFIED_IDENTITY; both refuse. A request
+ * WITH a token is left to authentication (judged as that user, never internal).
+ */
+export function rejectMixedInternalIdentity(req, res, next) {
+  if (
+    req.header("x-internal-request") === "true" &&
+    !req.headers.authorization &&
+    !req.headers["x-jwt-verified"] &&
+    carriesUserIdentity(req.headers)
+  ) {
+    return res.appError(new AppError("An internal payment command must not carry user identity", 403, "MIXED_IDENTITY"));
+  }
+  return next();
+}
+
 export function createRequirePaymentMutationAuthority(transition, deps = {}) {
   if (!TRANSITIONS.includes(transition)) throw new Error(`unknown payment transition ${transition}`);
   const loadRows = deps.loadRows || defaultLoadRows;
