@@ -268,10 +268,14 @@ async function resolveReusablePaymentAttempt({
     return { reusablePayment: null, attemptNumber: 1 };
   }
 
+  // P5 (b8): an application's attempts are one sequence whatever purpose value the portal sent
+  // ("subscriptionFee" historically, "applicationFee" once the portal sends the explicit purpose).
+  // Matching on the exact purpose would miss the earlier attempt during that switch and leave two
+  // live PaymentIntents (two card holds) for one application.
   const latestAttempt = await Payment.findOne({
     tenantId: ctx.tenantId,
     [matchField]: matchValue,
-    purpose,
+    purpose: matchField === "applicationId" ? { $in: ["applicationFee", "subscriptionFee"] } : purpose,
     mode: "stripe",
     "stripe.paymentIntentId": { $exists: true, $ne: null },
   })
@@ -1129,7 +1133,8 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         {
           tenantId: ctx.tenantId,
           ...(isApplicationPayment ? { applicationId } : { registrationId }),
-          purpose: parsed.purpose,
+          // Same attempt sequence as resolveReusablePaymentAttempt (P5 b8): both application purposes.
+          purpose: isApplicationPayment ? { $in: ["applicationFee", "subscriptionFee"] } : parsed.purpose,
           _id: { $ne: payment._id },
           isActiveAttempt: { $ne: false },
         },
