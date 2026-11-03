@@ -424,22 +424,64 @@ test("B1 two (and three) DIFFERENT intents concurrently attached to ONE registra
 });
 
 test("B2 concurrent CRM createIntent for one registration -> one binding holder; a losing PaymentIntent is cancelled, never returned", { skip }, async () => {
+  // Valid outcomes per request (the race decides which, all are correct):
+  //   200                                  -> it is (or reuses) THE holder's intent;
+  //   409 REGISTRATION_PAYMENT_HELD        -> it saw the winner's committed live row in the pre-Stripe
+  //                                           binding check (releaseRegistrationBinding blocked): it
+  //                                           created NO PaymentIntent;
+  //   409 REGISTRATION_ALREADY_HAS_PAYMENT -> it passed the pre-check during the race, created a
+  //                                           PaymentIntent, and lost at the partial unique index: that
+  //                                           intent is cancelled and never persisted as a Payment.
+  // Invariant (asserted every round): exactly one holder and one active attempt; every 200 is the
+  // holder's intent; no 409 carries a client secret; the holder is never cancelled; every intent
+  // created in the round is either the holder's or cancelled; no Payment row references a cancelled one.
+  const LOSER_CODES = ["REGISTRATION_PAYMENT_HELD", "REGISTRATION_ALREADY_HAS_PAYMENT"];
+  const seen = new Set();
   for (let round = 0; round < 4; round += 1) {
     const reg = oid(0xb2000 + round);
     const body = { purpose: "eventRegistration", amount: 5000, currency: "eur", registrationId: reg, ledgerDomain: "events" };
     CANCELLED.length = 0;
+    const seqBefore = piSeq;
     const rs = await Promise.all([CRM, bearer({ userType: "CRM", id: "staff-2" }), CRM].map((auth) =>
       call("POST", "/api/payments/intents", { auth, body })));
+    const created = Array.from({ length: piSeq - seqBefore }, (_, i) => `pi_test_${seqBefore + i + 1}`);
     const h = await holders(reg);
-    assert.equal(h.length, 1, `round ${round}: ${rs.map((r) => `${r.status}/${r.code}`)}`);
+    const trace = `round ${round}: ${rs.map((r) => `${r.status}/${r.code}`)} created=${created.length} cancelled=${CANCELLED.length}`;
+    assert.equal(h.length, 1, trace);
+    const holderPi = h[0].stripe.paymentIntentId;
     for (const r of rs) {
-      if (r.status === 200) assert.equal(r.data.paymentIntentId, h[0].stripe.paymentIntentId, "every 200 is the holder's intent");
-      else { assert.equal(r.status, 409); assert.equal(r.code, "REGISTRATION_ALREADY_HAS_PAYMENT"); assert.ok(!r.text.includes("_secret_")); }
+      seen.add(r.status === 200 ? "200" : r.code);
+      if (r.status === 200) assert.equal(r.data.paymentIntentId, holderPi, "every 200 is the holder's intent");
+      else {
+        assert.equal(r.status, 409, trace);
+        assert.ok(LOSER_CODES.includes(r.code), `unexpected loser code ${r.code} (${trace})`);
+        assert.ok(!r.text.includes("_secret_"), "no clientSecret in a 409");
+      }
     }
     const active = await Payment.find({ tenantId: TA, registrationId: reg, isActiveAttempt: { $ne: false } }).lean();
     assert.equal(active.length, 1, "one active attempt");
-    for (const id of CANCELLED) assert.notEqual(id, h[0].stripe.paymentIntentId, "the holder is never cancelled");
+    for (const id of CANCELLED) assert.notEqual(id, holderPi, "the holder is never cancelled");
+    for (const id of created) assert.ok(id === holderPi || CANCELLED.includes(id), `intent ${id} neither holder nor cancelled (${trace})`);
+    const lostAtIndex = rs.filter((r) => r.code === "REGISTRATION_ALREADY_HAS_PAYMENT").length;
+    assert.ok(created.length <= 1 + lostAtIndex, `a HELD loser created an intent (${trace})`);
+    for (const id of CANCELLED) assert.equal(await row(id), null, "a cancelled loser intent is never persisted");
   }
+  assert.ok(seen.size >= 1);
+  // Deterministic HELD interleaving: a request arriving after the holder is committed is refused in the
+  // pre-Stripe check (or reuses the holder's own intent) - it never creates a PaymentIntent.
+  {
+    const reg = oid(0xb2000);
+    const body = { purpose: "eventRegistration", amount: 5000, currency: "eur", registrationId: reg, ledgerDomain: "events" };
+    const seqBefore = piSeq;
+    const late = await call("POST", "/api/payments/intents", { auth: bearer({ userType: "CRM", id: "staff-3" }), body });
+    const holderPi = (await holders(reg))[0].stripe.paymentIntentId;
+    if (late.status === 200) assert.equal(late.data.paymentIntentId, holderPi);
+    else { assert.equal(late.status, 409); assert.equal(late.code, "REGISTRATION_PAYMENT_HELD"); assert.ok(!late.text.includes("_secret_")); }
+    assert.equal(piSeq, seqBefore, "a late request creates no PaymentIntent");
+    assert.equal((await holders(reg)).length, 1);
+    seen.add(`late:${late.status === 200 ? "200" : late.code}`);
+  }
+  if (process.env.B2_TRACE) console.log(`B2_TRACE ${[...seen].sort().join(",")}`);
 });
 
 test("B3 legitimate replacement: a cancelled holder is released (REPLACE_RELEASED_BINDING) and the retry intent takes the binding", { skip }, async () => {
