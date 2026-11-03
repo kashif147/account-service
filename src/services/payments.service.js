@@ -706,6 +706,19 @@ export function withholdForeignPayerSecret(response, payment, payer = {}) {
   return { ...response, clientSecret: null, checkoutUrl: null, secretWithheld: true };
 }
 
+/**
+ * P5 (b10) application attempt reuse: the reused intent's clientSecret/checkoutUrl go back only to
+ * the attempt's effective payer (payer.userId, or audit.createdBy for a legacy row that predates the
+ * payer field - those rows carry no payer.userType, so withholdForeignPayerSecret would hand them to
+ * any caller). A payment-link row is never handed back here: its payment channel is the emailed
+ * Checkout link. The attempt is still reused (no second card hold); only the secret is withheld.
+ */
+export function withholdApplicationAttemptSecret(response, payment, payer = {}) {
+  const owner = effectivePayerUserId(payment);
+  if (payment?.source !== "payment-link" && owner && owner === normId(payer.userId)) return response;
+  return { ...response, clientSecret: null, checkoutUrl: null, secretWithheld: true };
+}
+
 async function refreshPaymentFromStripe(payment, pi, ctx = {}) {
   const status = paymentIntentStatusToDomain(pi);
   const set = {
@@ -790,6 +803,11 @@ async function resolveReusablePaymentAttempt({
   }
 
   const nextAttemptNumber = (latestAttempt.attemptNumber || 1) + 1;
+  // P5 (b10): a superseded application attempt is never silently reactivated - the replacement is
+  // a fresh attempt (the superseded row stays inactive and cannot be captured: isActiveAttempt gate).
+  if (matchField === "applicationId" && latestAttempt.isActiveAttempt === false) {
+    return { reusablePayment: null, attemptNumber: nextAttemptNumber };
+  }
   let pi;
   try {
     pi = await stripe.paymentIntents.retrieve(
@@ -982,6 +1000,10 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         }
       : null;
   const reuseScope = (query) => withAnd(withAnd(query, ownerScope), targetScope);
+  // P5 (b10): application rows returned by an idempotency/duplicate match follow the same
+  // payer-only secret rule as attempt reuse (a CRM caller is not owner-scoped above).
+  const applicationSecretGate = (response, row) =>
+    isApplicationPayment ? withholdApplicationAttemptSecret(response, row, payer) : response;
 
   // H-11: portal callers may only pay for themselves, and application fees must match the
   // synced catalogue price (see paymentIntentGuard.service.js for the per-kind source).
@@ -1025,7 +1047,8 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
       logger,
     });
     if (attemptDecision.reusablePayment) {
-      return withholdForeignPayerSecret(
+      const withhold = isApplicationPayment ? withholdApplicationAttemptSecret : withholdForeignPayerSecret;
+      return withhold(
         await buildIntentResponse(attemptDecision.reusablePayment, stripe),
         attemptDecision.reusablePayment,
         payer,
@@ -1076,7 +1099,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         idempotencyKey: ctx.idempotencyKey,
       }),
     )
-      .select("stripe status _id memberId applicationId isActiveAttempt")
+      .select("stripe status _id memberId applicationId isActiveAttempt payer audit source")
       .lean();
     if (existingByIdem) {
       if (
@@ -1103,7 +1126,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         },
         "Found existing payment by idempotency key - returning existing payment",
       );
-      return await buildIntentResponse(existingByIdem, stripe);
+      return applicationSecretGate(await buildIntentResponse(existingByIdem, stripe), existingByIdem);
       }
     }
   }
@@ -1148,7 +1171,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
     }
 
     const existingDuplicate = await Payment.findOne(reuseScope(duplicateCheck))
-      .select("stripe status _id memberId applicationId isActiveAttempt")
+      .select("stripe status _id memberId applicationId isActiveAttempt payer audit source")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -1207,7 +1230,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         }
       }
 
-        return await buildIntentResponse(existingDuplicate, stripe);
+        return applicationSecretGate(await buildIntentResponse(existingDuplicate, stripe), existingDuplicate);
       }
     }
   }
@@ -1239,7 +1262,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
     }
 
     const recentPayment = await Payment.findOne(reuseScope(lastSecondCheck))
-      .select("stripe status _id memberId applicationId createdAt isActiveAttempt")
+      .select("stripe status _id memberId applicationId createdAt isActiveAttempt payer audit source")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -1300,7 +1323,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         }
       }
 
-        return await buildIntentResponse(recentPayment, stripe);
+        return applicationSecretGate(await buildIntentResponse(recentPayment, stripe), recentPayment);
       }
     }
   }
@@ -1434,7 +1457,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         tenantId: ctx.tenantId,
         "stripe.checkoutSessionId": stripeIds.checkoutSessionId,
       })
-        .select("stripe status _id")
+        .select("stripe status _id payer audit source")
         .lean();
       if (existingBySession) {
         const logger = (await import("../config/logger.js")).default;
@@ -1446,7 +1469,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
           },
           "Payment with this Stripe checkout session ID already exists - returning existing payment",
         );
-        return await buildIntentResponse(existingBySession, stripe);
+        return applicationSecretGate(await buildIntentResponse(existingBySession, stripe), existingBySession);
       }
     }
   } else {
@@ -1476,7 +1499,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
       if (registrationId) recentCheck.registrationId = registrationId;
 
       const recentWithIntent = await Payment.findOne(reuseScope(recentCheck))
-        .select("stripe status _id memberId applicationId isActiveAttempt")
+        .select("stripe status _id memberId applicationId isActiveAttempt payer audit source")
         .lean();
 
       if (recentWithIntent && recentWithIntent.stripe?.paymentIntentId) {
@@ -1522,7 +1545,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
           }
         }
 
-          return await buildIntentResponse(recentWithIntent, stripe);
+          return applicationSecretGate(await buildIntentResponse(recentWithIntent, stripe), recentWithIntent);
         }
       }
     }
