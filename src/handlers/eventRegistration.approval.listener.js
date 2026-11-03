@@ -288,7 +288,7 @@ export async function postManualEventPayment({
   bound = null,
 }) {
   const Payment = (await import("../models/payment.model.js")).default;
-  const { adoptLegacyRegistrationHolder, isBindingDuplicateKeyError } = await import("../services/payments.service.js");
+  const { adoptLegacyRegistrationHolder, isBindingDuplicateKeyError, releaseRegistrationBinding } = await import("../services/payments.service.js");
   const cur = String(currency || "eur").toLowerCase();
   const reg = String(registrationId);
 
@@ -306,6 +306,10 @@ export async function postManualEventPayment({
   // so it claims the same {tenantId, registrationBinding} unique index at creation (legacy holders
   // adopted first). The per-registration idempotencyKey (#22) is an ADDITIONAL key, not a substitute.
   await adoptLegacyRegistrationHolder({ tenantId, registrationId: reg });
+  // A DEAD holder (cancelled / failed / expired card attempt, voided record - releasableBindingFilter)
+  // is released through the same named REPLACE_RELEASED_BINDING transition card create uses; a holder
+  // that still holds or may take funds is never released here (manual never replaces a live card).
+  await releaseRegistrationBinding({ tenantId, registrationId: reg, reason: "manual_record", ctx: { userId } });
   const existing = await Payment.find({
     tenantId,
     registrationId,

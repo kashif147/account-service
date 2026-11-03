@@ -530,7 +530,7 @@ export async function sweepPaymentIntentReservations({
  * { released: true } after a successful release, or { blocked: true, holderId } when the
  * holder still holds (or may still take) money.
  */
-async function releaseRegistrationBinding({ tenantId, registrationId, selfId, reason, ctx = {}, allowManualToCard = false }) {
+export async function releaseRegistrationBinding({ tenantId, registrationId, selfId, reason, ctx = {}, allowManualToCard = false }) {
   const holder = await Payment.findOne({ tenantId, registrationBinding: registrationId })
     .select({ _id: 1, status: 1, isActiveAttempt: 1, mode: 1 })
     .lean();
