@@ -13,6 +13,7 @@
 // GET /api/profile/my-profile (forwarding the caller's own identity), and a Payment is owned
 // by the user that created it (audit.createdBy = the verified ctx.userId at intent creation).
 import { AppError } from "../errors/AppError.js";
+import { forwardedInternalContext } from "./context.js";
 
 function norm(v) {
   return v == null ? "" : String(v).trim();
@@ -53,6 +54,28 @@ export function requireCrmUser(req, res, next) {
 export function requireInternalOrCrm(req, res, next) {
   if (isTrustedInternalCall(req) || isCrmCaller(req)) return next();
   return next(crmOnly());
+}
+
+function internalOnly() {
+  return new AppError(
+    "This endpoint is only available to internal service calls",
+    403,
+    "INTERNAL_ONLY",
+  );
+}
+
+/**
+ * Internal-only route (no user chain behind it): the SAME trust contract as
+ * `trustedInternalOnly` (x-internal-request: true, NO user identity header of any kind, an
+ * explicit 24-hex x-tenant-id -> 400 TENANT_ID_REQUIRED / INVALID_TENANT_ID, then
+ * forwardedInternalContext re-checked), but where trustedInternalOnly would fall through to a
+ * user registration (`next("route")`) this denies 403 INTERNAL_ONLY instead. A user token /
+ * gateway headers / forwarded x-user-* + a spoofed x-internal-request is never internal.
+ */
+export function requireTrustedInternalOnly(req, res, next) {
+  return trustedInternalOnly(req, res, (arg) =>
+    arg === "route" ? next(internalOnly()) : next(arg),
+  );
 }
 
 async function defaultFetchMyPortalProfile(req) {
@@ -124,3 +147,53 @@ export function createRequireInternalOrCrmOrIntentOwner(deps = {}) {
 }
 
 export const requireInternalOrCrmOrIntentOwner = createRequireInternalOrCrmOrIntentOwner();
+
+// Headers that carry (or claim) a user identity. Any of them present means the request is
+// judged as a user call, never as a trusted internal one.
+const USER_IDENTITY_HEADERS = [
+  "authorization",
+  "x-jwt-verified",
+  "x-auth-source",
+  "x-user-id",
+  "x-user-email",
+  "x-user-type",
+  "x-user-roles",
+  "x-user-permissions",
+  "x-ms-client-principal",
+  "x-ms-token-aad-access-token",
+];
+const HEX_OBJECT_ID = /^[a-fA-F0-9]{24}$/;
+
+/**
+ * First half of an "internal S2S OR user chain" route pair (see
+ * `POST /reports/gl-journal-replication`). Admits ONLY a genuine internal call:
+ * `x-internal-request: true`, NO user identity header of any kind, and an explicit
+ * 24-hex `x-tenant-id` (missing -> 400 TENANT_ID_REQUIRED, malformed -> 400
+ * INVALID_TENANT_ID). The context is then built by `forwardedInternalContext`
+ * (ctx.internalRequest === true, no userId) and the handler runs.
+ *
+ * Anything else calls `next("route")`, so Express falls through to the route's second
+ * registration (the normal authenticated user chain), where the caller is judged as the
+ * user it presents - a user token + spoofed `x-internal-request` never gets this grant.
+ */
+export function trustedInternalOnly(req, res, next) {
+  const headers = req.headers || {};
+  const claimsUser = USER_IDENTITY_HEADERS.some((h) => headers[h] != null);
+  if (claimsUser || norm(headers["x-internal-request"]) !== "true") {
+    return next("route");
+  }
+  const tenantId = norm(headers["x-tenant-id"]);
+  if (!tenantId) {
+    return next(new AppError("x-tenant-id is required for internal calls", 400, "TENANT_ID_REQUIRED"));
+  }
+  if (!HEX_OBJECT_ID.test(tenantId)) {
+    return next(new AppError("x-tenant-id must be a 24-hex id", 400, "INVALID_TENANT_ID"));
+  }
+  return forwardedInternalContext(req, res, (err) => {
+    if (err) return next(err);
+    if (isTrustedInternalCall(req) && !req.ctx?.userId && norm(req.ctx?.tenantId) === tenantId) {
+      return next();
+    }
+    return next(crmOnly());
+  });
+}

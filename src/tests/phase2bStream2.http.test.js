@@ -188,23 +188,37 @@ test("C07-2 CRM user without finance write cannot post an internal write-off: 40
   });
 });
 
-test("C07-3 finance user passes the write-off guard (reaches controller validation -> 400)", async () => {
+// The write-off route is INTERNAL ONLY: its only callers are subscription-service worker
+// requests (createInternalWorkerReq: x-internal-request + x-tenant-id, no user identity).
+const WORKER_TENANT = "aaaaaaaaaaaaaaaaaaaaaaaa"; // internal calls carry an explicit 24-hex tenant
+
+test("C07-3 CRM finance user (AM + payments:write) has no write-off route: 403 INTERNAL_ONLY, also with x-internal-request", async () => {
   await withServer(async (base) => {
-    const r = await post(base, "/api/internal/members/writeoff", {
-      headers: { authorization: FINANCE_A },
-      body: {},
-    });
-    assert.equal(r.status, 400);
+    for (const extra of [{}, { "x-internal-request": "true", "x-tenant-id": WORKER_TENANT }]) {
+      const r = await post(base, "/api/internal/members/writeoff", {
+        headers: { authorization: FINANCE_A, ...extra },
+        body: {},
+      });
+      assert.equal(r.status, 403);
+      assert.equal(r.json?.code ?? r.json?.error?.code, "INTERNAL_ONLY");
+    }
   });
 });
 
-test("C07-4 subscription-service worker call (x-internal-request, no JWT) passes the write-off guard", async () => {
+test("C07-4 subscription-service worker call (x-internal-request + 24-hex tenant, no JWT) passes the write-off guard", async () => {
   await withServer(async (base) => {
     const r = await post(base, "/api/internal/members/writeoff", {
-      headers: { "x-internal-request": "true", "x-tenant-id": TENANT_A },
+      headers: { "x-internal-request": "true", "x-tenant-id": WORKER_TENANT },
       body: {},
     });
-    assert.equal(r.status, 400);
+    assert.equal(r.status, 400); // controller validation, guard passed
+    assert.match(r.json?.message ?? r.json?.error?.message ?? "", /date must be ISO/);
+    const bad = await post(base, "/api/internal/members/writeoff", {
+      headers: { "x-internal-request": "true", "x-tenant-id": TENANT_A }, // not a 24-hex id
+      body: {},
+    });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json?.code ?? bad.json?.error?.code, "INVALID_TENANT_ID");
   });
 });
 

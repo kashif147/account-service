@@ -98,6 +98,8 @@ export const internalWriteOff = asyncHandler(async (req, res) => {
     docNo: resolvedDocNo,
     memo,
     operation: "internal_writeoff",
+    // Same docNo + same content -> 200 with the existing posting; different content -> 409.
+    replayMustMatch: true,
     lines: [
       { accountCode: "5200", dc: "D", amount: resolvedAmount, adjSubType: "writeoff" },
       {
@@ -110,5 +112,6 @@ export const internalWriteOff = asyncHandler(async (req, res) => {
     ],
   });
 
-  res.created(out);
+  if (out?.replayed) res.success(out, "Already posted");
+  else res.created(out);
 });

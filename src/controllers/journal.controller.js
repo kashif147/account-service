@@ -299,6 +299,41 @@ export async function relinkPostedRefundGlFromRefundDocuments({
   return { updated };
 }
 
+// Economic content of a posting, for replay comparison: docType plus every entry's account,
+// side, amount, member and period bucket (order-independent). Date, memo, reference and audit
+// fields are deliberately not part of it (a retried worker may carry a different run date).
+function journalReplayKey(docType, entries) {
+  const rows = (entries || [])
+    .map((e) => [
+      String(e.accountCode ?? ""),
+      String(e.dc ?? ""),
+      Number(e.amount),
+      e.memberId != null ? String(e.memberId) : null,
+      e.periodBucket != null ? String(e.periodBucket) : null,
+    ])
+    .map((r) => JSON.stringify(r))
+    .sort();
+  return JSON.stringify([String(docType), rows]);
+}
+
+// An existing posting for this (tenant, docNo). Default: returned as-is (unchanged legacy
+// idempotency). With replayMustMatch: returned only when the replay carries the same economic
+// content, marked as a replay (non-enumerable, so the response body is unchanged); otherwise
+// 409 JOURNAL_REPLAY_CONFLICT and nothing is written.
+function replayOf(existing, { replayMustMatch, docType, entries, docNo }) {
+  if (!replayMustMatch) return existing;
+  if (journalReplayKey(existing.docType, existing.entries) !== journalReplayKey(docType, entries)) {
+    throw new AppError(
+      `Journal ${docNo} already posted with different content`,
+      409,
+      "JOURNAL_REPLAY_CONFLICT",
+      { docNo },
+    );
+  }
+  Object.defineProperty(existing, "replayed", { value: true, enumerable: false });
+  return existing;
+}
+
 // Wrapped in global limiter to prevent connection pool exhaustion
 // when multiple heavy operations (batch approvals, batch payments) run simultaneously
 export async function postBalancedJournal({
@@ -319,6 +354,7 @@ export async function postBalancedJournal({
   batchType,
   batchName,
   batchDetailId,
+  replayMustMatch = false,
 }) {
   // Wrap entire function in global DB limiter
   // This ensures all journal operations share the same resource pool
@@ -379,13 +415,16 @@ export async function postBalancedJournal({
       }
     }
 
+    // strip helper (persisted shape; also what a replay is compared against)
+    const entries = enriched.map(({ _a, ...rest }) => rest);
+
     // idempotency on docNo (unique per tenant)
     const exists = await GLTransaction.findOne({ tenantId: tid, docNo }).lean();
-    if (exists) return exists;
+    if (exists) return replayOf(exists, { replayMustMatch, docType, entries, docNo });
 
-    // strip helper and persist
-    const entries = enriched.map(({ _a, ...rest }) => rest);
-    const txn = await GLTransaction.create({
+    let txn;
+    try {
+      txn = await GLTransaction.create({
       tenantId: tid,
       date,
       ...(userId != null && String(userId).trim() !== ""
@@ -407,6 +446,17 @@ export async function postBalancedJournal({
         ? { claimMemberId: String(claimMemberId).trim() }
         : {}),
     });
+    } catch (e) {
+      // Lost a concurrent race on the unique (tenantId, docNo) index: the winner's posting is
+      // the only one. With replayMustMatch the loser is answered exactly like a sequential
+      // replay (same content -> the winner's document, different content -> 409); without it
+      // the existing behaviour (the duplicate-key error propagates) is unchanged.
+      if (replayMustMatch && e?.code === 11000) {
+        const winner = await GLTransaction.findOne({ tenantId: tid, docNo }).lean();
+        if (winner) return replayOf(winner, { replayMustMatch, docType, entries, docNo });
+      }
+      throw e;
+    }
 
     const { year, totals } = rollupMemberBalances({ date, entries });
     await bulkWriteMaterializedRollup(year, totals, 1, tid);
@@ -1341,12 +1391,14 @@ export async function writeOff(req, res, next) {
       docType: "WriteOff",
       docNo: resolvedDocNo,
       memo,
+      replayMustMatch: true,
       lines: [
         { accountCode: "5200", dc: "D", amount, adjSubType: "writeoff" },
         { accountCode: "1400", dc: "C", amount, memberId, periodBucket },
       ],
     });
-    res.created(out);
+    if (out?.replayed) res.success(out, "Already posted");
+    else res.created(out);
   } catch (e) {
     next(e);
   }

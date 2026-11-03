@@ -2,10 +2,8 @@ import express from "express";
 import { forwardedInternalContext } from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import { AppError } from "../errors/AppError.js";
-import {
-  requireInternalOrFinanceRead,
-  requireInternalOrFinanceWrite,
-} from "../middlewares/financePermission.middleware.js";
+import { requireInternalOrFinanceRead } from "../middlewares/financePermission.middleware.js";
+import { requireTrustedInternalOnly } from "../middlewares/callerScope.middleware.js";
 import {
   internalWriteOff,
   reminderEligibility,
@@ -26,10 +24,9 @@ function internalAuth(req, res, next) {
 
 router.use(internalAuth);
 
-// Callers: subscription-service (reminder batch build/clear, year-end renewal and
-// reinstatement write-offs) via x-internal-request worker requests, or with a forwarded CRM
-// user identity. A user JWT never inherits the internal grant: user calls need finance
-// read (eligibility snapshots) or finance write (write-off journal posting).
+// Callers: subscription-service (reminder batch build/clear) via x-internal-request worker
+// requests, or with a forwarded CRM user identity. A user JWT never inherits the internal
+// grant: user calls need finance read (eligibility snapshots).
 router.get(
   "/members/:memberId/reminder-eligibility",
   requireInternalOrFinanceRead,
@@ -40,7 +37,14 @@ router.post(
   requireInternalOrFinanceRead,
   reminderEligibilityBulk
 );
-router.post("/members/writeoff", requireInternalOrFinanceWrite, internalWriteOff);
+// Write-off journal (5200 D / 1400 C): INTERNAL ONLY. The only callers are subscription-service
+// postMemberOutstandingWriteOff from the year-end archive (renewalBatch.service
+// writeOffArchivedMemberBalances, tenant = the claimed YearEndBatch's tenant) and the
+// suspended-reinstatement listener (subscription.upsert.listener, tenant = resolveEventTenant),
+// both with createInternalWorkerReq(tenantId) -> x-internal-request + x-tenant-id only. No CRM or
+// portal caller exists; CRM manual write-offs use the /journal routes under finance write.
+// Any user identity (Bearer, gateway headers, forwarded x-user-*) -> 403 INTERNAL_ONLY.
+router.post("/members/writeoff", requireTrustedInternalOnly, internalWriteOff);
 
 // Payment-link diagnostics: the trusted tenant (req.ctx) only, never a query/body tenant.
 router.get("/payment-links", requireInternalOrFinanceRead, async (req, res, next) => {

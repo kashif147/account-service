@@ -32,6 +32,7 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import {
   requireCrmUser,
   requireCrmOrOwnMember,
+  trustedInternalOnly,
 } from "../middlewares/callerScope.middleware.js";
 
 const router = express.Router();
@@ -87,6 +88,20 @@ router.get(
   memberNetBalanceRules,
   validate,
   memberSummary
+);
+
+// Member summary batch. Two registrations, tried in order:
+//  1. a genuine internal S2S call - x-internal-request: true, NO user identity header, and an
+//     explicit 24-hex x-tenant-id (400 if missing/malformed) - for subscription-service pure
+//     worker paths (createInternalWorkerReq): year-end archive + suspended-reinstatement
+//     write-off amounts, scheduler-built reminder batches. Tenant = that header only;
+//  2. anything else falls through (next("route")) to the unchanged CRM chain (CRM staff with
+//     accounts.reports:read). A user token / gateway headers / forwarded x-user-* + a spoofed
+//     x-internal-request is judged here as that user.
+router.post(
+  "/members/summary-batch",
+  trustedInternalOnly,
+  memberSummaryBatch
 );
 
 router.post(
