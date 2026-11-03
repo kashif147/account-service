@@ -1975,12 +1975,6 @@ export async function reconcileStripeEvent(input, ctx) {
         $slice: -100,
       },
     },
-    $setOnInsert: {
-      tenantId: filter.tenantId, // Ensure tenantId is set on insert
-      purpose: "subscriptionFee",
-      mode: "stripe",
-      "audit.createdBy": ctx.userId || ctx.memberId || "system",
-    },
   };
 
   appendDefinedStripeFields(update.$set, parsed);
@@ -2014,7 +2008,10 @@ export async function reconcileStripeEvent(input, ctx) {
   }
 
   const options = {
-    upsert: !existingPayment,
+    // P5 (b7): reconciliation never creates a Payment. Every path above returns or throws when
+    // no persisted payment exists, so the former upsert (with a default purpose "subscriptionFee")
+    // could only ever mint a row whose purpose and binding nobody authorised. Fail closed instead.
+    upsert: false,
     new: true,
     setDefaultsOnInsert: true,
   };

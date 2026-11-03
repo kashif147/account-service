@@ -181,3 +181,28 @@ test("AB4 the bound row from AB1 is capturable with application:write", { skip }
   assert.equal(r.status, 200, r.text.slice(0, 300));
   assert.equal(r.data.status, "succeeded");
 });
+
+test("AB5 Stripe reconciliation never creates a Payment and never creates an application binding from metadata", { skip }, async () => {
+  const payments = await import("../services/payments.service.js");
+  const ev = (pi, metadata) => ({
+    eventId: `evt_${pi}`, type: "payment_intent.succeeded",
+    payment: { paymentIntentId: pi, amount: ANNUAL, currency: "eur", status: "succeeded", metadata },
+  });
+  const before = await Payment.countDocuments({});
+  // Unknown PaymentIntent, unscoped (webhook) and scoped (HTTP reconcile): nothing is inserted.
+  const r1 = await payments.reconcileStripeEvent(ev("pi_ab_unknown", { tenantId: TA, applicationId: APP_ID }), { metadataTenantId: TA });
+  assert.deepEqual(r1, { ok: false, rejected: "unknown_payment_intent" });
+  await assert.rejects(() => payments.reconcileStripeEvent(ev("pi_ab_unknown2", { applicationId: APP_ID }), { tenantId: TA, scopeToTenantId: TA }));
+  assert.equal(await Payment.countDocuments({}), before);
+  // Metadata may fill a missing applicationId on an existing row, but that is never a binding.
+  const piId = "pi_ab_fill";
+  PIS.set(piId, { id: piId, status: "requires_capture", amount: ANNUAL, currency: "eur", metadata: {} });
+  const row = await Payment.create({ tenantId: TA, purpose: "subscriptionFee", ledgerDomain: "membership", amount: ANNUAL, currency: "eur", mode: "stripe", status: "requires_action", stripe: { paymentIntentId: piId }, audit: { createdBy: "seed" } });
+  await payments.reconcileStripeEvent({ ...ev(piId, { tenantId: TA, applicationId: APP_ID }), type: "payment_intent.amount_capturable_updated", payment: { paymentIntentId: piId, amount: ANNUAL, currency: "eur", status: "requires_capture", metadata: { tenantId: TA, applicationId: APP_ID } } }, { metadataTenantId: TA });
+  const after = await Payment.findById(row._id).lean();
+  assert.equal(after.applicationId, APP_ID);
+  assert.equal(after.applicationBinding, undefined);
+  const r = await call("POST", `/api/payments/intents/${piId}/capture`, { auth: CRM_APP });
+  assert.equal(r.status, 409); assert.equal(r.code, "PAYMENT_APPLICATION_BINDING_UNVERIFIED");
+  assert.equal(PIS.get(piId).status, "requires_capture");
+});
