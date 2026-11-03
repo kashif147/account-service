@@ -239,6 +239,50 @@ async function postManualEventJournalEntries(payment, { tenantId, registrationId
 
 const MANUAL_RECORD_KEY = (registrationId) => `acct:manual_record:${registrationId}`;
 
+// P5 L2: how long a MANUAL_TO_CARD switch counts as in flight when its card attempt has not created
+// a Payment row yet (the card flow calls Stripe between releasing the record and claiming the binding).
+export const MANUAL_TO_CARD_SWITCH_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * P5 L2. A MANUAL_TO_CARD switch (releaseRegistrationBinding allowManualToCard) cancels the unposted
+ * record and frees the binding in ONE conditional update, but the card Payment row claims the binding
+ * only after Stripe is called. A repeat / concurrent manual record in that gap found no live row and
+ * created a NEW record that took the binding back, so the card attempt got 409 and the registration
+ * silently stayed manual.
+ *
+ * Because the cancel is a single-document update, any record attempt that finds no live row for the
+ * registration necessarily sees the cancelled row with its manual_to_card release marker. While that
+ * switch is in flight - released within the window and no card (non-external) Payment row created for
+ * the registration since - the record is refused like any other payment of the registration
+ * (409 REGISTRATION_ALREADY_HAS_PAYMENT) and nothing is written. Once the card row exists the switch has
+ * concluded: a live card is refused by the normal live-row check above, a dead one does not block a
+ * later legitimate manual record. A switch whose card attempt never materialised stops blocking after
+ * the window (its reservation is resolved by the reservation recovery sweep).
+ */
+async function assertNoManualToCardSwitchInFlight(Payment, { tenantId, registrationId }) {
+  const switched = await Payment.findOne({
+    tenantId,
+    registrationId,
+    mode: "external",
+    status: "canceled",
+    bindingReleaseReason: "REPLACE_RELEASED_BINDING:manual_to_card",
+    bindingReleasedAt: { $gte: new Date(Date.now() - MANUAL_TO_CARD_SWITCH_WINDOW_MS) },
+  })
+    .sort({ bindingReleasedAt: -1 })
+    .select({ bindingReleasedAt: 1 })
+    .lean();
+  if (!switched) return;
+  const concluded = await Payment.exists({
+    tenantId,
+    registrationId,
+    mode: { $ne: "external" },
+    createdAt: { $gte: switched.bindingReleasedAt },
+  });
+  if (!concluded) {
+    throw await appError(409, "REGISTRATION_ALREADY_HAS_PAYMENT", "This registration is switching to a card payment");
+  }
+}
+
 function recordedMethod(payment) {
   const m = /^manual-(manual|comp|invoice)-/.exec(String(payment?.external?.externalRef || ""));
   return m ? m[1] : null;
@@ -320,6 +364,7 @@ export async function postManualEventPayment({
     return { paymentId: existing[0]._id.toString(), alreadyRecorded: true };
   }
   if (existing.length) throw await conflict(existing.find((p) => p.registrationBinding === reg) || existing[0]);
+  await assertNoManualToCardSwitchInFlight(Payment, { tenantId, registrationId: reg });
 
   let payment;
   try {
