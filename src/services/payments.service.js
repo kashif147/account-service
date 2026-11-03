@@ -571,6 +571,20 @@ async function buildIntentResponse(payment, stripe) {
   };
 }
 
+/**
+ * P5 clientSecret non-disclosure on registration/application attempt reuse: a reused intent
+ * whose payer is a PORTAL member is only ever handed back to that member with its
+ * clientSecret/checkoutUrl. Any other caller (CRM / events-service retry, another member)
+ * gets the ids and status only - the same intent is reused (no second charge), but the
+ * member's card-confirmation secret is never disclosed. CRM recovers a stranded member intent
+ * by cancelling it (POST /intents/:id/cancel), which makes the binding releasable.
+ */
+export function withholdForeignPayerSecret(response, payment, payer = {}) {
+  if (normId(payment?.payer?.userType).toUpperCase() !== "PORTAL") return response;
+  if (effectivePayerUserId(payment) && effectivePayerUserId(payment) === normId(payer.userId)) return response;
+  return { ...response, clientSecret: null, checkoutUrl: null, secretWithheld: true };
+}
+
 async function refreshPaymentFromStripe(payment, pi, ctx = {}) {
   const status = paymentIntentStatusToDomain(pi);
   const set = {
@@ -854,7 +868,11 @@ export async function createIntent(input, ctx, caller = {}) {
       logger,
     });
     if (attemptDecision.reusablePayment) {
-      return await buildIntentResponse(attemptDecision.reusablePayment, stripe);
+      return withholdForeignPayerSecret(
+        await buildIntentResponse(attemptDecision.reusablePayment, stripe),
+        attemptDecision.reusablePayment,
+        payer,
+      );
     }
     attemptNumber = attemptDecision.attemptNumber || 1;
     supersededPaymentId = attemptDecision.supersededPaymentId || null;
