@@ -8,7 +8,7 @@ import Payment, {
   zRecordExternal,
 } from "../models/payment.model.js";
 import Refund, { zCreateRefund } from "../models/refund.model.js";
-import PaymentIntentReservation, { ORPHAN_STATES } from "../models/paymentIntentReservation.model.js";
+import PaymentIntentReservation, { ORPHAN_STATES, SWEEP_OPEN_STATES } from "../models/paymentIntentReservation.model.js";
 import { AppError } from "../errors/AppError.js";
 import { getStripe } from "../lib/stripe.js";
 import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
@@ -300,14 +300,25 @@ export function reservationStripeKey(reservationId) {
  * orphan durably before calling Stripe; idempotent (Stripe cancel of a cancelled PI is
  * treated as done). Never touches a PaymentIntent that a Payment row references.
  */
-export async function cancelOrphanedIntent({ stripe, reservationId, paymentIntentId, reason }) {
+export async function cancelOrphanedIntent({ stripe, reservationId, paymentIntentId, reason, tenantId = null }) {
   if (reservationId) {
     await PaymentIntentReservation.updateOne(
       { _id: reservationId, state: { $in: ["reserved", "intent_created", "orphaned", "orphan_cancel_failed"] } },
       { $set: { state: "orphaned", orphanReason: reason, paymentIntentId } },
     );
   }
-  const referenced = await Payment.findOne({ "stripe.paymentIntentId": paymentIntentId }).select({ _id: 1 }).lean();
+  const referenced = await Payment.findOne({ "stripe.paymentIntentId": paymentIntentId }).select({ _id: 1, tenantId: 1 }).lean();
+  if (referenced && tenantId && String(referenced.tenantId) !== String(tenantId)) {
+    // Tenant isolation: a PaymentIntent referenced by ANOTHER tenant's Payment is never touched
+    // (neither cancelled nor marked bound to this reservation) - a human resolves it.
+    if (reservationId) {
+      await PaymentIntentReservation.updateOne(
+        { _id: reservationId },
+        { $set: { state: "needs_attention", attentionReason: "referenced_by_other_tenant" } },
+      );
+    }
+    return { canceled: false, bound: false, attention: true };
+  }
   if (referenced) {
     if (reservationId) {
       await PaymentIntentReservation.updateOne(
@@ -353,54 +364,149 @@ export async function isOrphanedIntent(paymentIntentId) {
   return Boolean(r);
 }
 
+const STRIPE_IDEMPOTENCY_REPLAY_WINDOW_MS = 23 * 60 * 60 * 1000; // Stripe keeps keys >= 24h
+const errCode = (e) => String(e?.code || e?.type || "stripe_error").slice(0, 64);
+
 /**
  * Recovery sweep for reservations left open (process died between the reservation, Stripe and
- * Payment.create) or orphans whose cancel failed. For each: replay the Stripe create with the
- * SAME idempotency key and parameters (Stripe returns the original PaymentIntent if it was
- * created), then bind-check: a PaymentIntent a Payment row references is marked bound;
- * anything else is cancelled as an orphan. Never binds, captures or returns an orphan, and never
- * returns a client_secret. Not scheduled here: wiring into the cron runner is a separate,
- * reviewed change (see the P5 write-up).
+ * Payment.create) or orphans whose cancel failed. NOT scheduled: the only entry point is the
+ * explicit, dry-run-by-default scripts/sweep-payment-intent-reservations.js.
+ *
+ * Per reservation:
+ * - lease: claimed with a conditional update (one sweep at a time; a concurrent run skips it);
+ * - bounded: every claim counts an attempt; past `maxAttempts` -> terminal `needs_attention`
+ *   (visible, never retried silently);
+ * - locate the PaymentIntent: the recorded id; else, inside Stripe's idempotency window, a replay
+ *   of the SAME key and parameters (Stripe returns the original - never a second intent); past
+ *   the window, a metadata search for this reservation id (none -> terminal `no_intent_found`,
+ *   several -> `needs_attention`);
+ * - tenant isolation: a located intent whose metadata reservationId/tenantId differ from this
+ *   reservation, or that another tenant's Payment references, is never cancelled or bound
+ *   (`needs_attention`); `tenantId` limits a run to one tenant;
+ * - then bind-check: an intent this tenant's Payment references -> `bound`; otherwise cancelled
+ *   as an orphan (idempotent; a failed cancel stays `orphan_cancel_failed` for the next run).
+ * Never binds, captures or returns an orphan. Never logs or stores a client_secret: Stripe
+ * objects are reduced to their id before anything else happens, and the result is counts only.
  */
-export async function sweepPaymentIntentReservations({ olderThanMs = 15 * 60 * 1000, limit = 100, stripe = getStripe(), now = new Date() } = {}) {
+export async function sweepPaymentIntentReservations({
+  olderThanMs = 15 * 60 * 1000,
+  limit = 100,
+  maxAttempts = 5,
+  leaseMs = 5 * 60 * 1000,
+  tenantId = null,
+  stripe = getStripe(),
+  now = new Date(),
+  log = () => {},
+} = {}) {
   const cutoff = new Date(now.getTime() - olderThanMs);
-  const open = await PaymentIntentReservation.find({
+  const tenantScope = tenantId ? { tenantId: String(tenantId) } : {};
+  const candidates = await PaymentIntentReservation.find({
+    ...tenantScope,
     $or: [
       { state: { $in: ["reserved", "intent_created", "orphaned"] }, updatedAt: { $lte: cutoff } },
       { state: "orphan_cancel_failed" },
     ],
   })
+    .select({ _id: 1 })
+    .sort({ updatedAt: 1 })
     .limit(limit)
     .lean();
-  const out = { scanned: open.length, bound: 0, canceled: 0, failed: 0 };
-  for (const r of open) {
-    let piId = r.paymentIntentId;
-    if (!piId) {
-      try {
-        const replay = await stripe.paymentIntents.create(
-          {
-            amount: r.request.amount,
-            currency: r.request.currency,
-            payment_method_types: ["card"],
-            capture_method: r.request.captureMethod,
-            metadata: Object.fromEntries(Object.entries(r.request.metadata || {})),
-          },
-          { idempotencyKey: r.stripeIdempotencyKey },
-        );
-        piId = replay.id;
-      } catch (e) {
-        out.failed += 1;
-        await PaymentIntentReservation.updateOne(
-          { _id: r._id },
-          { $set: { lastErrorCode: String(e?.code || e?.type || "stripe_error").slice(0, 64) } },
-        ).catch(() => {});
-        continue;
-      }
+  const out = { scanned: candidates.length, skippedLeased: 0, bound: 0, canceled: 0, failed: 0, noIntent: 0, needsAttention: 0 };
+  const attention = async (r, reason) => {
+    await PaymentIntentReservation.updateOne(
+      { _id: r._id, state: { $in: SWEEP_OPEN_STATES } },
+      { $set: { state: "needs_attention", attentionReason: reason, sweepLeaseUntil: null } },
+    );
+    out.needsAttention += 1;
+    log(`reservation ${r._id} -> needs_attention (${reason})`);
+  };
+  for (const c of candidates) {
+    const r = await PaymentIntentReservation.findOneAndUpdate(
+      {
+        _id: c._id,
+        ...tenantScope,
+        state: { $in: SWEEP_OPEN_STATES },
+        $or: [{ sweepLeaseUntil: null }, { sweepLeaseUntil: { $exists: false } }, { sweepLeaseUntil: { $lte: now } }],
+      },
+      { $set: { sweepLeaseUntil: new Date(now.getTime() + leaseMs) }, $inc: { sweepAttempts: 1 } },
+      { new: true },
+    ).lean();
+    if (!r) {
+      out.skippedLeased += 1;
+      continue;
     }
-    const res = await cancelOrphanedIntent({ stripe, reservationId: r._id, paymentIntentId: piId, reason: r.orphanReason || "unfinished_creation" });
-    if (res.bound) out.bound += 1;
+    if (r.sweepAttempts > maxAttempts) {
+      await attention(r, "sweep_attempts_exhausted");
+      continue;
+    }
+    let piId = r.paymentIntentId;
+    let piMeta = null;
+    try {
+      if (!piId) {
+        const age = now.getTime() - new Date(r.createdAt).getTime();
+        if (age < STRIPE_IDEMPOTENCY_REPLAY_WINDOW_MS) {
+          const replay = await stripe.paymentIntents.create(
+            {
+              amount: r.request.amount,
+              currency: r.request.currency,
+              payment_method_types: ["card"],
+              capture_method: r.request.captureMethod,
+              metadata: Object.fromEntries(Object.entries(r.request.metadata || {})),
+            },
+            { idempotencyKey: r.stripeIdempotencyKey },
+          );
+          piId = replay?.id || null;
+          piMeta = replay?.metadata || {};
+        } else {
+          const found = await stripe.paymentIntents.search({ query: `metadata['reservationId']:'${String(r._id)}'`, limit: 3 });
+          const hits = (found?.data || []).map((pi) => ({ id: pi.id, metadata: pi.metadata || {} }));
+          if (hits.length === 0) {
+            await PaymentIntentReservation.updateOne(
+              { _id: r._id, state: { $in: SWEEP_OPEN_STATES } },
+              { $set: { state: "no_intent_found", sweepLeaseUntil: null } },
+            );
+            out.noIntent += 1;
+            log(`reservation ${r._id} -> no_intent_found`);
+            continue;
+          }
+          if (hits.length > 1) {
+            await attention(r, "multiple_intents_for_reservation");
+            continue;
+          }
+          piId = hits[0].id;
+          piMeta = hits[0].metadata;
+        }
+      }
+    } catch (e) {
+      out.failed += 1;
+      await PaymentIntentReservation.updateOne(
+        { _id: r._id },
+        { $set: { lastErrorCode: errCode(e), sweepLeaseUntil: null } },
+      ).catch(() => {});
+      log(`reservation ${r._id} locate failed (${errCode(e)}); attempt ${r.sweepAttempts}/${maxAttempts}`);
+      continue;
+    }
+    if (piMeta && (String(piMeta.reservationId || "") !== String(r._id) || String(piMeta.tenantId || "") !== String(r.tenantId))) {
+      await attention(r, "intent_metadata_mismatch");
+      continue;
+    }
+    const res = await cancelOrphanedIntent({
+      stripe,
+      reservationId: r._id,
+      paymentIntentId: piId,
+      reason: r.orphanReason || "unfinished_creation",
+      tenantId: r.tenantId,
+    });
+    await PaymentIntentReservation.updateOne({ _id: r._id }, { $set: { sweepLeaseUntil: null } }).catch(() => {});
+    if (res.attention) {
+      out.needsAttention += 1;
+      log(`reservation ${r._id} -> needs_attention (referenced_by_other_tenant)`);
+    } else if (res.bound) out.bound += 1;
     else if (res.canceled) out.canceled += 1;
-    else out.failed += 1;
+    else {
+      out.failed += 1;
+      log(`reservation ${r._id} cancel failed; attempt ${r.sweepAttempts}/${maxAttempts}`);
+    }
   }
   return out;
 }

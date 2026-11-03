@@ -15,6 +15,10 @@ const { Schema } = mongoose;
 // state: reserved -> intent_created -> bound
 //                                   \-> orphaned -> orphan_canceled
 //                                                \-> orphan_cancel_failed (retried by sweep)
+// Terminal sweep outcomes (scripts/sweep-payment-intent-reservations.js; never retried):
+//   needs_attention  - attempts exhausted, or the PaymentIntent's metadata/tenant does not match
+//                      this reservation; a human resolves it (attentionReason says why)
+//   no_intent_found  - the creation never reached Stripe (nothing exists to cancel)
 export const RESERVATION_STATES = [
   "reserved",
   "intent_created",
@@ -22,8 +26,13 @@ export const RESERVATION_STATES = [
   "orphaned",
   "orphan_canceled",
   "orphan_cancel_failed",
+  "needs_attention",
+  "no_intent_found",
 ];
-export const ORPHAN_STATES = ["orphaned", "orphan_canceled", "orphan_cancel_failed"];
+// A PaymentIntent recorded in any of these states is never captured or attached.
+export const ORPHAN_STATES = ["orphaned", "orphan_canceled", "orphan_cancel_failed", "needs_attention"];
+// States the recovery sweep works on.
+export const SWEEP_OPEN_STATES = ["reserved", "intent_created", "orphaned", "orphan_cancel_failed"];
 
 const PaymentIntentReservationSchema = new Schema(
   {
@@ -43,6 +52,9 @@ const PaymentIntentReservationSchema = new Schema(
     orphanReason: { type: String, default: null },
     cancelAttempts: { type: Number, default: 0 },
     lastErrorCode: { type: String, default: null }, // Stripe error code/type only, never a message body
+    sweepAttempts: { type: Number, default: 0 },
+    sweepLeaseUntil: { type: Date, default: null }, // one sweep at a time per reservation
+    attentionReason: { type: String, default: null }, // code only (see needs_attention)
   },
   { timestamps: true, collection: "paymentIntentReservations", strict: "throw" },
 );
