@@ -1,5 +1,6 @@
 // src/routes/journal.routes.js
 import express from "express";
+import { createManualPaymentServiceAuth } from "../middlewares/serviceAuth.middleware.js";
 import {
   invoiceRules,
   receiptRules,
@@ -299,6 +300,10 @@ async function manualRecordStillLive(cached, req) {
   const row = await Payment.findOne({ _id: paymentId, tenantId }).select({ status: 1 }).lean();
   return Boolean(row && LIVE_RECORD_STATUSES.has(row.status));
 }
+
+// P5 S3: signed service authority on the three manual-payment routes (report/enforce per
+// PAYMENT_SERVICE_AUTH_MODE, default off) - registered before each route's own chain, so it runs first.
+router.use("/events", createManualPaymentServiceAuth());
 
 // Events/courses manual (comp/manual/invoice) payment posting - called by
 // events-service, forwarding the original caller's gateway headers (same
