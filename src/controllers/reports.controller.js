@@ -760,7 +760,12 @@ export async function creditorsList(req, res, next) {
     });
     res.success(data);
   } catch (e) {
-    if (e.message?.includes("required") || e.message?.includes("Invalid") || e.message?.includes("must be")) {
+    if (
+      e.message?.includes("required") ||
+      e.message?.includes("Invalid") ||
+      e.message?.includes("must be") ||
+      e.message?.startsWith("Provide asOf")
+    ) {
       return next(AppError.badRequest(e.message));
     }
     next(e);

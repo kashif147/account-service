@@ -32,6 +32,7 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import {
   requireCrmUser,
   requireCrmOrOwnMember,
+  trustedInternalOnly,
 } from "../middlewares/callerScope.middleware.js";
 
 const router = express.Router();
@@ -95,6 +96,19 @@ router.post(
   requireCrmUser,
   defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
   memberSummaryBatch
+);
+
+// Creditors list. Two registrations, tried in order:
+//  1. a genuine internal S2S call - x-internal-request: true, NO user identity header, and an
+//     explicit 24-hex x-tenant-id (400 if missing/malformed) - for reporting-service
+//     scripts/sync-member-creditors.js (member_creditor warehouse refresh). Tenant = that header only;
+//  2. anything else falls through (next("route")) to the unchanged CRM chain (CRM staff with
+//     accounts.reports:read). A user token / gateway headers / forwarded x-user-* + a spoofed
+//     x-internal-request is judged here as that user.
+router.post(
+  "/creditors-list",
+  trustedInternalOnly,
+  creditorsList
 );
 
 router.post(

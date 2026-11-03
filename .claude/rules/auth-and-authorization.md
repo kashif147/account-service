@@ -81,3 +81,11 @@ of the rules above are additionally mechanically enforced by
 `mongoose.createConnection(...)` and cross-service Mongo URIs (this service has no reason to open one
 — see the `no-cross-db-mongo` skill), and it blocks the literal header key `x-api-key` and any new
 `<PREFIX>_API_KEY` env var outside a known external-provider allowlist (Stripe/SendGrid/Twilio/etc.).
+
+**`POST /reports/creditors-list`** is also registered twice (same pattern as the other
+`trustedInternalOnly` pairs): first `trustedInternalOnly, creditorsList` for reporting-service
+`scripts/sync-member-creditors.js` (tenant = the 24-hex `x-tenant-id` header only, response
+`{ memberId, amountCents }` rows only), then the unchanged CRM chain (`requireCrmUser` → PDP
+`accounts.reports:read`). A request without `asOf` / `year`+`month` / `dateTo` is 400. Matrix:
+`src/tests/creditorsList.internal.http.test.mjs` (node:test). Keep this route off the public
+gateway path: the gateway strips `x-internal-request`, so only in-network callers reach branch 1.
