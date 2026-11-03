@@ -206,3 +206,25 @@ test("AB5 Stripe reconciliation never creates a Payment and never creates an app
   assert.equal(r.status, 409); assert.equal(r.code, "PAYMENT_APPLICATION_BINDING_UNVERIFIED");
   assert.equal(PIS.get(piId).status, "requires_capture");
 });
+
+test("AB6 an existing unbound attempt reused by a guard-verified portal call adopts the binding; a CRM reuse does not", { skip }, async () => {
+  const appId = APP_ID;
+  // Legacy-shaped open attempt for the caller's own application, created before applicationBinding.
+  const piId = "pi_ab_legacy_reuse";
+  PIS.set(piId, { id: piId, client_secret: `${piId}_secret_x`, status: "requires_payment_method", amount: ANNUAL, currency: "eur", metadata: { applicationId: appId } });
+  await Payment.updateMany({ tenantId: TA, applicationId: appId }, { $set: { isActiveAttempt: false } });
+  const legacy = await Payment.create({ tenantId: TA, purpose: "subscriptionFee", ledgerDomain: "membership", amount: ANNUAL, currency: "eur", mode: "stripe", status: "requires_action", applicationId: appId, attemptNumber: 9, isActiveAttempt: true, stripe: { paymentIntentId: piId, status: "requires_payment_method" }, audit: { createdBy: "seed" } });
+  // CRM continuation: no verification -> no binding.
+  const crm = await call("POST", "/api/payments/intents", { auth: CRM_PAY, body: intentBody(appId) });
+  assert.ok(crm.status === 200 || crm.status === 201, crm.text.slice(0, 200));
+  assert.equal((await Payment.findById(legacy._id).lean()).applicationBinding, undefined);
+  // Portal continuation for its own application: guard verifies -> the reused row is bound.
+  const res = await call("POST", "/api/payments/intents", { auth: PORTAL, body: intentBody(appId) });
+  assert.ok(res.status === 200 || res.status === 201, res.text.slice(0, 300));
+  // the portal call continued an EXISTING unbound attempt (the legacy row, or the attempt the
+  // CRM call left unbound) - it did not create a fresh row
+  assert.ok([String(legacy._id), crm.data.id].includes(res.data.id), `reused ${res.data.id}`);
+  const bound = await Payment.findById(res.data.id).lean();
+  assert.equal(bound.applicationId, appId);
+  assert.equal(bound.applicationBinding, appId);
+});
