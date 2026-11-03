@@ -12,6 +12,7 @@
 import mongoose from "mongoose";
 import crypto from "node:crypto";
 import { AppError } from "../errors/AppError.js";
+import { hasAuthoritativeApplicationBinding } from "../helpers/applicationBinding.js";
 
 export const BOUND_TRANSITIONS = Object.freeze([
   "capture",
@@ -191,11 +192,26 @@ export function commandFingerprint(cmd) {
 }
 
 /**
- * The only Idempotency-Key a bound caller may send (response cache only): derived from the
- * binding, so a caller cannot pick a key that collides with another object's command.
+ * Canonical Idempotency-Key of a bound command (contract p5-bound-payment-v1, REQUIRED on every
+ * bound call; response cache only - state changes are conditional independently of it):
+ *
+ *   <domain>:<transition>:<objectId>:<paymentRef>
+ *
+ *   paymentRef = the route's PaymentIntent id   for capture / cancel
+ *              = binding.paymentId              for manual_post / manual_void
+ *              = "new"                          for manual_record (the row does not exist yet)
+ *
+ * Every component is something the caller already has without reading account state, and the
+ * key is derived from the binding, so a caller cannot pick a key that collides with another
+ * object's command.
  */
-export function expectedCallerKey(cmd, paymentId) {
-  return [cmd.domain, cmd.transition, cmd.objectId, paymentId || "new"].join(":");
+export function paymentRefOf(cmd, paymentIntentId) {
+  if (cmd.transition === "capture" || cmd.transition === "cancel") return str(paymentIntentId);
+  if (cmd.transition === "manual_record") return "new";
+  return str(cmd.paymentId);
+}
+export function expectedCallerKey(cmd, paymentIntentId) {
+  return [cmd.domain, cmd.transition, cmd.objectId, paymentRefOf(cmd, paymentIntentId)].join(":");
 }
 
 /** Server-derived Stripe idempotency key (never from the request). */
@@ -243,12 +259,17 @@ export async function resolveBoundPayment(cmd, { tenantId, paymentIntentId }, de
   if (!rowApp && !rowReg) throw err(409, "PAYMENT_UNBOUND", "This payment is not bound to a business object");
   const rowObject = cmd.domain === "application" ? rowApp : rowReg;
   const rowOther = cmd.domain === "application" ? rowReg : rowApp;
-  // Webhook-upserted application payments carry the schema default purpose "subscriptionFee"
-  // (see paymentMutationAuthority.middleware.js APPLICATION_ROW_PURPOSES): equivalent to
-  // applicationFee only for an application binding with a matching applicationId.
+  // Application domain: the stored row must carry an AUTHORITATIVE application binding
+  // (purpose applicationFee, or applicationBinding written at verified creation - see
+  // paymentMutationAuthority.middleware.js). A subscriptionFee row that merely carries an
+  // applicationId is never inferred to be an application payment: fail closed.
+  if (cmd.domain === "application" && rowApp && !rowReg && !hasAuthoritativeApplicationBinding(row)) {
+    throw err(409, "PAYMENT_APPLICATION_BINDING_UNVERIFIED", "This payment's application binding cannot be verified");
+  }
   const purposeMatches =
-    str(row.purpose) === cmd.purpose ||
-    (cmd.domain === "application" && cmd.purpose === "applicationFee" && str(row.purpose) === "subscriptionFee");
+    cmd.domain === "application"
+      ? cmd.purpose === "applicationFee" && hasAuthoritativeApplicationBinding(row)
+      : str(row.purpose) === cmd.purpose;
   if (
     rowObject !== cmd.objectId ||
     rowOther ||

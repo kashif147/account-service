@@ -1,0 +1,173 @@
+{
+  "contract": "p5-bound-payment-commands",
+  "version": 1,
+  "about": "Canonical bound internal payment commands (P5 S1/S2). Byte-identical copies live in account-service, events-service and profile-service under contracts/; each repo's test pins the SHA-256 of its copy, so a one-sided edit fails that repo's suite. Callers assert their serialized requests equal `request`; account replays every `request` against its real router and asserts `expect`, an identical retry (same key + body -> same response) and a conflicting retry (same key, different body -> 409 IDEMPOTENCY_CONFLICT).",
+  "rules": {
+    "idempotencyKey": "<domain>:<transition>:<objectId>:<paymentRef>; paymentRef = route PaymentIntent id (capture, cancel) | binding.paymentId (manual_post, manual_void) | \"new\" (manual_record). Required.",
+    "allowedHeaders": ["content-type", "x-internal-request", "x-tenant-id", "idempotency-key", "x-correlation-id"],
+    "forbiddenHeaders": ["authorization", "x-jwt-verified", "x-auth-source", "x-user-id", "x-user-email", "x-user-type", "x-user-roles", "x-user-permissions", "x-ms-client-principal", "x-gateway-*"],
+    "domains": {
+      "application": { "purposes": ["applicationFee"], "transitions": ["capture", "cancel"], "objectField": "applicationId", "link": "never" },
+      "registration": { "purposes": ["eventRegistration", "courseRegistration"], "purposeFromRegistrationType": { "event": "eventRegistration", "course": "courseRegistration" }, "transitions": ["capture", "cancel", "manual_record", "manual_post", "manual_void"], "objectField": "registrationId", "link": "capture, manual_record, manual_post" }
+    },
+    "reasons": {
+      "capture": ["approve"],
+      "cancel": ["reject", "event_cancelled", "payment_method_switched"],
+      "manual_record": ["crm_add_attendee"],
+      "manual_post": ["approve"],
+      "manual_void": ["reject", "event_cancelled", "payment_method_switched"]
+    },
+    "applicationRow": "A stored row is an application payment only with purpose applicationFee, or purpose subscriptionFee AND applicationBinding === applicationId (written at verified creation). Otherwise 409 PAYMENT_APPLICATION_BINDING_UNVERIFIED.",
+    "responses": {
+      "capture": "data.status (succeeded), data.paymentId, data.paymentIntentId, data.captured | data.alreadyCaptured",
+      "cancel": "data.status (canceled | refund_required | payment_required ...), data.paymentId, data.paymentIntentId, data.canceled | data.alreadyCanceled",
+      "manual_record": "201 new | 200 data.alreadyRecorded; data.paymentId",
+      "manual_post": "200 data.paymentId [, data.alreadyPosted]",
+      "manual_void": "200 data.paymentId, data.voided [, data.alreadyVoided]"
+    }
+  },
+  "ids": {
+    "tenantId": "aaaaaaaaaaaaaaaaaaaaaaaa",
+    "actorUserId": "d00000000000000000000001",
+    "profileId": "e00000000000000000000001",
+    "memberId": "M-CONTRACT-1"
+  },
+  "cases": [
+    {
+      "name": "application.capture.approve",
+      "caller": "profile-service",
+      "inputs": { "applicationId": "a00000000000000000000001", "paymentId": "c00000000000000000000001", "paymentIntentId": "pi_contract_app_1" },
+      "seed": { "kind": "stripe", "_id": "c00000000000000000000001", "purpose": "subscriptionFee", "applicationId": "a00000000000000000000001", "applicationBinding": "a00000000000000000000001", "ledgerDomain": "membership", "paymentIntentId": "pi_contract_app_1", "status": "requires_capture", "amount": 29900 },
+      "request": {
+        "method": "POST",
+        "path": "/api/payments/intents/pi_contract_app_1/capture",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "application:capture:a00000000000000000000001:pi_contract_app_1" },
+        "body": { "binding": { "domain": "application", "applicationId": "a00000000000000000000001", "purpose": "applicationFee", "paymentId": "c00000000000000000000001" }, "transition": "capture", "reason": "approve", "actorUserId": "d00000000000000000000001" }
+      },
+      "expect": { "status": 200, "data": { "status": "succeeded", "paymentId": "c00000000000000000000001" } }
+    },
+    {
+      "name": "application.cancel.reject",
+      "caller": "profile-service",
+      "inputs": { "applicationId": "a00000000000000000000002", "paymentId": "c00000000000000000000002", "paymentIntentId": "pi_contract_app_2" },
+      "seed": { "kind": "stripe", "_id": "c00000000000000000000002", "purpose": "applicationFee", "applicationId": "a00000000000000000000002", "ledgerDomain": "membership", "paymentIntentId": "pi_contract_app_2", "status": "requires_capture", "amount": 29900 },
+      "request": {
+        "method": "POST",
+        "path": "/api/payments/intents/pi_contract_app_2/cancel",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "application:cancel:a00000000000000000000002:pi_contract_app_2" },
+        "body": { "binding": { "domain": "application", "applicationId": "a00000000000000000000002", "purpose": "applicationFee", "paymentId": "c00000000000000000000002" }, "transition": "cancel", "reason": "reject", "actorUserId": "d00000000000000000000001" }
+      },
+      "expect": { "status": 200, "data": { "status": "canceled", "paymentId": "c00000000000000000000002" } }
+    },
+    {
+      "name": "registration.capture.approve",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000001", "registrationType": "event", "paymentId": "c00000000000000000000011", "paymentIntentId": "pi_contract_reg_1" },
+      "seed": { "kind": "stripe", "_id": "c00000000000000000000011", "purpose": "eventRegistration", "registrationId": "b00000000000000000000001", "registrationBinding": "b00000000000000000000001", "ledgerDomain": "events", "paymentIntentId": "pi_contract_reg_1", "status": "requires_capture", "amount": 5000 },
+      "request": {
+        "method": "POST",
+        "path": "/api/payments/intents/pi_contract_reg_1/capture",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:capture:b00000000000000000000001:pi_contract_reg_1" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000001", "purpose": "eventRegistration", "paymentId": "c00000000000000000000011" }, "transition": "capture", "reason": "approve", "actorUserId": "d00000000000000000000001", "link": { "profileId": "e00000000000000000000001", "memberId": "M-CONTRACT-1" } }
+      },
+      "expect": { "status": 200, "data": { "status": "succeeded", "paymentId": "c00000000000000000000011" } }
+    },
+    {
+      "name": "registration.cancel.reject",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000002", "registrationType": "course", "paymentId": "c00000000000000000000012", "paymentIntentId": "pi_contract_reg_2" },
+      "seed": { "kind": "stripe", "_id": "c00000000000000000000012", "purpose": "courseRegistration", "registrationId": "b00000000000000000000002", "registrationBinding": "b00000000000000000000002", "ledgerDomain": "events", "paymentIntentId": "pi_contract_reg_2", "status": "requires_capture", "amount": 5000 },
+      "request": {
+        "method": "POST",
+        "path": "/api/payments/intents/pi_contract_reg_2/cancel",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:cancel:b00000000000000000000002:pi_contract_reg_2" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000002", "purpose": "courseRegistration", "paymentId": "c00000000000000000000012" }, "transition": "cancel", "reason": "reject", "actorUserId": "d00000000000000000000001" }
+      },
+      "expect": { "status": 200, "data": { "status": "canceled", "paymentId": "c00000000000000000000012" } }
+    },
+    {
+      "name": "registration.cancel.event_cancelled",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000003", "registrationType": "event", "paymentId": "c00000000000000000000013", "paymentIntentId": "pi_contract_reg_3" },
+      "seed": { "kind": "stripe", "_id": "c00000000000000000000013", "purpose": "eventRegistration", "registrationId": "b00000000000000000000003", "ledgerDomain": "events", "paymentIntentId": "pi_contract_reg_3", "status": "requires_capture", "amount": 5000 },
+      "request": {
+        "method": "POST",
+        "path": "/api/payments/intents/pi_contract_reg_3/cancel",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:cancel:b00000000000000000000003:pi_contract_reg_3" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000003", "purpose": "eventRegistration", "paymentId": "c00000000000000000000013" }, "transition": "cancel", "reason": "event_cancelled", "actorUserId": "d00000000000000000000001" }
+      },
+      "expect": { "status": 200, "data": { "status": "canceled", "paymentId": "c00000000000000000000013" } }
+    },
+    {
+      "name": "registration.manual_record.crm_add_attendee",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000004", "registrationType": "course", "amount": 2500, "currency": "eur", "method": "invoice", "eventCategoryCode": "CPD" },
+      "seed": null,
+      "request": {
+        "method": "POST",
+        "path": "/api/journal/events/manual-payment",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:manual_record:b00000000000000000000004:new" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000004", "purpose": "courseRegistration" }, "transition": "manual_record", "reason": "crm_add_attendee", "actorUserId": "d00000000000000000000001", "record": { "amount": 2500, "currency": "eur", "method": "invoice", "eventCategoryCode": "CPD" }, "link": { "profileId": "e00000000000000000000001", "memberId": "M-CONTRACT-1" } }
+      },
+      "expect": { "status": 201, "data": { "paymentId": "<new>" } }
+    },
+    {
+      "name": "registration.manual_post.approve",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000005", "registrationType": "event", "paymentId": "c00000000000000000000021", "method": "invoice" },
+      "seed": { "kind": "manual", "_id": "c00000000000000000000021", "purpose": "eventRegistration", "registrationId": "b00000000000000000000005", "registrationBinding": "b00000000000000000000005", "ledgerDomain": "events", "status": "manual_review", "amount": 2500, "method": "invoice" },
+      "request": {
+        "method": "POST",
+        "path": "/api/journal/events/manual-payment/post",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:manual_post:b00000000000000000000005:c00000000000000000000021" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000005", "purpose": "eventRegistration", "paymentId": "c00000000000000000000021" }, "transition": "manual_post", "reason": "approve", "actorUserId": "d00000000000000000000001", "link": { "profileId": "e00000000000000000000001", "memberId": "M-CONTRACT-1" } }
+      },
+      "expect": { "status": 200, "data": { "paymentId": "c00000000000000000000021" } }
+    },
+    {
+      "name": "registration.manual_void.reject",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000006", "registrationType": "event", "paymentId": "c00000000000000000000022" },
+      "seed": { "kind": "manual", "_id": "c00000000000000000000022", "purpose": "eventRegistration", "registrationId": "b00000000000000000000006", "registrationBinding": "b00000000000000000000006", "ledgerDomain": "events", "status": "manual_review", "amount": 0, "method": "comp" },
+      "request": {
+        "method": "POST",
+        "path": "/api/journal/events/manual-payment/void",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:manual_void:b00000000000000000000006:c00000000000000000000022" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000006", "purpose": "eventRegistration", "paymentId": "c00000000000000000000022" }, "transition": "manual_void", "reason": "reject", "actorUserId": "d00000000000000000000001" }
+      },
+      "expect": { "status": 200, "data": { "paymentId": "c00000000000000000000022", "voided": true } }
+    },
+    {
+      "name": "registration.manual_void.payment_method_switched",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000007", "registrationType": "course", "paymentId": "c00000000000000000000023" },
+      "seed": { "kind": "manual", "_id": "c00000000000000000000023", "purpose": "courseRegistration", "registrationId": "b00000000000000000000007", "ledgerDomain": "events", "status": "manual_review", "amount": 2500, "method": "manual" },
+      "request": {
+        "method": "POST",
+        "path": "/api/journal/events/manual-payment/void",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:manual_void:b00000000000000000000007:c00000000000000000000023" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000007", "purpose": "courseRegistration", "paymentId": "c00000000000000000000023" }, "transition": "manual_void", "reason": "payment_method_switched", "actorUserId": "d00000000000000000000001" }
+      },
+      "expect": { "status": 200, "data": { "paymentId": "c00000000000000000000023", "voided": true } }
+    },
+    {
+      "name": "registration.manual_void.event_cancelled",
+      "caller": "events-service",
+      "inputs": { "registrationId": "b00000000000000000000008", "registrationType": "event", "paymentId": "c00000000000000000000024" },
+      "seed": { "kind": "manual", "_id": "c00000000000000000000024", "purpose": "eventRegistration", "registrationId": "b00000000000000000000008", "ledgerDomain": "events", "status": "manual_review", "amount": 2500, "method": "invoice" },
+      "request": {
+        "method": "POST",
+        "path": "/api/journal/events/manual-payment/void",
+        "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "registration:manual_void:b00000000000000000000008:c00000000000000000000024" },
+        "body": { "binding": { "domain": "registration", "registrationId": "b00000000000000000000008", "purpose": "eventRegistration", "paymentId": "c00000000000000000000024" }, "transition": "manual_void", "reason": "event_cancelled", "actorUserId": "d00000000000000000000001" }
+      },
+      "expect": { "status": 200, "data": { "paymentId": "c00000000000000000000024", "voided": true } }
+    }
+  ],
+  "negative": [
+    { "name": "legacy subscriptionFee + applicationId without applicationBinding", "seed": { "kind": "stripe", "_id": "c00000000000000000000031", "purpose": "subscriptionFee", "applicationId": "a00000000000000000000031", "ledgerDomain": "membership", "paymentIntentId": "pi_contract_legacy_1", "status": "requires_capture", "amount": 29900 }, "request": { "method": "POST", "path": "/api/payments/intents/pi_contract_legacy_1/capture", "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "application:capture:a00000000000000000000031:pi_contract_legacy_1" }, "body": { "binding": { "domain": "application", "applicationId": "a00000000000000000000031", "purpose": "applicationFee", "paymentId": "c00000000000000000000031" }, "transition": "capture", "reason": "approve", "actorUserId": "d00000000000000000000001" } }, "expect": { "status": 409, "code": "PAYMENT_APPLICATION_BINDING_UNVERIFIED" } },
+    { "name": "pre-contract service-prefixed key", "seed": { "kind": "stripe", "_id": "c00000000000000000000032", "purpose": "applicationFee", "applicationId": "a00000000000000000000032", "ledgerDomain": "membership", "paymentIntentId": "pi_contract_oldkey_1", "status": "requires_capture", "amount": 29900 }, "request": { "method": "POST", "path": "/api/payments/intents/pi_contract_oldkey_1/capture", "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "profile-service:capture:a00000000000000000000032:c00000000000000000000032" }, "body": { "binding": { "domain": "application", "applicationId": "a00000000000000000000032", "purpose": "applicationFee", "paymentId": "c00000000000000000000032" }, "transition": "capture", "reason": "approve", "actorUserId": "d00000000000000000000001" } }, "expect": { "status": 400, "code": "IDEMPOTENCY_KEY_MISMATCH" } },
+    { "name": "missing key", "seed": { "kind": "stripe", "_id": "c00000000000000000000033", "purpose": "applicationFee", "applicationId": "a00000000000000000000033", "ledgerDomain": "membership", "paymentIntentId": "pi_contract_nokey_1", "status": "requires_capture", "amount": 29900 }, "request": { "method": "POST", "path": "/api/payments/intents/pi_contract_nokey_1/capture", "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa" }, "body": { "binding": { "domain": "application", "applicationId": "a00000000000000000000033", "purpose": "applicationFee", "paymentId": "c00000000000000000000033" }, "transition": "capture", "reason": "approve", "actorUserId": "d00000000000000000000001" } }, "expect": { "status": 400, "code": "IDEMPOTENCY_KEY_REQUIRED" } },
+    { "name": "user identity on an internal command", "seed": { "kind": "stripe", "_id": "c00000000000000000000034", "purpose": "applicationFee", "applicationId": "a00000000000000000000034", "ledgerDomain": "membership", "paymentIntentId": "pi_contract_mixed_1", "status": "requires_capture", "amount": 29900 }, "request": { "method": "POST", "path": "/api/payments/intents/pi_contract_mixed_1/capture", "headers": { "x-internal-request": "true", "x-tenant-id": "aaaaaaaaaaaaaaaaaaaaaaaa", "Idempotency-Key": "application:capture:a00000000000000000000034:pi_contract_mixed_1", "x-user-id": "d00000000000000000000001" }, "body": { "binding": { "domain": "application", "applicationId": "a00000000000000000000034", "purpose": "applicationFee", "paymentId": "c00000000000000000000034" }, "transition": "capture", "reason": "approve", "actorUserId": "d00000000000000000000001" } }, "expect": { "status": 403, "code": "MIXED_IDENTITY" } }
+  ]
+}

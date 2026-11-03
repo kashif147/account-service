@@ -24,6 +24,7 @@ import { isCrmCaller, isTrustedInternalCall } from "./callerScope.middleware.js"
 import { collectRequestPermissions } from "../helpers/financePermissions.js";
 import { tenantOf } from "../helpers/tenantScope.js";
 import logger from "../config/logger.js";
+import { hasAuthoritativeApplicationBinding } from "../helpers/applicationBinding.js";
 import {
   carriesUserIdentity,
   commandFingerprint,
@@ -74,13 +75,7 @@ function norm(v) {
 // reads purpose "subscriptionFee" for balances, so it is not rewritten.
 export const UNVERIFIED_APPLICATION = "unverified-application";
 
-export function hasAuthoritativeApplicationBinding(row) {
-  const app = norm(row?.applicationId);
-  if (!app) return false;
-  const purpose = norm(row.purpose);
-  if (purpose === "applicationFee") return true;
-  return purpose === "subscriptionFee" && norm(row.applicationBinding) === app;
-}
+export { hasAuthoritativeApplicationBinding };
 
 export function bindingDomainOfRow(row) {
   if (!row) return null;
@@ -156,8 +151,12 @@ export function createRequirePaymentMutationAuthority(transition, deps = {}) {
           { tenantId, paymentIntentId: norm(req.params?.paymentIntentId) },
           deps.boundDeps,
         );
+        // Contract p5-bound-payment-v1: the canonical key is required and must match exactly.
         const callerKey = req.header("Idempotency-Key");
-        if (callerKey && callerKey !== expectedCallerKey(cmd, row ? String(row._id) : null)) {
+        if (!callerKey) {
+          throw new AppError("A bound payment command requires its Idempotency-Key", 400, "IDEMPOTENCY_KEY_REQUIRED");
+        }
+        if (callerKey !== expectedCallerKey(cmd, norm(req.params?.paymentIntentId))) {
           throw new AppError(
             "Idempotency-Key must be the deterministic key of this command",
             400,

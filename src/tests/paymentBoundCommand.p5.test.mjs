@@ -56,6 +56,7 @@ const { default: Payment } = await import("../models/payment.model.js");
 const { default: GL } = await import("../models/glTransaction.model.js");
 const { default: CoA } = await import("../models/coa.model.js");
 const { default: app } = await import("../app.js");
+const { clearIdempotencyCache } = await import("../middlewares/idempotency.js");
 
 // ---- fake Stripe ----
 const PIS = new Map();
@@ -152,9 +153,28 @@ test.after(async () => {
 const cmd = (transition, binding, extra = {}) => ({ binding, transition, reason: "approve", actorUserId: "staff-approver", ...extra });
 const appBinding = (r) => ({ domain: "application", applicationId: r.doc.applicationId, purpose: "applicationFee" });
 const regBinding = (r, extra = {}) => ({ domain: "registration", registrationId: r.doc.registrationId, purpose: r.doc.purpose, ...extra });
-const cap = (r, body, headers = {}) => call("POST", `/api/payments/intents/${r.pi}/capture`, { headers: { ...INTERNAL, ...headers }, body });
-const can = (r, body, headers = {}) => call("POST", `/api/payments/intents/${r.pi}/cancel`, { headers: { ...INTERNAL, ...headers }, body });
-const J = (sfx, body, headers = {}) => call("POST", `/api/journal/events/manual-payment${sfx}`, { headers: { ...INTERNAL, ...headers }, body });
+// Contract p5-bound-payment-v1: every bound call carries its canonical Idempotency-Key
+// (<domain>:<transition>:<objectId>:<paymentRef>). Helpers add it unless a test overrides the
+// header (null = send none).
+function canonicalKey(transition, body, pi) {
+  const b = body?.binding;
+  if (!b || typeof b !== "object") return null;
+  const objectId = b.domain === "application" ? b.applicationId : b.registrationId;
+  const ref = transition === "capture" || transition === "cancel" ? pi : transition === "manual_record" ? "new" : b.paymentId;
+  return [b.domain, transition, objectId, ref].join(":");
+}
+function keyed(transition, body, pi, headers) {
+  const h = { ...INTERNAL, ...headers };
+  if (!("Idempotency-Key" in headers)) {
+    const k = canonicalKey(transition, body, pi);
+    if (k) h["Idempotency-Key"] = k;
+  } else if (headers["Idempotency-Key"] == null) delete h["Idempotency-Key"];
+  return h;
+}
+const J_TRANSITION = { "": "manual_record", "/post": "manual_post", "/void": "manual_void" };
+const cap = (r, body, headers = {}) => call("POST", `/api/payments/intents/${r.pi}/capture`, { headers: keyed("capture", body, r.pi, headers), body });
+const can = (r, body, headers = {}) => call("POST", `/api/payments/intents/${r.pi}/cancel`, { headers: keyed("cancel", body, r.pi, headers), body });
+const J = (sfx, body, headers = {}) => call("POST", `/api/journal/events/manual-payment${sfx}`, { headers: keyed(J_TRANSITION[sfx], body, null, headers), body });
 const capturesOf = (pi) => CALLS.filter((c) => c[0] === "capture" && c[1] === pi);
 // a registration row created under payer binding (#18 shape: target / registrationBinding)
 const boundReg = (purpose = "eventRegistration") => stripeRow({ purpose }).then(async (r) => {
@@ -239,11 +259,18 @@ test("B4 binding must equal the stored row: wrong object / purpose / domain -> 4
   for (const r of [a, reg, other, unbound]) assert.equal(stripeMutations(r.pi), 0);
 });
 
-test("B4b legacy application row stored as subscriptionFee + applicationId: bound applicationFee command resolves it; a subscription-only row stays unbound", { skip }, async () => {
+test("B4b subscriptionFee + applicationId: unverified without applicationBinding (409, no Stripe call); with it the bound applicationFee command resolves", { skip }, async () => {
   const legacy = await stripeRow({ purpose: "applicationFee", extra: { purpose: "subscriptionFee" } });
-  const ok = await cap(legacy, cmd("capture", appBinding(legacy)));
+  for (const [fn, t] of [[cap, "capture"], [can, "cancel"]]) {
+    const res = await fn(legacy, cmd(t, appBinding(legacy), { reason: t === "capture" ? "approve" : "reject" }));
+    assert.equal(res.status, 409, res.text.slice(0, 200)); assert.equal(res.code, "PAYMENT_APPLICATION_BINDING_UNVERIFIED");
+  }
+  assert.equal(stripeMutations(legacy.pi), 0);
+  const bound = await stripeRow({ purpose: "applicationFee", extra: { purpose: "subscriptionFee" } });
+  await Payment.updateOne({ _id: bound.id }, { $set: { applicationBinding: bound.doc.applicationId } });
+  const ok = await cap(bound, cmd("capture", appBinding(bound)));
   assert.equal(ok.status, 200, ok.text.slice(0, 200)); assert.equal(ok.data.captured, true);
-  const wrong = await cap(legacy, cmd("capture", { ...appBinding(legacy), applicationId: oid() }));
+  const wrong = await cap(bound, cmd("capture", { ...appBinding(bound), applicationId: oid() }));
   assert.equal(wrong.status, 409); assert.equal(wrong.code, "PAYMENT_BINDING_MISMATCH");
 });
 
@@ -267,7 +294,11 @@ test("B6 application capture: 200, server-derived Stripe key, actor recorded as 
   assert.equal(row.status, "succeeded");
   const audit = row.auditHistory.find((e) => e.eventType === "bound.capture");
   assert.ok(audit); assert.equal(audit.source, "internal"); assert.match(audit.message, /actor=staff-approver reason=approve/);
-  // retry after a lost response: state-idempotent, no second Stripe capture
+  // retry within the response-cache window: the identical response is replayed
+  const replay = await cap(r, cmd("capture", appBinding(r)));
+  assert.equal(replay.status, 200); assert.equal(replay.text, first.text);
+  // retry after the cache is gone (TTL / restart): state-idempotent, no second Stripe capture
+  clearIdempotencyCache();
   const again = await cap(r, cmd("capture", appBinding(r)));
   assert.equal(again.status, 200); assert.equal(again.data.alreadyCaptured, true);
   assert.equal(capturesOf(r.pi).length, 1);
@@ -327,9 +358,15 @@ test("B9 live Stripe / expected mismatch (amount, currency, tenant metadata) -> 
 // ------------------------------------------------------------ idempotency (response cache)
 test("B10 Idempotency-Key: only the deterministic form; same key + same body replays; same key + different body -> 409", { skip }, async () => {
   const r = await boundReg();
-  const key = `registration:capture:${r.doc.registrationId}:${r.id}`;
+  const key = `registration:capture:${r.doc.registrationId}:${r.pi}`;
   const wrong = await cap(r, cmd("capture", regBinding(r)), { "Idempotency-Key": "caller-chosen-key-123" });
   assert.equal(wrong.status, 400); assert.equal(wrong.code, "IDEMPOTENCY_KEY_MISMATCH");
+  // the pre-contract service-prefixed form is refused too, and a missing key is refused
+  const svc = await cap(r, cmd("capture", regBinding(r)), { "Idempotency-Key": `events-service:capture:${r.doc.registrationId}:${r.id}` });
+  assert.equal(svc.status, 400); assert.equal(svc.code, "IDEMPOTENCY_KEY_MISMATCH");
+  const none = await cap(r, cmd("capture", regBinding(r)), { "Idempotency-Key": null });
+  assert.equal(none.status, 400); assert.equal(none.code, "IDEMPOTENCY_KEY_REQUIRED");
+  assert.equal(capturesOf(r.pi).length, 0);
   const body = cmd("capture", regBinding(r), { link: { profileId: "a00000000000000000000aa1" } });
   const one = await cap(r, body, { "Idempotency-Key": key });
   const two = await cap(r, body, { "Idempotency-Key": key });
@@ -352,8 +389,15 @@ test("B11 manual record: 201 with the bound purpose; identical repeat -> 200 sam
   assert.equal(first.status, 201, first.text.slice(0, 200));
   const row = await fresh(first.data.paymentId);
   assert.equal(row.purpose, "courseRegistration"); assert.equal(row.status, "manual_review"); assert.equal(row.audit.createdBy, "internal:staff-approver");
+  const replay = await J("", recordCmd(reg));
+  assert.equal(replay.status, 201); assert.equal(replay.text, first.text); // cached identical response
+  // same key, different body -> 409 from the response cache
+  const conflict = await J("", recordCmd(reg, { amount: 9999 }));
+  assert.equal(conflict.status, 409); assert.equal(conflict.code, "IDEMPOTENCY_CONFLICT");
+  clearIdempotencyCache(); // after TTL / restart the stored state decides
   const again = await J("", recordCmd(reg));
   assert.equal(again.status, 200); assert.equal(again.data.paymentId, first.data.paymentId); assert.equal(again.data.alreadyRecorded, true);
+  clearIdempotencyCache();
   const diff = await J("", recordCmd(reg, { amount: 9999 }));
   assert.equal(diff.status, 409); assert.equal(diff.code, "ALREADY_RECORDED");
   const reg2 = oid();
@@ -377,6 +421,7 @@ test("B12 manual post / void transition table, incl. concurrent posts posting th
   assert.ok(posts.some((p) => p.status === 200 && !p.data.alreadyPosted), posts.map((p) => p.text.slice(0, 120)).join(" | "));
   assert.equal(await GL.countDocuments({ tenantId: TA, docNo: `INV-EVT-${reg}` }), 1);
   assert.equal((await fresh(pid)).status, "payment_required");
+  clearIdempotencyCache(); // state-based idempotency (beyond the response cache)
   const repeat = await J("/post", cmd("manual_post", b, { link: { profileId: P } }));
   assert.equal(repeat.status, 200); assert.equal(repeat.data.alreadyPosted, true);
   const v = await J("/void", cmd("manual_void", b, { reason: "reject" }));
@@ -386,11 +431,14 @@ test("B12 manual post / void transition table, incl. concurrent posts posting th
   const rec2 = await J("", recordCmd(reg2, { method: "comp", amount: 0 }));
   const b2 = { domain: "registration", registrationId: reg2, purpose: "courseRegistration", paymentId: rec2.data.paymentId };
   assert.equal((await J("/void", cmd("manual_void", b2, { reason: "reject" }))).data.voided, true);
+  clearIdempotencyCache();
   const v2 = await J("/void", cmd("manual_void", b2, { reason: "reject" }));
   assert.equal(v2.status, 200); assert.equal(v2.data.alreadyVoided, true);
   const p2 = await J("/post", cmd("manual_post", b2, { link: { profileId: P } }));
   assert.equal(p2.status, 409); assert.equal(p2.code, "ALREADY_VOIDED");
-  // voiding freed the record key: the registration can be recorded again
+  // voiding freed the record key: the registration can be recorded again (once the cached
+  // response of the first record has expired - see b7-payment-contract.md "manual_record key")
+  clearIdempotencyCache();
   assert.equal((await J("", recordCmd(reg2, { method: "comp", amount: 0 }))).status, 201);
   // a bound post naming a different registration than the row's -> 409
   const mm = await J("/post", cmd("manual_post", { ...b, registrationId: oid() }, { link: { profileId: P } }));
