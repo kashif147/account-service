@@ -94,14 +94,15 @@ export const requireCrmOrOwnMember = createRequireCrmOrOwnMember();
 async function defaultLoadPaymentByIntent(tenantId, paymentIntentId) {
   const { default: Payment } = await import("../models/payment.model.js");
   return Payment.findOne({ tenantId, "stripe.paymentIntentId": paymentIntentId })
-    .select({ _id: 1, audit: 1 })
+    .select({ _id: 1, audit: 1, payer: 1 })
     .lean();
 }
 
 /**
  * `/payments/intents/:paymentIntentId/...` and `/payments/by-stripe/:paymentIntentId`:
  * internal S2S, CRM staff, or a PORTAL caller acting on a Payment it created itself
- * (audit.createdBy === verified ctx.userId, looked up in the trusted tenant only).
+ * (payer.userId - or audit.createdBy for a legacy row without payer - === verified
+ * ctx.userId, looked up in the trusted tenant only).
  */
 export function createRequireInternalOrCrmOrIntentOwner(deps = {}) {
   const loadPaymentByIntent = deps.loadPaymentByIntent || defaultLoadPaymentByIntent;
@@ -118,7 +119,12 @@ export function createRequireInternalOrCrmOrIntentOwner(deps = {}) {
     } catch (err) {
       return next(err);
     }
-    if (payment && norm(payment.audit?.createdBy) === userId) return next();
+    // Owner = the verified payer bound at intent creation (payer.userId); a legacy row
+    // created before payer existed falls back to audit.createdBy.
+    const owner = payment
+      ? norm(payment.payer ? payment.payer.userId : payment.audit?.createdBy)
+      : "";
+    if (owner && owner === userId) return next();
     return next(notOwner());
   };
 }

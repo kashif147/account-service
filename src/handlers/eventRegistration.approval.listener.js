@@ -29,10 +29,25 @@ function resolveEventIncomeCode(eventCategoryCode) {
   return EVENT_INCOME_CODE_BY_CATEGORY[eventCategoryCode] || DEFAULT_EVENTS_INCOME_CODE;
 }
 
-export async function publishPaymentStatusUpdated({ tenantId, paymentId, registrationId, status }) {
+// paymentIntentId (additive, P5 payer binding): lets events-service match the event to the
+// registration's own PaymentIntent, so a status for another intent never changes it.
+export async function publishPaymentStatusUpdated({
+  tenantId,
+  paymentId,
+  paymentIntentId,
+  registrationId,
+  status,
+}) {
   const result = await publisher.publish(
     "payments.events.status.updated.v1",
-    { tenantId, paymentId, registrationId, status, ledgerDomain: "events" },
+    {
+      tenantId,
+      paymentId,
+      ...(paymentIntentId ? { paymentIntentId: String(paymentIntentId) } : {}),
+      registrationId,
+      status,
+      ledgerDomain: "events",
+    },
     {
       tenantId,
       exchange: "accounts.events",
@@ -136,6 +151,7 @@ export async function postJournalForEventPayment(payment, ctx) {
   await publishPaymentStatusUpdated({
     tenantId,
     paymentId: String(payment._id),
+    paymentIntentId: payment.stripe?.paymentIntentId || null,
     registrationId: payment.registrationId,
     status: "succeeded",
   });
@@ -272,11 +288,24 @@ export async function postManualEventPayment({
   bound = null,
 }) {
   const Payment = (await import("../models/payment.model.js")).default;
+  const { adoptLegacyRegistrationHolder, isBindingDuplicateKeyError } = await import("../services/payments.service.js");
   const cur = String(currency || "eur").toLowerCase();
+  const reg = String(registrationId);
 
   const sameRecord = (p) =>
     p.mode === "external" && p.status === "manual_review" && Number(p.amount) === Number(amount) &&
     String(p.currency || "").toLowerCase() === cur && recordedMethod(p) === method;
+  // A conflicting holder that is itself a recorded manual payment -> ALREADY_RECORDED (#22); any other
+  // live payment of the registration (card intent, legacy row) -> REGISTRATION_ALREADY_HAS_PAYMENT (#18).
+  const conflict = async (holder) =>
+    holder && holder.mode === "external"
+      ? appError(409, "ALREADY_RECORDED", "A payment is already recorded for this registration")
+      : appError(409, "REGISTRATION_ALREADY_HAS_PAYMENT", "This registration already has a payment");
+
+  // P5 payer binding: a manual/comp/invoice record is a registration's payment like any Stripe row,
+  // so it claims the same {tenantId, registrationBinding} unique index at creation (legacy holders
+  // adopted first). The per-registration idempotencyKey (#22) is an ADDITIONAL key, not a substitute.
+  await adoptLegacyRegistrationHolder({ tenantId, registrationId: reg });
   const existing = await Payment.find({
     tenantId,
     registrationId,
@@ -286,9 +315,7 @@ export async function postManualEventPayment({
   if (existing.length === 1 && sameRecord(existing[0])) {
     return { paymentId: existing[0]._id.toString(), alreadyRecorded: true };
   }
-  if (existing.length) {
-    throw await appError(409, "ALREADY_RECORDED", "A payment is already recorded for this registration");
-  }
+  if (existing.length) throw await conflict(existing.find((p) => p.registrationBinding === reg) || existing[0]);
 
   let payment;
   try {
@@ -297,6 +324,7 @@ export async function postManualEventPayment({
       purpose,
       ledgerDomain: "events",
       registrationId,
+      registrationBinding: reg,
       ...(profileId ? { profileId } : {}),
       ...(memberId ? { memberId } : {}),
       productCode,
@@ -316,11 +344,13 @@ export async function postManualEventPayment({
       },
     });
   } catch (e) {
-    if (e?.code !== 11000) throw e;
-    // Lost a concurrent record of the same registration: answer from the winner.
-    const winner = await Payment.findOne({ tenantId, idempotencyKey: MANUAL_RECORD_KEY(registrationId) }).lean();
-    if (winner && sameRecord(winner)) return { paymentId: winner._id.toString(), alreadyRecorded: true };
-    throw await appError(409, "ALREADY_RECORDED", "A payment is already recorded for this registration");
+    if (e?.code !== 11000 && !isBindingDuplicateKeyError(e)) throw e;
+    // Lost a concurrent claim (binding index or record key): answer from the current holder.
+    const holder =
+      (await Payment.findOne({ tenantId, registrationBinding: reg }).lean()) ||
+      (await Payment.findOne({ tenantId, idempotencyKey: MANUAL_RECORD_KEY(registrationId) }).lean());
+    if (holder && sameRecord(holder)) return { paymentId: holder._id.toString(), alreadyRecorded: true };
+    throw await conflict(holder);
   }
   await pushBoundAudit(Payment, payment, bound, "manual_review");
   return { paymentId: payment._id.toString() };
@@ -338,7 +368,7 @@ export async function postManualEventPayment({
 export async function postManualEventPaymentPost({ tenantId, paymentId, method, profileId, memberId, userId, bound = null }) {
   const Payment = (await import("../models/payment.model.js")).default;
 
-  const payment = await Payment.findOne({ _id: paymentId, tenantId });
+  let payment = await Payment.findOne({ _id: paymentId, tenantId });
   if (!payment) throw await appError(404, "PAYMENT_NOT_FOUND", "Payment not found");
   if (payment.mode !== "external") {
     throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment is not a manual payment");
@@ -357,6 +387,16 @@ export async function postManualEventPaymentPost({ tenantId, paymentId, method, 
   if (payment.status !== "manual_review") {
     throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment cannot be posted now");
   }
+  // P5 payer binding: only the registration's CURRENT payment may be posted. A record that was
+  // released (e.g. replaced by a card intent) can never post; a legacy record is adopted first.
+  if (payment.registrationId && payment.registrationBinding !== String(payment.registrationId)) {
+    const { adoptLegacyRegistrationHolder } = await import("../services/payments.service.js");
+    await adoptLegacyRegistrationHolder({ tenantId, registrationId: payment.registrationId });
+    payment = await Payment.findOne({ _id: paymentId, tenantId });
+    if (payment.registrationBinding !== String(payment.registrationId)) {
+      throw await appError(409, "PAYMENT_NOT_BOUND", "This payment is no longer the registration's payment");
+    }
+  }
 
   // P5: profileId / memberId are set once - never overwritten from the request body
   // (409 PROFILE_ALREADY_BOUND, nothing posted).
@@ -366,7 +406,12 @@ export async function postManualEventPaymentPost({ tenantId, paymentId, method, 
 
   const actor = bound ? `internal:${bound.cmd.actorUserId}` : userId || "system";
   const claimed = await Payment.findOneAndUpdate(
-    { _id: payment._id, tenantId, status: "manual_review" },
+    {
+      _id: payment._id,
+      tenantId,
+      status: "manual_review",
+      ...(payment.registrationId ? { registrationBinding: String(payment.registrationId) } : {}),
+    },
     { $set: { status: "processing", "audit.updatedBy": actor } },
     { new: true },
   );
@@ -374,6 +419,10 @@ export async function postManualEventPaymentPost({ tenantId, paymentId, method, 
     const now = await Payment.findOne({ _id: payment._id, tenantId }).lean();
     if (now && (now.status === "succeeded" || now.status === "payment_required")) {
       return { paymentId: payment._id.toString(), alreadyPosted: true };
+    }
+    if (now?.status === "canceled") throw await appError(409, "ALREADY_VOIDED", "This payment was voided and cannot be posted");
+    if (now && payment.registrationId && now.registrationBinding !== String(payment.registrationId)) {
+      throw await appError(409, "PAYMENT_NOT_BOUND", "This payment is no longer the registration's payment");
     }
     throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment is being changed by another request");
   }
@@ -416,9 +465,19 @@ export async function voidManualEventPayment({ tenantId, paymentId, userId, boun
     throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment is not a manual payment");
   }
   const actor = bound ? `internal:${bound.cmd.actorUserId}` : userId || "system";
+  // Atomic: only an unposted record is voided; the same update frees the per-registration record
+  // key (#22) AND releases the registration binding (#18), so a concurrent post/void cannot both apply.
   const voided = await Payment.findOneAndUpdate(
     { _id: payment._id, tenantId, status: "manual_review" },
-    { $set: { status: "canceled", "audit.updatedBy": actor }, $unset: { idempotencyKey: "" } },
+    {
+      $set: {
+        status: "canceled",
+        "audit.updatedBy": actor,
+        bindingReleasedAt: new Date(),
+        bindingReleaseReason: "REPLACE_RELEASED_BINDING:manual_void",
+      },
+      $unset: { idempotencyKey: "", registrationBinding: "" },
+    },
     { new: true },
   );
   if (voided) {

@@ -40,6 +40,31 @@ const AuditSubSchema = new Schema(
   { _id: false }
 );
 
+// Who created the intent (P5 payer binding). Set ONCE at POST /payments/intents from the
+// VERIFIED caller (never body/metadata) and never changed afterwards. userId is null for a
+// genuine internal S2S call (forwardedInternalContext's x-user-id is not verified identity).
+// Legacy rows (created before this field) have no payer; owner checks then fall back to
+// audit.createdBy.
+const PayerSubSchema = new Schema(
+  {
+    userId: { type: String, default: null },
+    userType: { type: String, default: null }, // "PORTAL" | "CRM" | "INTERNAL" | other verified type
+  },
+  { _id: false }
+);
+
+// What the intent pays for (P5 payer binding), set ONCE at creation: the event/course a
+// portal member is paying for before a Registration exists, or the registration itself
+// for intents events-service creates with a registrationId. attach-registration requires
+// the registration's event/course to equal this target.
+const TargetSubSchema = new Schema(
+  {
+    entityType: { type: String, enum: ["event", "course", "registration"], required: true },
+    entityId: { type: String, required: true },
+  },
+  { _id: false }
+);
+
 const PaymentAuditEventSubSchema = new Schema(
   {
     eventId: { type: String, required: true },
@@ -129,6 +154,22 @@ const PaymentSchema = new Schema(
     external: { type: ExternalSubSchema, default: {} },
     metadata: { type: Map, of: String },
     audit: { type: AuditSubSchema, default: {} },
+    payer: { type: PayerSubSchema, default: undefined },
+    target: { type: TargetSubSchema, default: undefined },
+    // Set when attach-registration binds registrationId (single attach, never re-bound).
+    attachedAt: { type: Date },
+    // P5 active registration binding: equals registrationId on the ONE Stripe Payment that
+    // currently holds the registration (unique per tenant, index below). Claimed atomically
+    // at creation (events-service CRM/retry intents) or attach (portal intents); released
+    // only by the named replacement transition (holder can no longer take money - see
+    // payments.service.js releasableBindingFilter). Manual records claim it at creation; legacy
+    // rows are adopted on first contention or by the backfill script.
+    registrationBinding: { type: String, default: undefined },
+    bindingReleasedAt: { type: Date },
+    // Set when a pre-binding (legacy / manual) row was adopted into the binding index
+    // (payments.service.js adoptLegacyRegistrationHolder or scripts/backfill-registration-binding).
+    bindingAdoptedAt: { type: Date },
+    bindingReleaseReason: { type: String },
     // Deferred payment link (PaymentLink._id) - set only for link payments, which use the
     // lifecycle state machine authoritatively and never publish application.status.updated.
     paymentLinkId: { type: Schema.Types.ObjectId, ref: "PaymentLink", default: null },
@@ -187,6 +228,12 @@ PaymentSchema.index({
   createdAt: -1,
 });
 
+// P5: at most one Payment holds the active binding of a registration (see registrationBinding).
+PaymentSchema.index(
+  { tenantId: 1, registrationBinding: 1 },
+  { unique: true, partialFilterExpression: { registrationBinding: { $type: "string" } } }
+);
+
 PaymentSchema.index(
   { tenantId: 1, idempotencyKey: 1 },
   { unique: true, partialFilterExpression: { idempotencyKey: { $type: "string" } } }
@@ -202,6 +249,10 @@ export const zCreateIntent = z.object({
   ]),
   ledgerDomain: z.enum(["membership", "events"]).optional(),
   registrationId: z.string().optional(),
+  // P5 payer binding: the event/course this intent pays for (registration intents). The
+  // live portal still sends only metadata.eventId, which createIntent accepts as a fallback.
+  entityType: z.enum(["event", "course"]).optional(),
+  entityId: z.string().optional(),
   profileId: z.string().optional(),
   productCode: z.string().optional(),
   eventCategoryCode: z.string().optional(),
