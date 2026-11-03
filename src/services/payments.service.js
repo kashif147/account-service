@@ -1528,6 +1528,53 @@ export async function attachRegistrationToPaymentIntent(paymentIntentId, ctx = {
   };
 }
 
+const LINK_FIELDS = ["profileId", "memberId"];
+
+function unsetOrEqual(field, value) {
+  return {
+    $or: [{ [field]: { $exists: false } }, { [field]: null }, { [field]: "" }, { [field]: value }],
+  };
+}
+
+/**
+ * P5: attach profileId / memberId to a Payment ONCE. A value is written only while the field
+ * is unset (or already equal); a different existing value is never overwritten - the whole
+ * update is refused with 409 PROFILE_ALREADY_BOUND and nothing changes. Application-fee
+ * payments are attributed through their applicationId and never accept a link (400).
+ * Conditional single update in the payment's tenant, so two concurrent different links cannot
+ * both win.
+ */
+export async function setPaymentLinkOnce(payment, linkFields = {}) {
+  const set = {};
+  for (const f of LINK_FIELDS) {
+    const v = linkFields?.[f] == null ? "" : String(linkFields[f]).trim();
+    if (v) set[f] = v;
+  }
+  if (Object.keys(set).length === 0) return { changed: false };
+  if (payment.purpose === "applicationFee") {
+    throw new AppError(
+      "profileId/memberId cannot be supplied for an application payment",
+      400,
+      "LINK_NOT_ALLOWED",
+    );
+  }
+  const filter = {
+    _id: payment._id,
+    tenantId: payment.tenantId,
+    $and: Object.entries(set).map(([f, v]) => unsetOrEqual(f, v)),
+  };
+  const r = await Payment.updateOne(filter, { $set: set });
+  if (!r || r.matchedCount === 0) {
+    throw new AppError(
+      "This payment is already linked to a different profile or member",
+      409,
+      "PROFILE_ALREADY_BOUND",
+    );
+  }
+  for (const [f, v] of Object.entries(set)) payment[f] = v;
+  return { changed: r.modifiedCount > 0 };
+}
+
 export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields = {}) {
   if (!paymentIntentId) {
     throw AppError.badRequest("paymentIntentId is required");
@@ -1541,17 +1588,9 @@ export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields
   // immediately before capture - reconcileStripeEvent below re-reads the
   // Payment doc fresh from the DB, so this is picked up by GL posting
   // (postJournalForPayment) without any separate reassignment step.
-  if (linkFields.profileId || linkFields.memberId) {
-    await Payment.updateOne(
-      { _id: payment._id },
-      {
-        $set: {
-          ...(linkFields.profileId ? { profileId: linkFields.profileId } : {}),
-          ...(linkFields.memberId ? { memberId: linkFields.memberId } : {}),
-        },
-      },
-    );
-  }
+  // P5: set-once only - an already-linked payment is never re-pointed at another profile or
+  // member (409 PROFILE_ALREADY_BOUND, nothing captured).
+  await setPaymentLinkOnce(payment, linkFields);
 
   const current = await stripe.paymentIntents.retrieve(paymentIntentId);
 

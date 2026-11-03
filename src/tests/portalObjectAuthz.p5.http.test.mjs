@@ -343,13 +343,21 @@ test("POST /payments/intents stays reachable for portal self-pay (paymentIntentG
 
 // ---------------- journal: events manual payment ----------------
 test("events manual-payment (+post, +void): portal denied; CRM event staff and internal pass", async () => {
+  // P5 containment: CRM callers also need the exact events business permission
+  // (events:create to record, events:write to post / void).
+  const CRM_EVENTS = bearer({ userType: "CRM", id: "staff-ev", roles: ["EO"], permissions: ["events:create", "events:write"] });
   for (const url of ["/api/journal/events/manual-payment", "/api/journal/events/manual-payment/post", "/api/journal/events/manual-payment/void"]) {
     const r = await call("POST", url, { auth: PORTAL_A1, body: { method: "comp" } });
     assert.equal(r.status, 403, url);
     assert.equal(r.code, "CRM_ONLY", url);
     assert.equal((await call("POST", url, { auth: UNKNOWN_TYPE, body: {} })).status, 403, url);
-    // empty body -> handler validation 400 proves authz passed without writing anything
-    assert.equal((await call("POST", url, { auth: CRM_MO, body: {} })).status, 400, `CRM ${url}`);
+    if (url.endsWith("/manual-payment")) {
+      const mo = await call("POST", url, { auth: CRM_MO, body: {} });
+      assert.equal(mo.status, 403, `CRM without events:create ${url}`);
+      assert.equal(mo.code, "PAYMENT_MUTATION_PERMISSION_REQUIRED", url);
+    }
+    // empty body -> validation 400 proves authz passed without writing anything
+    assert.equal((await call("POST", url, { auth: CRM_EVENTS, body: {} })).status, 400, `CRM ${url}`);
     assert.equal((await call("POST", url, { headers: INTERNAL, body: {} })).status, 400, `internal ${url}`);
   }
 });

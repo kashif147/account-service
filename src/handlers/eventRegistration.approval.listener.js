@@ -304,8 +304,10 @@ export async function postManualEventPaymentPost({ tenantId, paymentId, method, 
     return { paymentId: payment._id.toString(), alreadyPosted: true };
   }
 
-  payment.profileId = profileId || payment.profileId;
-  if (memberId) payment.memberId = memberId;
+  // P5: profileId / memberId are set once - never overwritten from the request body
+  // (409 PROFILE_ALREADY_BOUND, nothing posted).
+  const { setPaymentLinkOnce } = await import("../services/payments.service.js");
+  await setPaymentLinkOnce(payment, { profileId, memberId });
   payment.audit = { ...(payment.audit || {}), updatedBy: userId || "system" };
   await payment.save();
 

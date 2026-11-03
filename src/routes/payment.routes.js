@@ -14,6 +14,7 @@ import {
 import { AppError } from "../errors/AppError.js";
 import zodValidate from "../middlewares/zodValidate.js";
 import { idempotency } from "../middlewares/idempotency.js";
+import { createRequirePaymentMutationAuthority } from "../middlewares/paymentMutationAuthority.middleware.js";
 import {
   createPaymentIntent,
   captureExistingPaymentIntent,
@@ -92,10 +93,13 @@ router.get(
 
 // capture / cancel: CRM approval / rejection flows (profile-service applications,
 // events-service registrations) forwarding the CRM approver's identity, or internal S2S.
-// Never a PORTAL member: capturing posts the GL.
+// Never a PORTAL member: capturing posts the GL. P5 containment: a CRM caller needs the exact
+// business permission of the stored row's domain (application:write / events:write), never
+// payments:write - see paymentMutationAuthority.middleware.js.
 router.post(
   "/intents/:paymentIntentId/capture",
   requireInternalOrCrm,
+  createRequirePaymentMutationAuthority("capture"),
   idempotency(),
   captureExistingPaymentIntent
 );
@@ -103,6 +107,7 @@ router.post(
 router.post(
   "/intents/:paymentIntentId/cancel",
   requireInternalOrCrm,
+  createRequirePaymentMutationAuthority("cancel"),
   idempotency(),
   cancelExistingPaymentIntent
 );
