@@ -238,6 +238,11 @@ export function isReleasableBindingRow(row = {}) {
 
 const UNPOSTED_MANUAL_FILTER = { mode: "external", status: "manual_review" };
 
+// P5 F1: uncaptured, not-yet-authorised Stripe states that cancelPaymentIntent cancels at Stripe
+// (in addition to requires_capture). A settled/captured row is never overwritten by a cancel.
+const CANCELLABLE_UNAUTHORISED_STRIPE_STATUSES = ["requires_payment_method", "requires_confirmation", "requires_action"];
+const CANCEL_NEVER_OVERWRITE_STATUSES = ["succeeded", "partially_refunded", "refunded", "refund_required"];
+
 /**
  * P5 legacy participation. Rows written before registrationBinding existed (legacy Stripe
  * rows, manual/comp/invoice records) carry registrationId but no binding, so the unique index
@@ -706,6 +711,19 @@ export function withholdForeignPayerSecret(response, payment, payer = {}) {
   return { ...response, clientSecret: null, checkoutUrl: null, secretWithheld: true };
 }
 
+/**
+ * P5 (b10) application attempt reuse: the reused intent's clientSecret/checkoutUrl go back only to
+ * the attempt's effective payer (payer.userId, or audit.createdBy for a legacy row that predates the
+ * payer field - those rows carry no payer.userType, so withholdForeignPayerSecret would hand them to
+ * any caller). A payment-link row is never handed back here: its payment channel is the emailed
+ * Checkout link. The attempt is still reused (no second card hold); only the secret is withheld.
+ */
+export function withholdApplicationAttemptSecret(response, payment, payer = {}) {
+  const owner = effectivePayerUserId(payment);
+  if (payment?.source !== "payment-link" && owner && owner === normId(payer.userId)) return response;
+  return { ...response, clientSecret: null, checkoutUrl: null, secretWithheld: true };
+}
+
 async function refreshPaymentFromStripe(payment, pi, ctx = {}) {
   const status = paymentIntentStatusToDomain(pi);
   const set = {
@@ -771,10 +789,14 @@ async function resolveReusablePaymentAttempt({
     return { reusablePayment: null, attemptNumber: 1 };
   }
 
+  // P5 (b8): an application's attempts are one sequence whatever purpose value the portal sent
+  // ("subscriptionFee" historically, "applicationFee" once the portal sends the explicit purpose).
+  // Matching on the exact purpose would miss the earlier attempt during that switch and leave two
+  // live PaymentIntents (two card holds) for one application.
   const latestAttempt = await Payment.findOne({
     tenantId: ctx.tenantId,
     [matchField]: matchValue,
-    purpose,
+    purpose: matchField === "applicationId" ? { $in: ["applicationFee", "subscriptionFee"] } : purpose,
     mode: "stripe",
     "stripe.paymentIntentId": { $exists: true, $ne: null },
   })
@@ -786,6 +808,11 @@ async function resolveReusablePaymentAttempt({
   }
 
   const nextAttemptNumber = (latestAttempt.attemptNumber || 1) + 1;
+  // P5 (b10): a superseded application attempt is never silently reactivated - the replacement is
+  // a fresh attempt (the superseded row stays inactive and cannot be captured: isActiveAttempt gate).
+  if (matchField === "applicationId" && latestAttempt.isActiveAttempt === false) {
+    return { reusablePayment: null, attemptNumber: nextAttemptNumber };
+  }
   let pi;
   try {
     pi = await stripe.paymentIntents.retrieve(
@@ -978,6 +1005,10 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         }
       : null;
   const reuseScope = (query) => withAnd(withAnd(query, ownerScope), targetScope);
+  // P5 (b10): application rows returned by an idempotency/duplicate match follow the same
+  // payer-only secret rule as attempt reuse (a CRM caller is not owner-scoped above).
+  const applicationSecretGate = (response, row) =>
+    isApplicationPayment ? withholdApplicationAttemptSecret(response, row, payer) : response;
 
   // H-11: portal callers may only pay for themselves, and application fees must match the
   // synced catalogue price (see paymentIntentGuard.service.js for the per-kind source).
@@ -1021,7 +1052,8 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
       logger,
     });
     if (attemptDecision.reusablePayment) {
-      return withholdForeignPayerSecret(
+      const withhold = isApplicationPayment ? withholdApplicationAttemptSecret : withholdForeignPayerSecret;
+      return withhold(
         await buildIntentResponse(attemptDecision.reusablePayment, stripe),
         attemptDecision.reusablePayment,
         payer,
@@ -1072,7 +1104,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         idempotencyKey: ctx.idempotencyKey,
       }),
     )
-      .select("stripe status _id memberId applicationId isActiveAttempt")
+      .select("stripe status _id memberId applicationId isActiveAttempt payer audit source")
       .lean();
     if (existingByIdem) {
       if (
@@ -1099,7 +1131,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         },
         "Found existing payment by idempotency key - returning existing payment",
       );
-      return await buildIntentResponse(existingByIdem, stripe);
+      return applicationSecretGate(await buildIntentResponse(existingByIdem, stripe), existingByIdem);
       }
     }
   }
@@ -1144,7 +1176,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
     }
 
     const existingDuplicate = await Payment.findOne(reuseScope(duplicateCheck))
-      .select("stripe status _id memberId applicationId isActiveAttempt")
+      .select("stripe status _id memberId applicationId isActiveAttempt payer audit source")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -1203,7 +1235,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         }
       }
 
-        return await buildIntentResponse(existingDuplicate, stripe);
+        return applicationSecretGate(await buildIntentResponse(existingDuplicate, stripe), existingDuplicate);
       }
     }
   }
@@ -1235,7 +1267,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
     }
 
     const recentPayment = await Payment.findOne(reuseScope(lastSecondCheck))
-      .select("stripe status _id memberId applicationId createdAt isActiveAttempt")
+      .select("stripe status _id memberId applicationId createdAt isActiveAttempt payer audit source")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -1296,7 +1328,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         }
       }
 
-        return await buildIntentResponse(recentPayment, stripe);
+        return applicationSecretGate(await buildIntentResponse(recentPayment, stripe), recentPayment);
       }
     }
   }
@@ -1430,7 +1462,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         tenantId: ctx.tenantId,
         "stripe.checkoutSessionId": stripeIds.checkoutSessionId,
       })
-        .select("stripe status _id")
+        .select("stripe status _id payer audit source")
         .lean();
       if (existingBySession) {
         const logger = (await import("../config/logger.js")).default;
@@ -1442,7 +1474,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
           },
           "Payment with this Stripe checkout session ID already exists - returning existing payment",
         );
-        return await buildIntentResponse(existingBySession, stripe);
+        return applicationSecretGate(await buildIntentResponse(existingBySession, stripe), existingBySession);
       }
     }
   } else {
@@ -1472,7 +1504,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
       if (registrationId) recentCheck.registrationId = registrationId;
 
       const recentWithIntent = await Payment.findOne(reuseScope(recentCheck))
-        .select("stripe status _id memberId applicationId isActiveAttempt")
+        .select("stripe status _id memberId applicationId isActiveAttempt payer audit source")
         .lean();
 
       if (recentWithIntent && recentWithIntent.stripe?.paymentIntentId) {
@@ -1518,7 +1550,7 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
           }
         }
 
-          return await buildIntentResponse(recentWithIntent, stripe);
+          return applicationSecretGate(await buildIntentResponse(recentWithIntent, stripe), recentWithIntent);
         }
       }
     }
@@ -1769,7 +1801,8 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
         {
           tenantId: ctx.tenantId,
           ...(isApplicationPayment ? { applicationId } : { registrationId }),
-          purpose: parsed.purpose,
+          // Same attempt sequence as resolveReusablePaymentAttempt (P5 b8): both application purposes.
+          purpose: isApplicationPayment ? { $in: ["applicationFee", "subscriptionFee"] } : parsed.purpose,
           _id: { $ne: payment._id },
           isActiveAttempt: { $ne: false },
         },
@@ -2602,10 +2635,11 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}, opts = {}) 
 
   if (current.status === "canceled") {
     await Payment.updateOne(
-      { _id: payment._id },
+      { _id: payment._id, tenantId: payment.tenantId, status: { $nin: CANCEL_NEVER_OVERWRITE_STATUSES } },
       {
         $set: {
           status: "canceled",
+          "stripe.status": "canceled",
           "audit.updatedBy": ctx.userId || ctx.memberId || "system",
         },
       },
@@ -2642,53 +2676,68 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}, opts = {}) 
     };
   }
 
-  if (current.status !== "requires_capture") {
-    const nextStatus =
-      current.status === "requires_payment_method"
-        ? "payment_required"
-        : normalizeStripeStatusForPayment(current.status);
-    await Payment.updateOne(
-      { _id: payment._id },
-      {
-        $set: {
-          status: nextStatus,
-          "stripe.status": current.status,
-          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
-        },
-      },
-    );
-    return {
-      ok: true,
-      canceled: false,
-      status: nextStatus,
-      stripeStatus: current.status,
-      paymentIntentId,
-      paymentId: payment._id.toString(),
-    };
+  // P5 F1: "processing" is the only uncaptured, non-terminal state Stripe will not cancel (money is
+  // in flight). Refuse without touching the row so the caller can retry once Stripe settles.
+  if (current.status === "processing") {
+    throw new AppError("Payment is processing at Stripe; retry when it settles", 409, "PAYMENT_PROCESSING");
+  }
+  if (current.status !== "requires_capture" && !CANCELLABLE_UNAUTHORISED_STRIPE_STATUSES.includes(current.status)) {
+    throw new AppError(`PaymentIntent in status ${current.status} cannot be cancelled`, 409, "TRANSITION_NOT_ALLOWED");
   }
 
-  const canceled = await stripe.paymentIntents.cancel(
-    paymentIntentId,
-    {},
-    { idempotencyKey: stripeIdempotencyKey("cancel", payment._id.toString(), paymentIntentId) },
-  );
+  // Cancel every uncaptured, non-terminal intent at Stripe - an authorised hold (requires_capture)
+  // AND a not-yet-authorised intent (requires_payment_method / requires_confirmation / requires_action).
+  // Before F1 an unauthorised intent was left OPEN (200 canceled:false): its clientSecret could still
+  // confirm a payment for a rejected / cancelled registration. The key is server-derived and carries the
+  // observed Stripe status, so a retry in the same state reuses it, and a state change (e.g. a confirm
+  // racing this cancel) never replays an earlier cached Stripe error for a different state.
+  let canceled;
+  try {
+    canceled = await stripe.paymentIntents.cancel(
+      paymentIntentId,
+      {},
+      {
+        idempotencyKey: stripeIdempotencyKey(
+          current.status === "requires_capture" ? "cancel" : `cancel-${current.status}`,
+          payment._id.toString(),
+          paymentIntentId,
+        ),
+      },
+    );
+  } catch (err) {
+    // Nothing is written: no status change, no binding release. If the intent moved on
+    // concurrently (confirmed / captured / already canceled) the caller retries and the next
+    // attempt takes the branch for the NEW state; anything else is a retryable upstream failure.
+    if (err instanceof AppError) throw err;
+    throw new AppError("Stripe cancel failed; nothing was changed - retry", 502, "STRIPE_CANCEL_FAILED");
+  }
+  const nextStatus = normalizeStripeStatusForPayment(canceled.status);
 
-  await Payment.updateOne(
-    { _id: payment._id },
+  // One conditional update, only on a row that is not (meanwhile) settled. The registration binding is
+  // NOT unset here: a "canceled" holder is releasable (releasableBindingFilter), and the ONLY way a
+  // registration moves to another intent stays the named REPLACE_RELEASED_BINDING transition.
+  const isCanceled = canceled.status === "canceled";
+  const upd = await Payment.updateOne(
+    { _id: payment._id, tenantId: payment.tenantId, status: { $nin: CANCEL_NEVER_OVERWRITE_STATUSES } },
     {
       $set: {
-        status: normalizeStripeStatusForPayment(canceled.status),
+        status: nextStatus,
+        "stripe.status": canceled.status,
         "audit.updatedBy": ctx.userId || ctx.memberId || "system",
       },
     },
   );
+  if (upd.matchedCount === 0) {
+    const fresh = await Payment.findOne({ _id: payment._id, tenantId: payment.tenantId }).select({ status: 1 }).lean();
+    throw new AppError(`Payment moved to ${fresh?.status || "unknown"} during cancel`, 409, "TRANSITION_NOT_ALLOWED");
+  }
 
-  await recordBoundAudit(payment, bound, normalizeStripeStatusForPayment(canceled.status), ctx);
+  await recordBoundAudit(payment, bound, nextStatus, ctx);
 
   return {
     ok: true,
-    canceled: canceled.status === "canceled",
-    status: normalizeStripeStatusForPayment(canceled.status),
+    canceled: isCanceled,
+    status: nextStatus,
     paymentIntentId,
     paymentId: payment._id.toString(),
   };
