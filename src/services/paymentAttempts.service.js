@@ -10,7 +10,7 @@ import GLTransaction from "../models/glTransaction.model.js";
 import { AppError } from "../errors/AppError.js";
 import { requireTenantId } from "../helpers/tenantScope.js";
 import { logWarn } from "../middlewares/logger.mw.js";
-import { resolveAttemptDisplayFields } from "./stripe.payment.enrichment.service.js";
+import { extractIdentifiers, resolveAttemptDisplayFields } from "./stripe.payment.enrichment.service.js";
 
 export const LIFECYCLE_STATUSES = Object.freeze([
   "pending",
@@ -243,17 +243,49 @@ export function deriveAttemptMoney(p, refundTotal) {
 }
 
 /**
+ * Member identity of an attempt, derived the way GET /journal/stripe-payments derives it for its
+ * receipt rows: the receipt's linked entry ids (extractIdentifiers), with the Payment's own
+ * memberId / applicationId taking precedence when set.
+ */
+export function attemptIdentifiers(p, receiptDoc) {
+  const entry = receiptDoc ? extractIdentifiers(receiptDoc.entries) : { memberId: null, applicationId: null };
+  return {
+    entryMemberId: str(entry.memberId),
+    entryApplicationId: str(entry.applicationId),
+    memberId: str(p.memberId) || str(entry.memberId),
+    applicationId: str(p.applicationId) || str(entry.applicationId),
+  };
+}
+
+/**
+ * True only when the attempt is provably an UNAPPROVED-application payment under the rule the
+ * stripe-payments grid used (CRM isUnapprovedMemberRow on the enrichment-resolved memberId):
+ * no memberId on the Payment, none on the linked receipt entries, and no member resolved by the
+ * shared enrichment (memberId, or a processed application's membership number). Fails closed:
+ * an application lookup that did not succeed, or missing enrichment, means false.
+ */
+export function isProvablyUnapprovedApplication(p, ids, identity) {
+  if (str(p.memberId) || ids.entryMemberId) return false;
+  if (!ids.applicationId) return false;
+  if (ids.entryApplicationId && str(p.applicationId) && ids.entryApplicationId !== str(p.applicationId)) return false;
+  if (!identity || identity.applicationOutcome !== "ok") return false;
+  if (identity.resolvedMemberId) return false;
+  if (identity.applicationProcessed || identity.applicationMembershipNumber) return false;
+  return true;
+}
+
+/**
  * Informational refund eligibility, mirroring createRefund + the grid's existing rule
  * (isRefundableUnapprovedRow + its applicationId / paymentIntentId checks). POST
  * /payments/refunds re-checks everything server-side (incl. assertRefundWithinCredit).
  */
-export function computeCanRefund(p, money, receipt) {
+export function computeCanRefund(p, money, receipt, { ids, identity } = {}) {
   if (!REFUNDABLE_PROVIDER_STATUSES.has(p.status)) return false;
   if (money.refundableAmount === null || !(money.refundableAmount > 0)) return false;
   if (!receipt || String(receipt.settlementStatus || "").toUpperCase() !== "PENDING") return false;
-  if (str(p.memberId)) return false;
   if (!str(p.applicationId)) return false;
   if (p.mode === "stripe" && !str(p.stripe?.paymentIntentId)) return false;
+  if (!ids || !isProvablyUnapprovedApplication(p, ids, identity)) return false;
   return true;
 }
 
@@ -269,7 +301,7 @@ const DISPLAY_KEYS = [
 ];
 
 // Explicit allow-list projection: built field by field, the document is never spread.
-function toItem(p, { refundTotal, receipt, display }) {
+function toItem(p, { refundTotal, receipt, display, ids }) {
   const money = deriveAttemptMoney(p, refundTotal);
   const receiptOut = receiptView(receipt);
   const item = {
@@ -304,7 +336,7 @@ function toItem(p, { refundTotal, receipt, display }) {
     receipt: receiptOut,
   };
   for (const k of DISPLAY_KEYS) item[k] = display?.[k] ?? null;
-  item.actions = { canRefund: computeCanRefund(p, money, receiptOut) };
+  item.actions = { canRefund: computeCanRefund(p, money, receiptOut, { ids, identity: display?.identity || null }) };
   return item;
 }
 
@@ -337,10 +369,14 @@ export async function listPaymentAttempts(req, q = {}) {
   const ids = page.map((p) => p._id);
   const [refundTotals, receipts] = await Promise.all([loadRefundTotals(tenantId, ids), loadReceipts(tenantId, ids)]);
 
+  const idsByKey = new Map(page.map((p) => [String(p._id), attemptIdentifiers(p, receipts.get(String(p._id)) || null)]));
   let displays = new Map();
   try {
     displays = await resolveAttemptDisplayFields(
-      page.map((p) => ({ key: String(p._id), memberId: str(p.memberId), applicationId: str(p.applicationId) })),
+      page.map((p) => {
+        const ids = idsByKey.get(String(p._id));
+        return { key: String(p._id), memberId: ids.memberId, applicationId: ids.applicationId };
+      }),
       req,
     );
   } catch (err) {
@@ -353,6 +389,7 @@ export async function listPaymentAttempts(req, q = {}) {
       refundTotal: refundTotals.has(String(p._id)) ? refundTotals.get(String(p._id)) : null,
       receipt: receipts.get(String(p._id)) || null,
       display: displays.get(String(p._id)) || null,
+      ids: idsByKey.get(String(p._id)),
     }),
   );
 
