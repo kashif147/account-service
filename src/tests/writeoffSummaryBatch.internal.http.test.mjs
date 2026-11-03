@@ -105,10 +105,21 @@ CoA.find = (query = {}) => {
   ]);
 };
 // Idempotent replay: postBalancedJournal returns the existing docNo row (no write path needed).
+// The row is the SAME posting (WO_BODY's content), so the replay contract answers 200
+// "Already posted" (a different-content row would be 409 - see writeoffReplay.p5.test.mjs).
 GL.findOne = (query = {}) => {
   ledgerTenants.push(String(query.tenantId));
   journalLookups.push({ tenantId: String(query.tenantId), docNo: query.docNo });
-  return chain({ _id: "existing-journal", tenantId: query.tenantId, docNo: query.docNo });
+  return chain({
+    _id: "existing-journal",
+    tenantId: query.tenantId,
+    docNo: query.docNo,
+    docType: "WriteOff",
+    entries: [
+      { accountCode: "5200", dc: "D", amount: WO_BODY.amount },
+      { accountCode: "1400", dc: "C", amount: WO_BODY.amount, memberId: WO_BODY.memberId, periodBucket: WO_BODY.periodBucket },
+    ],
+  });
 };
 GL.create = async () => {
   throw new Error("test: GL.create must not be reached (idempotent replay expected)");
@@ -197,13 +208,13 @@ test("W1 worker internal call (x-internal-request + explicit 24-hex tenant, no u
   const n = pdpCalls.length;
   for (const tenant of [TENANT_A, TENANT_C]) {
     const r = await call(WRITEOFF, { headers: { ...INTERNAL, "x-tenant-id": tenant }, body: WO_BODY });
-    assert.equal(r.status, 201, `tenant ${tenant}: ${r.status} ${r.code}`);
+    assert.equal(r.status, 200, `tenant ${tenant}: ${r.status} ${r.code}`); // replay of the faked existing posting
     assert.deepEqual(r.tenants, [tenant], "every ledger query scoped to the header tenant");
     assert.deepEqual(r.journals, [{ tenantId: tenant, docNo: WO_BODY.docNo }]);
   }
   // with a correlation id (subscription forwards it) still internal
   const c = await call(WRITEOFF, { headers: { ...INTERNAL, "x-correlation-id": "corr-1" }, body: WO_BODY });
-  assert.equal(c.status, 201);
+  assert.equal(c.status, 200);
   assert.equal(pdpCalls.length, n, "internal write-off must not consult the PDP");
 });
 
