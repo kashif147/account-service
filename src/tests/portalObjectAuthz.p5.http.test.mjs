@@ -101,7 +101,7 @@ after(() => {
 });
 
 function bearer({ tenantId = TENANT_A, userType, roles = [], permissions = [], id }) {
-  return `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles, permissions }, SECRET)}`;
+  return `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles, permissions }, SECRET, { expiresIn: "1h" })}`;
 }
 
 // Callers
@@ -113,7 +113,8 @@ const CRM_REPORTS = bearer({ userType: "CRM", id: "staff-rep", roles: ["MO"], pe
 const CRM_FIN_READ = bearer({ userType: "CRM", id: "staff-fin", roles: ["AA"], permissions: ["payments:read", "accounts.reports:read", "accounts.journals:read"] });
 const CRM_FIN_WRITE = bearer({ userType: "CRM", id: "staff-am", roles: ["AM"], permissions: ["payments:read", "payments:write"] });
 const CRM_MO = bearer({ userType: "CRM", id: "staff-mo", roles: ["MO"], permissions: ["profiles:read"] });
-const UNKNOWN_TYPE = bearer({ id: "who", permissions: ["payments:read", "accounts.reports:read"] });
+// an unrecognised caller class (a token with NO userType is refused earlier, 401)
+const UNKNOWN_TYPE = bearer({ id: "who", userType: "SERVICE", permissions: ["payments:read", "accounts.reports:read"] });
 const INTERNAL = { "x-internal-request": "true", "x-tenant-id": TENANT_A };
 
 function q(result) {
@@ -387,21 +388,25 @@ function gatewayHeaders({ userId, tenantId = TENANT_A, userType, permissions = [
   return h;
 }
 
-test("gateway headers without x-user-type (profile-service style forward): CRM resolved only from a verified matching Bearer", async () => {
+test("gateway headers without x-user-type (profile-service style forward): identity only from a verified matching Bearer", async () => {
   const url = "/api/payments/intents/pi_a1/capture";
   await withPayments(async () => {
     const mo = bearer({ userType: "CRM", id: "staff-mo" });
     // matching verified Bearer -> CRM -> passes
     passed(await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo" }) }), "verified fallback");
-    // no Bearer -> userType unknown -> fail closed
-    assert.equal((await call("POST", url, { headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 403);
-    // Bearer for a different user than the gateway identity -> ignored
-    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "member-a1" }) })).status, 403);
-    // Bearer signed with another secret -> ignored
+    // no Bearer -> the forwarded headers are not an identity -> 401
+    assert.equal((await call("POST", url, { headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 401);
+    // Bearer for a different user than the gateway identity -> 401
+    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "member-a1" }) })).status, 401);
+    // Bearer signed with another secret -> 401
     const forged = `Bearer ${jwt.sign({ id: "staff-mo", sub: "staff-mo", tenantId: TENANT_A, userType: "CRM" }, "not-the-secret")}`;
-    assert.equal((await call("POST", url, { auth: forged, headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 403);
-    // explicit x-user-type always wins (PORTAL stays PORTAL)
-    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo", userType: "PORTAL" }) })).status, 403);
+    assert.equal((await call("POST", url, { auth: forged, headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 401);
+    // x-user-type disagreeing with the verified token -> 401
+    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo", userType: "PORTAL" }) })).status, 401);
+    // forwarded tenant disagreeing with the verified token -> 403
+    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo", tenantId: TENANT_C }) })).status, 403);
+    // stored/forged headers + x-internal-request, no token: not internal, not a user -> 401
+    assert.equal((await call("POST", url, { headers: { ...gatewayHeaders({ userId: "staff-mo", userType: "CRM" }), "x-internal-request": "true" } })).status, 401);
   });
 });
 
@@ -425,7 +430,8 @@ const EVERY_PERMISSION = [
 const PORTAL_MEMBER_ALL = bearer({ userType: "PORTAL", id: "member-a1", roles: ["MEMBER"], permissions: EVERY_PERMISSION });
 const PORTAL_NONMEMBER_ALL = bearer({ userType: "PORTAL", id: "member-a2", roles: ["NON-MEMBER"], permissions: EVERY_PERMISSION });
 const PORTAL_OTHER_TENANT_ALL = bearer({ tenantId: TENANT_C, userType: "PORTAL", id: "member-c1", roles: ["MEMBER"], permissions: EVERY_PERMISSION });
-const UNKNOWN_TYPE_ALL = bearer({ id: "who-all", permissions: EVERY_PERMISSION });
+const UNKNOWN_TYPE_ALL = bearer({ id: "who-all", userType: "SERVICE", permissions: EVERY_PERMISSION });
+const MISSING_TYPE_ALL = bearer({ id: "who-none", permissions: EVERY_PERMISSION });
 const CRM_JOURNALS = bearer({ userType: "CRM", id: "staff-aa", roles: ["AA"], permissions: ["accounts.journals:create", "accounts.journals:read"] });
 
 const ONLINE_PAYMENT = "/api/journal/online-payment";
@@ -441,10 +447,12 @@ test("online-payment: PORTAL MEMBER / NON-MEMBER / other tenant with every permi
   }
 });
 
-test("online-payment: unknown / missing userType with every permission -> 403", async () => {
+test("online-payment: unknown userType with every permission -> 403; missing userType -> 401", async () => {
   const r = await call("POST", ONLINE_PAYMENT, { auth: UNKNOWN_TYPE_ALL, body: ONLINE_PAYMENT_BODY });
   assert.equal(r.status, 403);
   assert.equal(r.code, "CRM_ONLY");
+  const m = await call("POST", ONLINE_PAYMENT, { auth: MISSING_TYPE_ALL, body: ONLINE_PAYMENT_BODY });
+  assert.equal(m.status, 401);
 });
 
 test("online-payment: user token + spoofed x-internal-request is judged as that user (PORTAL -> 403)", async () => {

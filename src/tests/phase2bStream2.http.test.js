@@ -25,7 +25,7 @@ const TENANT_A = "tenant-A";
 const TENANT_B = "tenant-B";
 
 function bearer({ tenantId, userType = "CRM", roles = [], permissions = [], sub = "user-1" }) {
-  return `Bearer ${jwt.sign({ sub, tenantId, userType, roles, permissions }, process.env.JWT_SECRET)}`;
+  return `Bearer ${jwt.sign({ sub, tenantId, userType, roles, permissions }, process.env.JWT_SECRET, { expiresIn: "1h" })}`;
 }
 const FINANCE_A = bearer({ tenantId: TENANT_A, roles: ["AM"], permissions: ["payments:write", "payments:read"] });
 const FINANCE_B = bearer({ tenantId: TENANT_B, roles: ["AM"], permissions: ["payments:write", "payments:read"], sub: "user-b" });
