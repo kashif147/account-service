@@ -1,6 +1,15 @@
 import { AppError } from "../errors/AppError.js";
 
+// Identity-bearing headers. On the internal (no-token) path they would be an unverified identity
+// claim, so their presence refuses the request instead of populating req.user from them.
+const UNVERIFIED_IDENTITY_HEADERS = ["x-user-id", "x-user-type", "x-user-email", "x-user-roles", "x-user-permissions"];
+
 export function forwardedInternalContext(req, res, next) {
+  if (UNVERIFIED_IDENTITY_HEADERS.some((h) => req.header(h) != null && String(req.header(h)).trim() !== "")) {
+    return res.appError(
+      AppError.unauthorized("User identity requires a verified token", { tokenError: true, code: "UNVERIFIED_IDENTITY" }),
+    );
+  }
   const tenantId = req.header("x-tenant-id");
   const idempotencyKey = req.header("x-idempotency-key");
 

@@ -22,7 +22,9 @@ const STAFF = "staff-1";
 const nowS = () => Math.floor(Date.now() / 1000);
 
 function sign(claims = {}, { secret = SECRET, algorithm = "HS256" } = {}) {
-  return jwt.sign({ id: STAFF, tenantId: TA, userType: "CRM", roles: ["MO"], permissions: ["profiles:read"], ...claims }, secret, { algorithm });
+  // user-service always issues exp (expiresIn: JWT_EXPIRY); account refuses tokens without it
+  const exp = claims.exp ?? nowS() + 3600;
+  return jwt.sign({ id: STAFF, tenantId: TA, userType: "CRM", roles: ["MO"], permissions: ["profiles:read"], ...claims, exp }, secret, { algorithm });
 }
 function gw(extra = {}) {
   return {
@@ -131,11 +133,11 @@ test("5 valid supported identity -> authenticated from the verified token", asyn
   assert.equal(r.req.user.userType, "CRM");
   assert.equal(r.req.ctx.idempotencyKey, "k-1");
   assert.ok(isCrmCaller(r.req));
-  // gateway sets x-user-type "" for a token without userType: allowed, userType stays unknown
-  const noType = jwt.sign({ id: STAFF, tenantId: TA }, SECRET);
+  // a token without the caller-class claim (userType) is refused: user-service always issues it
+  const noType = jwt.sign({ id: STAFF, tenantId: TA }, SECRET, { expiresIn: "1h" });
   const r2 = await run({ ...gw({ "x-user-type": "" }), ...bearer(noType) });
-  assert.equal(r2.status, 200);
-  assert.equal(r2.req.user.userType, null);
+  assert.equal(r2.status, 401);
+  assert.equal(r2.req.user, undefined);
 });
 
 test("6 mixed user + internal headers: never internal; needs the verified token", async () => {

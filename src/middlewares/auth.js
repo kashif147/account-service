@@ -12,11 +12,77 @@ function jwtSecret() {
   );
 }
 
-/** Verify a ProjectShell user JWT with this service's secret: HS256 only, exp/nbf enforced. */
+/**
+ * Verify a ProjectShell user JWT with this service's secret: HS256 only (explicit allow-list),
+ * signature + exp checked by jsonwebtoken, nbf checked when present. A token without exp is
+ * refused (user-service always sets expiresIn), so no non-expiring identity is accepted.
+ */
 function verifyUserJwt(token) {
   const secret = jwtSecret();
   if (!secret) throw new Error("JWT secret not configured");
-  return jwt.verify(token, secret, { algorithms: ["HS256"] });
+  const decoded = jwt.verify(token, secret, { algorithms: ["HS256"] });
+  if (!decoded || typeof decoded !== "object" || typeof decoded.exp !== "number") {
+    const e = new Error("token has no exp");
+    e.name = "MissingExpError";
+    throw e;
+  }
+  return decoded;
+}
+
+/**
+ * Required claims of a ProjectShell user token: principal (id or sub), tenantId and the caller
+ * class (userType). Missing any -> null (caller answers 401). Only `tenantId` is a tenant claim;
+ * aliases (tid / tenantID / tenant_id) are never read.
+ */
+function requiredClaims(decoded) {
+  const userId = String(decoded?.id || decoded?.sub || "").trim();
+  const tenantId = typeof decoded?.tenantId === "string" ? decoded.tenantId.trim() : "";
+  const userType = typeof decoded?.userType === "string" ? decoded.userType.trim() : "";
+  if (!userId || !tenantId || !userType) return null;
+  return { userId, tenantId, userType };
+}
+
+/**
+ * Forwarded identity headers must agree with the verified claims: user id / user type mismatch
+ * -> 401 IDENTITY_MISMATCH; tenant mismatch -> 403 TENANT_CONTEXT_MISMATCH. Absent headers are
+ * fine (they are rewritten from the token afterwards).
+ */
+function contradiction(req, claims, { requireHeaders }) {
+  const fwdUserId = headerValue(req, "x-user-id");
+  const fwdUserType = headerValue(req, "x-user-type");
+  const fwdTenant = headerValue(req, "x-tenant-id");
+  if ((requireHeaders || fwdUserId) && fwdUserId !== claims.userId) {
+    return AppError.unauthorized("Forwarded identity does not match the verified token", { tokenError: true, code: "IDENTITY_MISMATCH" });
+  }
+  if (fwdUserType && fwdUserType !== claims.userType) {
+    return AppError.unauthorized("Forwarded identity does not match the verified token", { tokenError: true, code: "IDENTITY_MISMATCH" });
+  }
+  if ((requireHeaders || fwdTenant) && fwdTenant !== claims.tenantId) {
+    return new AppError("Tenant context mismatch", 403, "TENANT_CONTEXT_MISMATCH");
+  }
+  return null;
+}
+
+/** Establish req identity from verified claims and rewrite identity headers to those values. */
+function applyVerifiedIdentity(req, decoded, claims) {
+  const { userId, tenantId, userType } = claims;
+  const roles = normaliseRoles(decoded.roles);
+  const permissions = Array.isArray(decoded.permissions) ? decoded.permissions : [];
+  const email = typeof decoded.email === "string" ? decoded.email : "";
+  req.headers["x-user-id"] = userId;
+  req.headers["x-tenant-id"] = tenantId;
+  req.headers["x-user-type"] = userType;
+  req.headers["x-user-email"] = email;
+  req.headers["x-user-roles"] = JSON.stringify(decoded.roles || []);
+  req.headers["x-user-permissions"] = JSON.stringify(permissions);
+  req.headers["x-token-expires-at"] = String(decoded.exp * 1000);
+  req.ctx = { tenantId, userId, roles, permissions };
+  setIdempotencyKey(req);
+  req.user = { sub: userId, id: userId, tenantId, email, userType, roles, permissions };
+  req.userId = userId;
+  req.tenantId = tenantId;
+  req.roles = roles;
+  req.permissions = permissions;
 }
 
 function bearerToken(req) {
@@ -71,42 +137,13 @@ function authenticateForwardedIdentity(req, next) {
   } catch (e) {
     return next(AppError.unauthorized("Invalid or expired token", { tokenError: true, code: "INVALID_TOKEN", jwtError: e?.name }));
   }
-  const tokenUserId = String(decoded?.id || decoded?.sub || "");
-  const tokenTenantId = String(decoded?.tenantId || "");
-  const tokenUserType = typeof decoded?.userType === "string" ? decoded.userType : "";
-  if (!tokenUserId || !tokenTenantId) {
+  const claims = requiredClaims(decoded);
+  if (!claims) {
     return next(AppError.unauthorized("Invalid token: missing identity", { tokenError: true, code: "INVALID_TOKEN" }));
   }
-  const fwdUserId = headerValue(req, "x-user-id");
-  const fwdUserType = headerValue(req, "x-user-type");
-  if (fwdUserId !== tokenUserId || (fwdUserType && fwdUserType !== tokenUserType)) {
-    return next(AppError.unauthorized("Forwarded identity does not match the verified token", { tokenError: true, code: "IDENTITY_MISMATCH" }));
-  }
-  if (headerValue(req, "x-tenant-id") !== tokenTenantId) {
-    return next(new AppError("Tenant context mismatch", 403, "TENANT_CONTEXT_MISMATCH"));
-  }
-
-  const roles = normaliseRoles(decoded.roles);
-  const permissions = Array.isArray(decoded.permissions) ? decoded.permissions : [];
-  const email = typeof decoded.email === "string" ? decoded.email : "";
-
-  // Downstream consumers read these headers: make them the verified values.
-  req.headers["x-user-id"] = tokenUserId;
-  req.headers["x-tenant-id"] = tokenTenantId;
-  req.headers["x-user-type"] = tokenUserType;
-  req.headers["x-user-email"] = email;
-  req.headers["x-user-roles"] = JSON.stringify(decoded.roles || []);
-  req.headers["x-user-permissions"] = JSON.stringify(permissions);
-  if (decoded.exp) req.headers["x-token-expires-at"] = String(decoded.exp * 1000);
-  else delete req.headers["x-token-expires-at"];
-
-  req.ctx = { tenantId: tokenTenantId, userId: tokenUserId, roles, permissions };
-  setIdempotencyKey(req);
-  req.user = { sub: tokenUserId, id: tokenUserId, tenantId: tokenTenantId, email, userType: tokenUserType || null, roles, permissions };
-  req.userId = tokenUserId;
-  req.tenantId = tokenTenantId;
-  req.roles = roles;
-  req.permissions = permissions;
+  const bad = contradiction(req, claims, { requireHeaders: true });
+  if (bad) return next(bad);
+  applyVerifiedIdentity(req, decoded, claims);
   return next();
 }
 
@@ -120,52 +157,29 @@ export async function ensureAuthenticated(req, res, next) {
     return next(AppError.unauthorized("Invalid gateway request", { tokenError: true, validationError: "Unsupported auth source" }));
   }
 
-  // 2) Bearer JWT (direct service calls forwarding the user's token)
+  // 2) Bearer JWT (direct service calls forwarding the user's token). Same verification and
+  //    required claims as the gateway path; any identity header present must agree with it.
   const token = bearerToken(req);
   if (token) {
+    let decoded;
     try {
-      const decoded = verifyUserJwt(token);
-
-      const tokenTenantId =
-        decoded.tid ||
-        decoded.tenantId ||
-        decoded.tenantID ||
-        decoded.tenant_id ||
-        null;
-
-      if (!tokenTenantId) {
-        return next(
-          AppError.badRequest("Invalid token: missing tenantId", {
-            tokenError: true,
-            missingTenantId: true,
-          })
-        );
-      }
-
-      const normalizedRoles = normaliseRoles(decoded.roles);
-
-      req.ctx = {
-        tenantId: tokenTenantId,
-        userId: decoded.sub || decoded.id,
-        roles: normalizedRoles,
-        permissions: decoded.permissions || [],
-      };
-      setIdempotencyKey(req);
-      req.user = decoded;
-      req.userId = decoded.sub || decoded.id;
-      req.tenantId = tokenTenantId;
-      req.roles = normalizedRoles;
-      req.permissions = decoded.permissions || [];
-      return next();
+      decoded = verifyUserJwt(token);
     } catch (e) {
       console.error("JWT failed:", e.name);
-      return next(
-        AppError.unauthorized("Invalid token", {
-          tokenError: true,
-          jwtError: e.name,
-        })
-      );
+      return next(AppError.unauthorized("Invalid token", { tokenError: true, jwtError: e.name }));
     }
+    const claims = requiredClaims(decoded);
+    if (!claims) {
+      return next(AppError.unauthorized("Invalid token: missing identity", { tokenError: true, code: "INVALID_TOKEN" }));
+    }
+    const bad = contradiction(req, claims, { requireHeaders: false });
+    if (bad) return next(bad);
+    applyVerifiedIdentity(req, decoded, claims);
+    return next();
+  }
+  if (req.headers.authorization || req.headers.Authorization) {
+    // An Authorization header that is not a Bearer token is never an identity source.
+    return next(AppError.unauthorized("Invalid token", { tokenError: true, code: "INVALID_TOKEN" }));
   }
 
   // The former Azure EasyAuth (x-ms-client-principal) and bare AAD access-token fallbacks took
