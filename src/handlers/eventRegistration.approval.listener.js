@@ -259,30 +259,52 @@ export async function postManualEventPayment({
   deferPosting = true,
 }) {
   const Payment = (await import("../models/payment.model.js")).default;
+  const { adoptLegacyRegistrationHolder, isBindingDuplicateKeyError } = await import("../services/payments.service.js");
+  const { AppError } = await import("../errors/AppError.js");
 
+  // P5 payer binding: a manual/comp/invoice record is a registration's payment like any
+  // Stripe row, so it claims the same {tenantId, registrationBinding} unique index at creation
+  // (legacy holders adopted first). A registration that already has a live payment cannot get
+  // a second one; a repeated identical record is idempotent (same deterministic externalRef).
+  const reg = String(registrationId);
+  const externalRef = `manual-${method}-${reg}`;
+  await adoptLegacyRegistrationHolder({ tenantId, registrationId: reg });
   const purpose = "eventRegistration";
-  const payment = await Payment.create({
-    tenantId,
-    purpose,
-    ledgerDomain: "events",
-    registrationId,
-    ...(profileId ? { profileId } : {}),
-    ...(memberId ? { memberId } : {}),
-    productCode,
-    eventCategoryCode,
-    amount,
-    currency: currency || "eur",
-    // "manual_review" when posting is deferred to approval - nothing has
-    // been recognized in the GL yet, regardless of method (Payment.status
-    // has no plain "pending" value; "manual_review" is the closest existing
-    // enum member and is semantically accurate here - this Payment is
-    // awaiting the CRM approval step before anything posts).
-    status: deferPosting ? "manual_review" : method === "invoice" ? "payment_required" : "succeeded",
-    mode: "external",
-    source: "events-service",
-    external: { externalRef: `manual-${method}-${registrationId}` },
-    audit: { createdBy: userId || "system", updatedBy: userId || "system" },
-  });
+  let payment;
+  try {
+    payment = await Payment.create({
+      tenantId,
+      purpose,
+      ledgerDomain: "events",
+      registrationId,
+      registrationBinding: reg,
+      ...(profileId ? { profileId } : {}),
+      ...(memberId ? { memberId } : {}),
+      productCode,
+      eventCategoryCode,
+      amount,
+      currency: currency || "eur",
+      // "manual_review" when posting is deferred to approval - nothing has
+      // been recognized in the GL yet, regardless of method (Payment.status
+      // has no plain "pending" value; "manual_review" is the closest existing
+      // enum member and is semantically accurate here - this Payment is
+      // awaiting the CRM approval step before anything posts).
+      status: deferPosting ? "manual_review" : method === "invoice" ? "payment_required" : "succeeded",
+      mode: "external",
+      source: "events-service",
+      external: { externalRef },
+      audit: { createdBy: userId || "system", updatedBy: userId || "system" },
+    });
+  } catch (e) {
+    if (!isBindingDuplicateKeyError(e)) throw e;
+    const holder = await Payment.findOne({ tenantId, registrationBinding: reg })
+      .select({ _id: 1, mode: 1, amount: 1, external: 1 })
+      .lean();
+    if (holder && holder.mode === "external" && holder.external?.externalRef === externalRef && Number(holder.amount) === Number(amount)) {
+      return { paymentId: holder._id.toString(), alreadyRecorded: true };
+    }
+    throw new AppError("This registration already has a payment", 409, "REGISTRATION_ALREADY_HAS_PAYMENT");
+  }
 
   if (deferPosting || amount <= 0) {
     // Nothing to post yet - either GL posting happens later at CRM approval
@@ -310,7 +332,7 @@ export async function postManualEventPayment({
 export async function postManualEventPaymentPost({ tenantId, paymentId, method, profileId, memberId, userId }) {
   const Payment = (await import("../models/payment.model.js")).default;
 
-  const payment = await Payment.findOne({ _id: paymentId, tenantId });
+  let payment = await Payment.findOne({ _id: paymentId, tenantId });
   if (!payment) {
     const { AppError } = await import("../errors/AppError.js");
     throw AppError.notFound("Payment not found", { paymentId });
@@ -318,6 +340,17 @@ export async function postManualEventPaymentPost({ tenantId, paymentId, method, 
   if (payment.status !== "manual_review") {
     // Already posted (or in a terminal state) - nothing to do.
     return { paymentId: payment._id.toString(), alreadyPosted: true };
+  }
+  // P5 payer binding: only the registration's CURRENT payment may be posted. A record that was
+  // released (e.g. replaced by a card intent) can never post; a legacy record is adopted first.
+  if (payment.registrationId && payment.registrationBinding !== String(payment.registrationId)) {
+    const { adoptLegacyRegistrationHolder } = await import("../services/payments.service.js");
+    await adoptLegacyRegistrationHolder({ tenantId, registrationId: payment.registrationId });
+    payment = await Payment.findOne({ _id: paymentId, tenantId });
+    if (payment.registrationBinding !== String(payment.registrationId)) {
+      const { AppError } = await import("../errors/AppError.js");
+      throw new AppError("This payment is no longer the registration's payment", 409, "PAYMENT_NOT_BOUND");
+    }
   }
 
   payment.profileId = profileId || payment.profileId;
@@ -352,18 +385,24 @@ export async function postManualEventPaymentPost({ tenantId, paymentId, method, 
 export async function voidManualEventPayment({ tenantId, paymentId, userId }) {
   const Payment = (await import("../models/payment.model.js")).default;
 
-  const payment = await Payment.findOne({ _id: paymentId, tenantId });
+  const payment = await Payment.findOne({ _id: paymentId, tenantId }).select({ _id: 1 }).lean();
   if (!payment) {
     const { AppError } = await import("../errors/AppError.js");
     throw AppError.notFound("Payment not found", { paymentId });
   }
-  if (payment.status !== "manual_review") {
-    return { paymentId: payment._id.toString(), voided: false };
-  }
-
-  payment.status = "canceled";
-  payment.audit = { ...(payment.audit || {}), updatedBy: userId || "system" };
-  await payment.save();
-
-  return { paymentId: payment._id.toString(), voided: true };
+  // Atomic: only an unposted record is voided, and the void releases its registration binding
+  // in the same update (a concurrent post/void cannot both apply).
+  const r = await Payment.updateOne(
+    { _id: payment._id, tenantId, status: "manual_review" },
+    {
+      $set: {
+        status: "canceled",
+        "audit.updatedBy": userId || "system",
+        bindingReleasedAt: new Date(),
+        bindingReleaseReason: "REPLACE_RELEASED_BINDING:manual_void",
+      },
+      $unset: { registrationBinding: "" },
+    },
+  );
+  return { paymentId: payment._id.toString(), voided: r.modifiedCount === 1 };
 }

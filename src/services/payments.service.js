@@ -1,3 +1,5 @@
+import mongoose from "mongoose";
+import nodeCrypto from "crypto";
 import { requireTenantId } from "../helpers/tenantScope.js";
 import Payment, {
   zCreateIntent,
@@ -6,6 +8,7 @@ import Payment, {
   zRecordExternal,
 } from "../models/payment.model.js";
 import Refund, { zCreateRefund } from "../models/refund.model.js";
+import PaymentIntentReservation, { ORPHAN_STATES } from "../models/paymentIntentReservation.model.js";
 import { AppError } from "../errors/AppError.js";
 import { getStripe } from "../lib/stripe.js";
 import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
@@ -190,13 +193,92 @@ function bindingError(message, status, code) {
 const TERMINAL_UNPAID_STATUSES = ["canceled", "failed", "authorization_expired", "payment_required"];
 const FUNDS_HELD_STATUSES = ["requires_capture", "processing", "succeeded", "partially_refunded", "refund_required", "manual_review"];
 
+// An external (manual/comp/invoice) row's "payment_required" means an invoice that was POSTED
+// to the GL, not a dead card attempt, so a LIVE external row is never released by this generic
+// filter (only a voided/cancelled one is dead). The only release of a live external row is the
+// explicit MANUAL_TO_CARD transition below (an unposted "manual_review" record, cancelled in the
+// same update).
+// A voided/cancelled external record (status canceled/failed) holds nothing and is dead.
+const EXTERNAL_DEAD_STATUSES = ["canceled", "failed"];
+
 export function releasableBindingFilter() {
   return {
     $or: [
-      { status: { $in: TERMINAL_UNPAID_STATUSES } },
-      { isActiveAttempt: false, status: { $nin: FUNDS_HELD_STATUSES } },
+      { mode: "external", status: { $in: EXTERNAL_DEAD_STATUSES } },
+      {
+        mode: { $ne: "external" },
+        $or: [
+          { status: { $in: TERMINAL_UNPAID_STATUSES } },
+          { isActiveAttempt: false, status: { $nin: FUNDS_HELD_STATUSES } },
+        ],
+      },
     ],
   };
+}
+
+/** In-memory mirror of releasableBindingFilter (same rules), for legacy-row candidate checks. */
+export function isReleasableBindingRow(row = {}) {
+  if (row.mode === "external") return EXTERNAL_DEAD_STATUSES.includes(row.status);
+  if (TERMINAL_UNPAID_STATUSES.includes(row.status)) return true;
+  return row.isActiveAttempt === false && !FUNDS_HELD_STATUSES.includes(row.status);
+}
+
+const UNPOSTED_MANUAL_FILTER = { mode: "external", status: "manual_review" };
+
+/**
+ * P5 legacy participation. Rows written before registrationBinding existed (legacy Stripe
+ * rows, manual/comp/invoice records) carry registrationId but no binding, so the unique index
+ * cannot see them. Before any claim on `registrationId`, its legacy holder is ADOPTED into the
+ * same index: if nobody holds the binding and exactly one unbound row of the registration is
+ * still live (not releasable), that row claims the binding with a conditional update - so it
+ * then contends through the same unique index as every new row.
+ * - several live unbound rows -> 409 REGISTRATION_BINDING_AMBIGUOUS (fail closed; nothing is
+ *   guessed or written; CRM resolves by cancelling/voiding the wrong one);
+ * - a concurrent adopter/claimer winning first is fine (E11000 / no-op), the caller's own
+ *   claim then loses on the index as usual.
+ * `excludeId`: the row the caller is itself about to bind (never adopted as someone else).
+ */
+export async function adoptLegacyRegistrationHolder({ tenantId, registrationId, excludeId = null }) {
+  const reg = normId(registrationId);
+  if (!tenantId || !reg) return { adopted: false };
+  const holder = await Payment.findOne({ tenantId, registrationBinding: reg }).select({ _id: 1 }).lean();
+  if (holder) return { adopted: false, holderId: holder._id };
+  const rows = await Payment.find({
+    tenantId,
+    registrationId: reg,
+    $or: [{ registrationBinding: { $exists: false } }, { registrationBinding: null }],
+    ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+  })
+    .select({ _id: 1, status: 1, isActiveAttempt: 1, mode: 1 })
+    .lean();
+  const live = rows.filter((r) => !isReleasableBindingRow(r));
+  if (live.length === 0) return { adopted: false };
+  if (live.length > 1) {
+    throw bindingError(
+      "This registration has more than one existing payment; it must be resolved in the CRM first",
+      409,
+      "REGISTRATION_BINDING_AMBIGUOUS",
+    );
+  }
+  try {
+    const r = await Payment.updateOne(
+      {
+        _id: live[0]._id,
+        tenantId,
+        registrationId: reg,
+        $or: [{ registrationBinding: { $exists: false } }, { registrationBinding: null }],
+      },
+      { $set: { registrationBinding: reg, bindingAdoptedAt: new Date() } },
+    );
+    return { adopted: r.modifiedCount === 1, holderId: live[0]._id };
+  } catch (e) {
+    if (isBindingDuplicateKey(e)) return { adopted: false }; // someone claimed it first
+    throw e;
+  }
+}
+
+export function isBindingDuplicateKeyError(e) {
+  return isBindingDuplicateKey(e);
 }
 
 function isBindingDuplicateKey(e) {
@@ -205,18 +287,154 @@ function isBindingDuplicateKey(e) {
   return /registrationBinding/.test(String(e.message || ""));
 }
 
+export function reservationStripeKey(reservationId) {
+  return nodeCrypto
+    .createHash("sha256")
+    .update(["registration-intent-reservation", String(reservationId)].join("-"))
+    .digest("hex")
+    .substring(0, 64);
+}
+
+/**
+ * Cancels a PaymentIntent that must never be used (it has no Payment row). Records the
+ * orphan durably before calling Stripe; idempotent (Stripe cancel of a cancelled PI is
+ * treated as done). Never touches a PaymentIntent that a Payment row references.
+ */
+export async function cancelOrphanedIntent({ stripe, reservationId, paymentIntentId, reason }) {
+  if (reservationId) {
+    await PaymentIntentReservation.updateOne(
+      { _id: reservationId, state: { $in: ["reserved", "intent_created", "orphaned", "orphan_cancel_failed"] } },
+      { $set: { state: "orphaned", orphanReason: reason, paymentIntentId } },
+    );
+  }
+  const referenced = await Payment.findOne({ "stripe.paymentIntentId": paymentIntentId }).select({ _id: 1 }).lean();
+  if (referenced) {
+    if (reservationId) {
+      await PaymentIntentReservation.updateOne(
+        { _id: reservationId },
+        { $set: { state: "bound", paymentId: String(referenced._id), orphanReason: null } },
+      );
+    }
+    return { canceled: false, bound: true };
+  }
+  try {
+    await stripe.paymentIntents.cancel(paymentIntentId, { cancellation_reason: "duplicate" });
+    if (reservationId) {
+      await PaymentIntentReservation.updateOne(
+        { _id: reservationId },
+        { $set: { state: "orphan_canceled", lastErrorCode: null }, $inc: { cancelAttempts: 1 } },
+      );
+    }
+    return { canceled: true };
+  } catch (e) {
+    const alreadyCanceled = /canceled/i.test(String(e?.code || "")) || e?.raw?.payment_intent?.status === "canceled";
+    if (reservationId) {
+      await PaymentIntentReservation.updateOne(
+        { _id: reservationId },
+        {
+          $set: {
+            state: alreadyCanceled ? "orphan_canceled" : "orphan_cancel_failed",
+            lastErrorCode: String(e?.code || e?.type || "stripe_error").slice(0, 64),
+          },
+          $inc: { cancelAttempts: 1 },
+        },
+      ).catch(() => {});
+    }
+    return { canceled: alreadyCanceled };
+  }
+}
+
+/** True when `paymentIntentId` is a recorded orphan (must never be captured or attached). */
+export async function isOrphanedIntent(paymentIntentId) {
+  if (!paymentIntentId) return false;
+  const r = await PaymentIntentReservation.findOne({ paymentIntentId, state: { $in: ORPHAN_STATES } })
+    .select({ _id: 1 })
+    .lean();
+  return Boolean(r);
+}
+
+/**
+ * Recovery sweep for reservations left open (process died between the reservation, Stripe and
+ * Payment.create) or orphans whose cancel failed. For each: replay the Stripe create with the
+ * SAME idempotency key and parameters (Stripe returns the original PaymentIntent if it was
+ * created), then bind-check: a PaymentIntent a Payment row references is marked bound;
+ * anything else is cancelled as an orphan. Never binds, captures or returns an orphan, and never
+ * returns a client_secret. Not scheduled here: wiring into the cron runner is a separate,
+ * reviewed change (see the P5 write-up).
+ */
+export async function sweepPaymentIntentReservations({ olderThanMs = 15 * 60 * 1000, limit = 100, stripe = getStripe(), now = new Date() } = {}) {
+  const cutoff = new Date(now.getTime() - olderThanMs);
+  const open = await PaymentIntentReservation.find({
+    $or: [
+      { state: { $in: ["reserved", "intent_created", "orphaned"] }, updatedAt: { $lte: cutoff } },
+      { state: "orphan_cancel_failed" },
+    ],
+  })
+    .limit(limit)
+    .lean();
+  const out = { scanned: open.length, bound: 0, canceled: 0, failed: 0 };
+  for (const r of open) {
+    let piId = r.paymentIntentId;
+    if (!piId) {
+      try {
+        const replay = await stripe.paymentIntents.create(
+          {
+            amount: r.request.amount,
+            currency: r.request.currency,
+            payment_method_types: ["card"],
+            capture_method: r.request.captureMethod,
+            metadata: Object.fromEntries(Object.entries(r.request.metadata || {})),
+          },
+          { idempotencyKey: r.stripeIdempotencyKey },
+        );
+        piId = replay.id;
+      } catch (e) {
+        out.failed += 1;
+        await PaymentIntentReservation.updateOne(
+          { _id: r._id },
+          { $set: { lastErrorCode: String(e?.code || e?.type || "stripe_error").slice(0, 64) } },
+        ).catch(() => {});
+        continue;
+      }
+    }
+    const res = await cancelOrphanedIntent({ stripe, reservationId: r._id, paymentIntentId: piId, reason: r.orphanReason || "unfinished_creation" });
+    if (res.bound) out.bound += 1;
+    else if (res.canceled) out.canceled += 1;
+    else out.failed += 1;
+  }
+  return out;
+}
+
 /**
  * Releases the current holder of `registrationId` if (and only if) it is releasable.
  * Returns { holder: null } when nobody holds it, { self: true } when `selfId` holds it,
  * { released: true } after a successful release, or { blocked: true, holderId } when the
  * holder still holds (or may still take) money.
  */
-async function releaseRegistrationBinding({ tenantId, registrationId, selfId, reason, ctx = {} }) {
+async function releaseRegistrationBinding({ tenantId, registrationId, selfId, reason, ctx = {}, allowManualToCard = false }) {
   const holder = await Payment.findOne({ tenantId, registrationBinding: registrationId })
-    .select({ _id: 1, status: 1, isActiveAttempt: 1 })
+    .select({ _id: 1, status: 1, isActiveAttempt: 1, mode: 1 })
     .lean();
   if (!holder) return { holder: null };
   if (selfId && String(holder._id) === String(selfId)) return { self: true };
+  if (allowManualToCard && holder.mode === "external" && holder.status === "manual_review") {
+    // MANUAL_TO_CARD (events-service retry-payment switching an unposted manual/comp/invoice
+    // record to card): the record is cancelled in the SAME conditional update that releases
+    // it, so it can never be posted afterwards (postManualEventPaymentPost needs the binding).
+    const m = await Payment.updateOne(
+      { _id: holder._id, tenantId, registrationBinding: registrationId, ...UNPOSTED_MANUAL_FILTER },
+      {
+        $unset: { registrationBinding: "" },
+        $set: {
+          status: "canceled",
+          bindingReleasedAt: new Date(),
+          bindingReleaseReason: "REPLACE_RELEASED_BINDING:manual_to_card",
+          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+        },
+      },
+    );
+    if (m.modifiedCount === 1) return { released: true, holderId: holder._id };
+  }
   const r = await Payment.updateOne(
     { _id: holder._id, tenantId, registrationBinding: registrationId, ...releasableBindingFilter() },
     {
@@ -617,6 +835,13 @@ export async function createIntent(input, ctx, caller = {}) {
   let supersededPaymentId = null;
   let persistIdempotencyKey = true;
 
+  // P5: legacy (pre-binding) rows of this registration join the binding index BEFORE any
+  // reuse/supersede decision, so an ambiguous registration fails closed (409) instead of the
+  // reuse logic picking one of its rows, and a reused legacy row is the bound holder.
+  if (isEventRegistrationPayment && !parsed.useCheckout && normId(registrationId)) {
+    await adoptLegacyRegistrationHolder({ tenantId: ctx.tenantId, registrationId });
+  }
+
   if ((isApplicationPayment || isEventRegistrationPayment) && !parsed.useCheckout) {
     const attemptDecision = await resolveReusablePaymentAttempt({
       applicationId: isApplicationPayment ? applicationId : undefined,
@@ -641,11 +866,14 @@ export async function createIntent(input, ctx, caller = {}) {
   const claimsRegistrationBinding =
     isEventRegistrationPayment && !parsed.useCheckout && Boolean(normId(registrationId));
   if (claimsRegistrationBinding) {
+    // (Re-check: a legacy row may have become the only live one after the supersede above.)
+    await adoptLegacyRegistrationHolder({ tenantId: ctx.tenantId, registrationId });
     const rel = await releaseRegistrationBinding({
       tenantId: ctx.tenantId,
       registrationId: normId(registrationId),
       reason: "replacement_attempt",
       ctx,
+      allowManualToCard: true,
     });
     if (rel.blocked) {
       if (supersededPaymentId && String(supersededPaymentId) === String(rel.holderId)) {
@@ -978,6 +1206,7 @@ export async function createIntent(input, ctx, caller = {}) {
   let status = "created";
   let mode = "stripe";
   let stripeIds = {};
+  let reservation = null; // P5 registration-backed intent reservation (see below)
 
   const stripeMetadata = {
     ...(metadata || {}),
@@ -1123,6 +1352,29 @@ export async function createIntent(input, ctx, caller = {}) {
       }
     }
 
+    // P5: a registration-backed intent gets a durable reservation BEFORE Stripe is called, and
+    // a Stripe idempotency key derived only from it - a PaymentIntent that never becomes a
+    // Payment row (lost the binding race, or this process died) is always recoverable and is
+    // cancelled by sweepPaymentIntentReservations, never bound/captured/attached.
+    if (claimsRegistrationBinding) {
+      const reservationId = new mongoose.Types.ObjectId();
+      stripeIdempotencyKey = reservationStripeKey(reservationId);
+      stripeMetadata.reservationId = String(reservationId);
+      reservation = await PaymentIntentReservation.create({
+        _id: reservationId,
+        tenantId: String(ctx.tenantId),
+        registrationId: normId(registrationId),
+        purpose: parsed.purpose,
+        stripeIdempotencyKey,
+        request: {
+          amount: parsed.amount,
+          currency: normalizedCurrency,
+          captureMethod: stripeCaptureMethod,
+          metadata: stripeMetadata,
+        },
+      });
+    }
+
     let intent;
     try {
       intent = await stripe.paymentIntents.create(
@@ -1138,6 +1390,15 @@ export async function createIntent(input, ctx, caller = {}) {
     } catch (stripeError) {
       // Handle Stripe idempotency errors - retry without idempotency key
       // This happens when the same key was used with different parameters
+      if (reservation) {
+        // Never retry a reserved creation without its key (that PaymentIntent would be
+        // unrecoverable); the reservation stays open and the sweep resolves it.
+        await PaymentIntentReservation.updateOne(
+          { _id: reservation._id, state: "reserved" },
+          { $set: { lastErrorCode: String(stripeError.code || stripeError.type || "stripe_error").slice(0, 64) } },
+        ).catch(() => {});
+        throw stripeError;
+      }
       if (
         stripeError.type === "StripeIdempotencyError" ||
         stripeError.rawType === "idempotency_error"
@@ -1164,6 +1425,12 @@ export async function createIntent(input, ctx, caller = {}) {
     }
 
     stripeResult = intent;
+    if (reservation) {
+      await PaymentIntentReservation.updateOne(
+        { _id: reservation._id, state: "reserved" },
+        { $set: { state: "intent_created", paymentIntentId: intent.id } },
+      );
+    }
     status = normalizeStripeStatusForPayment(intent.status) || "requires_action";
     stripeIds = {
       paymentIntentId: intent.id,
@@ -1311,6 +1578,12 @@ export async function createIntent(input, ctx, caller = {}) {
     }
 
     const payment = await Payment.create(paymentData);
+    if (reservation) {
+      await PaymentIntentReservation.updateOne(
+        { _id: reservation._id, state: { $in: ["reserved", "intent_created"] } },
+        { $set: { state: "bound", paymentId: String(payment._id), paymentIntentId: stripeIds.paymentIntentId || null } },
+      );
+    }
     const supersedeMatchValue = isApplicationPayment ? applicationId : registrationId;
     // Only supersede siblings of the SAME application/registration: without a match value
     // (a portal event/course intent has no registrationId) there are no siblings, and an
@@ -1354,10 +1627,15 @@ export async function createIntent(input, ctx, caller = {}) {
     if (isBindingDuplicateKey(e)) {
       // P5: a concurrent request claimed this registration first. Never return its intent;
       // cancel the PaymentIntent this request just created (it was never persisted).
+      // The reservation is marked orphaned FIRST (durable), then the cancel is attempted; a
+      // failed cancel stays visible as orphan_cancel_failed and the sweep retries it.
       if (stripeIds.paymentIntentId) {
-        await stripe.paymentIntents
-          .cancel(stripeIds.paymentIntentId, { cancellation_reason: "duplicate" })
-          .catch(() => {});
+        await cancelOrphanedIntent({
+          stripe,
+          reservationId: reservation?._id || null,
+          paymentIntentId: stripeIds.paymentIntentId,
+          reason: "lost_registration_binding",
+        });
       }
       throw bindingError("This registration already has a payment", 409, "REGISTRATION_ALREADY_HAS_PAYMENT");
     }
@@ -1781,6 +2059,9 @@ export async function attachRegistrationToPaymentIntent(
     throw bindingError("registrationId is required", 400, "REGISTRATION_ID_REQUIRED");
   }
   const tenantId = requireTenantId(ctx);
+  if (await isOrphanedIntent(paymentIntentId)) {
+    throw bindingError("This PaymentIntent can no longer be used", 409, "INTENT_ORPHANED");
+  }
   const payment = await loadPaymentForIntent(paymentIntentId, ctx);
 
   // Payer: a user caller may only attach an intent it created itself (payer.userId, or
@@ -1850,6 +2131,8 @@ export async function attachRegistrationToPaymentIntent(
   // This read covers legacy rows and manual payments (no registrationBinding); the atomic
   // guard against a CONCURRENT attach/create is the registrationBinding unique index below.
   if (!alreadySame) {
+    // Legacy holder joins the binding index first (same concurrency guarantee as new rows).
+    await adoptLegacyRegistrationHolder({ tenantId, registrationId, excludeId: payment._id });
     const other = await Payment.findOne({
       tenantId,
       registrationId,
@@ -1941,6 +2224,10 @@ export async function attachRegistrationToPaymentIntent(
 export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields = {}) {
   if (!paymentIntentId) {
     throw AppError.badRequest("paymentIntentId is required");
+  }
+
+  if (await isOrphanedIntent(paymentIntentId)) {
+    throw bindingError("This PaymentIntent can no longer be used", 409, "INTENT_ORPHANED");
   }
 
   const stripe = getStripe();

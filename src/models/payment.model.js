@@ -156,9 +156,13 @@ const PaymentSchema = new Schema(
     // currently holds the registration (unique per tenant, index below). Claimed atomically
     // at creation (events-service CRM/retry intents) or attach (portal intents); released
     // only by the named replacement transition (holder can no longer take money - see
-    // payments.service.js releasableBindingFilter). Absent on legacy rows and manual payments.
+    // payments.service.js releasableBindingFilter). Manual records claim it at creation; legacy
+    // rows are adopted on first contention or by the backfill script.
     registrationBinding: { type: String, default: undefined },
     bindingReleasedAt: { type: Date },
+    // Set when a pre-binding (legacy / manual) row was adopted into the binding index
+    // (payments.service.js adoptLegacyRegistrationHolder or scripts/backfill-registration-binding).
+    bindingAdoptedAt: { type: Date },
     bindingReleaseReason: { type: String },
     // Deferred payment link (PaymentLink._id) - set only for link payments, which use the
     // lifecycle state machine authoritatively and never publish application.status.updated.
