@@ -199,6 +199,7 @@ test("issue: Checkout Session (manual capture, <=24h, server price, tenant metad
   assert.equal(pay.stripe.checkoutSessionId, link.checkoutSessionId);
   assert.equal(String(pay.paymentLinkId), String(link._id));
   assert.equal(pay.purpose, "applicationFee");
+  assert.equal(pay.applicationBinding, "app-1"); // P5 b7: authoritative application binding
   const out = await OutboxEvent.findOne({ eventKey: `link:${A}:app-1:v1:issued` }).lean();
   assert.equal(out.tenantId, A);
   assert.equal(out.data.amount, 29900);

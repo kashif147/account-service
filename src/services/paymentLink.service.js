@@ -191,6 +191,7 @@ async function ensureLinkPayment(link) {
       currency: link.currency,
       status: "created",
       applicationId: link.applicationId,
+      applicationBinding: String(link.applicationId),
       idempotencyKey,
       attemptNumber: (last?.attemptNumber || 0) + 1,
       isActiveAttempt: true,

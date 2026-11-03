@@ -110,6 +110,12 @@ const PaymentSchema = new Schema(
     },
     memberId: { type: String, index: true },
     applicationId: { type: String, index: true },
+    // P5: authoritative application binding, written ONLY at creation by a path that verified the
+    // application (portal intent guard loaded it as the caller; account's own payment-link flow).
+    // Mutation authority treats a row as an application payment only through this binding or an
+    // explicit applicationFee purpose - never by inference from applicationId on a subscriptionFee
+    // row. Absent on legacy rows (they fail closed: PAYMENT_APPLICATION_BINDING_UNVERIFIED).
+    applicationBinding: { type: String, default: undefined },
     invoiceId: { type: String, index: true },
     idempotencyKey: { type: String, index: true },
     attemptNumber: { type: Number, default: 1, min: 1 },

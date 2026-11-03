@@ -205,19 +205,54 @@ test("K4 unbound / ambiguous-purpose rows fail closed (409 PAYMENT_UNBOUND), eve
   }
 });
 
-test("K4b legacy application row stored as subscriptionFee + applicationId is an application payment (application:write); without applicationId it stays unbound", { skip }, async () => {
+test("K4b legacy subscriptionFee + applicationId WITHOUT an authoritative binding fails closed (409 PAYMENT_APPLICATION_BINDING_UNVERIFIED) for every caller incl. ASU; no Stripe call", { skip }, async () => {
   const legacy = await stripeRow({ purpose: "applicationFee", extra: { purpose: "subscriptionFee" } });
   assert.equal((await fresh(legacy.id)).purpose, "subscriptionFee");
-  for (const auth of [CRM_EVW, CRM_FIN]) {
-    const res = await call("POST", `/api/payments/intents/${legacy.pi}/capture`, { auth });
-    assert.equal(res.status, 403); assert.equal(res.code, "PAYMENT_MUTATION_PERMISSION_REQUIRED");
+  assert.equal((await fresh(legacy.id)).applicationBinding, undefined);
+  for (const auth of [CRM_APP, ASU, CRM_EVW, CRM_FIN]) {
+    for (const action of ["capture", "cancel"]) {
+      const res = await call("POST", `/api/payments/intents/${legacy.pi}/${action}`, { auth });
+      assert.equal(res.status, 409, `${action} ${res.text.slice(0, 200)}`);
+      assert.equal(res.code, "PAYMENT_APPLICATION_BINDING_UNVERIFIED");
+    }
   }
-  const link = await call("POST", `/api/payments/intents/${legacy.pi}/capture`, { auth: CRM_APP, body: { profileId: oid() } });
-  assert.equal(link.status, 400); assert.equal(link.code, "LINK_NOT_ALLOWED");
-  assert.equal((await call("POST", `/api/payments/intents/${legacy.pi}/capture`, { auth: CRM_APP })).status, 200);
+  assert.equal(stripeMutations(legacy.pi), 0);
+  assert.equal((await fresh(legacy.id)).status, "requires_capture");
+  // A binding that names a different application is not authoritative either.
+  const wrong = await stripeRow({ purpose: "applicationFee", extra: { purpose: "subscriptionFee", applicationBinding: oid() } });
+  const w = await call("POST", `/api/payments/intents/${wrong.pi}/capture`, { auth: ASU });
+  assert.equal(w.status, 409); assert.equal(w.code, "PAYMENT_APPLICATION_BINDING_UNVERIFIED");
+  assert.equal(stripeMutations(wrong.pi), 0);
+  // Without an applicationId at all it stays unbound.
   const bare = await stripeRow({ purpose: "subscriptionFee", extra: { ledgerDomain: "membership" } });
   const res = await call("POST", `/api/payments/intents/${bare.pi}/cancel`, { auth: ASU });
   assert.equal(res.status, 409); assert.equal(res.code, "PAYMENT_UNBOUND");
+});
+
+test("K4c subscriptionFee row WITH the authoritative applicationBinding is an application payment: application:write only; purpose unchanged", { skip }, async () => {
+  const r = await stripeRow({ purpose: "applicationFee", extra: { purpose: "subscriptionFee" } });
+  await Payment.updateOne({ _id: r.id }, { $set: { applicationBinding: r.doc.applicationId } });
+  for (const auth of [CRM_EVW, CRM_FIN, CRM_WILD]) {
+    const res = await call("POST", `/api/payments/intents/${r.pi}/capture`, { auth });
+    assert.equal(res.status, 403); assert.equal(res.code, "PAYMENT_MUTATION_PERMISSION_REQUIRED");
+  }
+  const link = await call("POST", `/api/payments/intents/${r.pi}/capture`, { auth: CRM_APP, body: { profileId: oid() } });
+  assert.equal(link.status, 400); assert.equal(link.code, "LINK_NOT_ALLOWED");
+  const ok = await call("POST", `/api/payments/intents/${r.pi}/capture`, { auth: CRM_APP });
+  assert.equal(ok.status, 200, ok.text.slice(0, 200));
+  assert.equal((await fresh(r.id)).purpose, "subscriptionFee");
+});
+
+test("K4d creation writes the binding only for a guard-verified portal application intent", async () => {
+  const { applicationBindingOnCreate } = await import("../services/payments.service.js");
+  const A = "a00000000000000000000001";
+  assert.deepEqual(applicationBindingOnCreate({ isApplicationPayment: true, applicationId: A, guard: { checked: true, kind: "application" } }), { applicationBinding: A });
+  // CRM / internal caller: the guard does not run (checked:false) -> no binding.
+  assert.deepEqual(applicationBindingOnCreate({ isApplicationPayment: true, applicationId: A, guard: { checked: false } }), {});
+  assert.deepEqual(applicationBindingOnCreate({ isApplicationPayment: true, applicationId: A, guard: { checked: true, kind: "member" } }), {});
+  assert.deepEqual(applicationBindingOnCreate({ isApplicationPayment: false, applicationId: A, guard: { checked: true, kind: "application" } }), {});
+  assert.deepEqual(applicationBindingOnCreate({ isApplicationPayment: true, applicationId: "  ", guard: { kind: "application" } }), {});
+  assert.deepEqual(applicationBindingOnCreate({ isApplicationPayment: true, applicationId: A, guard: undefined }), {});
 });
 
 test("K5 tenant: another tenant's PaymentIntent is 404 PAYMENT_NOT_FOUND (indistinguishable), untouched", { skip }, async () => {
