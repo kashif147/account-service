@@ -5,6 +5,10 @@
 //   POST /journal/events/manual-payment           manual_record  events-service only
 //   POST /journal/events/manual-payment/post      manual_post    events-service only
 //   POST /journal/events/manual-payment/void      manual_void    events-service only
+//   POST /payments/intents  (registrationId, eventRegistration/courseRegistration, INTERNAL path only)
+//                                                 intent_registration  events-service only  (b12: the
+//                                                 manual-to-card binding takeover; user-path callers are
+//                                                 governed by registrationIntentAuthority.middleware.js)
 //
 // Mounted FIRST on each route (before identity, idempotency and any Stripe/DB mutation). Protocol
 // and canonical string: lib/serviceSigning.js. Checks, in order:
@@ -33,6 +37,7 @@
 import mongoose from "mongoose";
 import logger from "../config/logger.js";
 import ServiceAuthNonce from "../models/serviceAuthNonce.model.js";
+import { isRegistrationBackedIntent } from "./registrationIntentAuthority.middleware.js";
 import {
   HEADERS,
   canonicalString,
@@ -45,7 +50,7 @@ import {
   withinSkew,
 } from "../lib/serviceSigning.js";
 
-export const OPERATIONS = Object.freeze(["capture", "cancel", "manual_record", "manual_post", "manual_void"]);
+export const OPERATIONS = Object.freeze(["capture", "cancel", "manual_record", "manual_post", "manual_void", "intent_registration"]);
 
 // Caller allow-list per operation and command domain.
 export const ALLOW = Object.freeze({
@@ -54,7 +59,15 @@ export const ALLOW = Object.freeze({
   manual_record: Object.freeze({ registration: "events-service" }),
   manual_post: Object.freeze({ registration: "events-service" }),
   manual_void: Object.freeze({ registration: "events-service" }),
+  intent_registration: Object.freeze({ registration: "events-service" }),
 });
+
+/** Command domain of a signed request: the bound command's binding.domain, or (intent create) the
+ *  registration domain derived from the body. Never the caller's claim alone. */
+function commandDomain(req, operation) {
+  if (operation === "intent_registration") return isRegistrationBackedIntent(req.body) ? "registration" : null;
+  return req.body?.binding?.domain;
+}
 
 const STATUS = Object.freeze({
   SERVICE_AUTH_REQUIRED: 401,
@@ -134,7 +147,7 @@ export async function evaluateServiceAuth(req, operation, deps = {}) {
   if (!signaturesEqual(signCanonical(secret, canonical), h.sig)) {
     return { outcome: "SERVICE_AUTH_INVALID", caller: h.caller, kid: h.kid };
   }
-  const domain = req.body?.binding?.domain;
+  const domain = commandDomain(req, operation);
   if (ALLOW[operation]?.[domain] !== h.caller) return { outcome: "SERVICE_NOT_ALLOWED", caller: h.caller, kid: h.kid };
   const nonceError = await insertNonce(Model, h.caller, h.nonce);
   if (nonceError) return { outcome: nonceError, caller: h.caller, kid: h.kid };
@@ -192,5 +205,21 @@ export function createManualPaymentServiceAuth(deps = {}) {
   return function manualPaymentServiceAuth(req, res, next) {
     const v = req.method === "POST" ? verifiers[req.path.toLowerCase().replace(/\/+$/, "")] : null;
     return v ? v(req, res, next) : next();
+  };
+}
+
+/**
+ * POST /payments/intents: evaluated only for a registration-backed intent on the INTERNAL path
+ * (x-internal-request without a user token) - the caller able to take over a manual record's
+ * binding without a business permission. User-path creates are not service-signed (their authority
+ * is the CRM business permission, registrationIntentAuthority.middleware.js); everything else on
+ * this route is out of scope and passes through untouched.
+ */
+export function createIntentRegistrationServiceAuth(deps = {}) {
+  const verifier = createServiceAuthVerifier("intent_registration", deps);
+  return function intentRegistrationServiceAuth(req, res, next) {
+    const userToken = Boolean(req.headers.authorization || req.headers["x-jwt-verified"]);
+    if (userToken || !isInternalPath(req) || !isRegistrationBackedIntent(req.body)) return next();
+    return verifier(req, res, next);
   };
 }

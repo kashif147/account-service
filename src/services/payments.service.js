@@ -1076,7 +1076,10 @@ async function createIntentInner(input, ctx, caller = {}, out = {}) {
       registrationId: normId(registrationId),
       reason: "replacement_attempt",
       ctx,
-      allowManualToCard: true,
+      // P5 (b12): the manual-to-card takeover (cancels an unposted manual record) is granted per
+      // request by middlewares/registrationIntentAuthority.middleware.js - internal S2S (signed
+      // boundary) or a CRM caller with the exact events:write permission. Never implicit.
+      allowManualToCard: caller.manualToCardAllowed === true,
     });
     if (rel.blocked) {
       if (supersededPaymentId && String(supersededPaymentId) === String(rel.holderId)) {

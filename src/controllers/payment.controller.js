@@ -20,6 +20,7 @@ export async function createPaymentIntent(req, res, next) {
     const result = await createIntent(req.validated, req.ctx, {
       userType: req.user?.userType || null,
       internalRequest: req.ctx?.internalRequest === true,
+      manualToCardAllowed: req.registrationIntentAuthority?.manualToCardAllowed === true,
       req,
     });
     res.success(result);

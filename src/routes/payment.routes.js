@@ -1,5 +1,6 @@
 import express from "express";
-import { createServiceAuthVerifier } from "../middlewares/serviceAuth.middleware.js";
+import { createServiceAuthVerifier, createIntentRegistrationServiceAuth } from "../middlewares/serviceAuth.middleware.js";
+import { requireRegistrationIntentAuthority } from "../middlewares/registrationIntentAuthority.middleware.js";
 import { forwardedInternalContext } from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import {
@@ -54,6 +55,8 @@ function internalAuth(req, res, next) {
 // P5 S3: signed service authority (report/enforce per PAYMENT_SERVICE_AUTH_MODE, default off), first.
 router.post("/intents/:paymentIntentId/capture", createServiceAuthVerifier("capture"));
 router.post("/intents/:paymentIntentId/cancel", createServiceAuthVerifier("cancel"));
+// P5 (b12): registration-backed intent create (manual-to-card binding takeover) - internal callers only.
+router.post("/intents", createIntentRegistrationServiceAuth());
 // P5: mixed identity on a payment mutation is refused before authentication (contract negative case).
 router.post(["/intents/:paymentIntentId/capture", "/intents/:paymentIntentId/cancel"], rejectMixedInternalIdentity);
 router.use(internalAuth);
@@ -67,6 +70,7 @@ router.use(internalAuth);
 // and checks the amount server-side.
 router.post(
   "/intents",
+  requireRegistrationIntentAuthority,
   idempotency(),
   zodValidate(zCreateIntent),
   createPaymentIntent

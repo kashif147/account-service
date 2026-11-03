@@ -101,6 +101,9 @@ const PORTAL_A = bearer({ userType: "PORTAL", id: "member-a" });
 const PORTAL_B = bearer({ userType: "PORTAL", id: "member-b" });
 const PORTAL_C = bearer({ tenantId: TC, userType: "PORTAL", id: "member-c" });
 const CRM = bearer({ userType: "CRM", id: "staff-1" });
+// P5 (b12): the manual-to-card takeover via intent create stands for events retry-payment, a CRM action
+// gated by the exact events:write permission - the switch calls use a CRM token carrying it.
+const CRM_EVENTS_WRITE = `Bearer ${jwt.sign({ id: "staff-1", sub: "staff-1", tenantId: TA, userType: "CRM", roles: [], permissions: ["events:write"] }, SECRET, { expiresIn: "1h" })}`;
 
 async function call(method, url, { auth, headers = {}, body } = {}) {
   const server = app.listen(0);
@@ -207,7 +210,7 @@ test("P1 a voided or switch-cancelled manual record cannot be posted (so cannot 
   // (b) cancelled by the MANUAL_TO_CARD switch (the L5 case)
   const reg2 = oid(0x9102);
   const rec2 = await listener.postManualEventPayment({ tenantId: TA, registrationId: reg2, amount: 5000, currency: "eur", method: "manual", userId: "staff-1" });
-  const card = await call("POST", "/api/payments/intents", { auth: CRM, body: crmBody(reg2) });
+  const card = await call("POST", "/api/payments/intents", { auth: CRM_EVENTS_WRITE, body: crmBody(reg2) });
   assert.equal(card.status, 200, card.text.slice(0, 200));
   const gl1 = await GL.countDocuments({ tenantId: TA });
   const post2 = await settle(listener.postManualEventPaymentPost({ tenantId: TA, paymentId: rec2.paymentId, method: "manual", profileId: "p1", userId: "staff-1" }));
@@ -231,7 +234,7 @@ test("P2 identical successful VOID retries keep the documented success outcome (
   // void of a record the card switch already cancelled: success, not an error (desired state reached)
   const reg2 = oid(0x9202);
   const rec2 = await listener.postManualEventPayment({ tenantId: TA, registrationId: reg2, amount: 5000, currency: "eur", method: "manual", userId: "staff-1" });
-  assert.equal((await call("POST", "/api/payments/intents", { auth: CRM, body: crmBody(reg2) })).status, 200);
+  assert.equal((await call("POST", "/api/payments/intents", { auth: CRM_EVENTS_WRITE, body: crmBody(reg2) })).status, 200);
   const v2 = await listener.voidManualEventPayment({ tenantId: TA, paymentId: rec2.paymentId, userId: "staff-1" });
   assert.deepEqual(v2, { paymentId: rec2.paymentId, voided: false, alreadyVoided: true });
   assert.equal((await holders(reg2))[0].mode, "stripe", "the void retry never releases the card holder");
