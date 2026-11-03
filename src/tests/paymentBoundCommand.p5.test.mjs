@@ -83,7 +83,7 @@ const stripeMutations = (id) => CALLS.filter((c) => c[1] === id && c[0] !== "ret
 
 // ---- callers ----
 const bearer = ({ tenantId = TA, userType = "CRM", id = "staff-1", permissions = [], roles = [] }) =>
-  `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles, permissions }, SECRET)}`;
+  `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles, permissions }, SECRET, { expiresIn: "1h" })}`;
 const CRM_FIN = bearer({ id: "staff-am", roles: ["AM"], permissions: ["payments:write", "payments:create", "accounts.admin:write", "accounts.journals:write"] });
 const CRM_APP = bearer({ id: "staff-mo", roles: ["MO"], permissions: ["application:write"] });
 const CRM_EVW = bearer({ id: "staff-ev", roles: ["EO"], permissions: ["events:write"] });

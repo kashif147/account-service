@@ -89,7 +89,7 @@ function seedPi(id, { amount = 5000, currency = "eur", status = "requires_captur
 }
 
 // ---- callers ----
-const bearer = ({ tenantId = TA, userType, id }) => `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles: [], permissions: [] }, SECRET)}`;
+const bearer = ({ tenantId = TA, userType, id }) => `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles: [], permissions: [] }, SECRET, { expiresIn: "1h" })}`;
 const PORTAL_A = bearer({ userType: "PORTAL", id: "member-a" });
 const PORTAL_B = bearer({ userType: "PORTAL", id: "member-b" });
 const PORTAL_C = bearer({ tenantId: TC, userType: "PORTAL", id: "member-c" });

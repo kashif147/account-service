@@ -91,7 +91,7 @@ function seedPi(id, { amount = 5000, currency = "eur", status = "requires_captur
 }
 
 // ---- callers ----
-const bearer = ({ tenantId = TA, userType, id }) => `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles: [], permissions: [] }, SECRET)}`;
+const bearer = ({ tenantId = TA, userType, id }) => `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles: [], permissions: [] }, SECRET, { expiresIn: "1h" })}`;
 const PORTAL_A = bearer({ userType: "PORTAL", id: "member-a" });
 const PORTAL_B = bearer({ userType: "PORTAL", id: "member-b" });
 const PORTAL_C = bearer({ tenantId: TC, userType: "PORTAL", id: "member-c" });
@@ -361,7 +361,11 @@ test("intents events-service creates as CRM keep a registration target and stay 
   const r2 = await call("POST", "/api/payments/intents", { auth: bearer({ userType: "CRM", id: "staff-2" }), body });
   assert.equal(r2.data.paymentIntentId, r1.data.paymentIntentId);
   // internal S2S call: payer has no (unverified) user id
-  const r3 = await call("POST", "/api/payments/intents", { headers: { "x-internal-request": "true", "x-tenant-id": TA, "x-user-id": "spoofed" }, body: { ...body, registrationId: oid(0xe6) } });
+  // (#19, deployed: an internal call carrying an unverified x-user-* identity is refused outright, 401
+  // UNVERIFIED_IDENTITY; before #19 it was accepted and the spoofed id ignored.)
+  const spoofed = await call("POST", "/api/payments/intents", { headers: { "x-internal-request": "true", "x-tenant-id": TA, "x-user-id": "spoofed" }, body: { ...body, registrationId: oid(0xe6) } });
+  assert.equal(spoofed.status, 401); assert.equal(spoofed.code, "UNVERIFIED_IDENTITY");
+  const r3 = await call("POST", "/api/payments/intents", { headers: { "x-internal-request": "true", "x-tenant-id": TA }, body: { ...body, registrationId: oid(0xe6) } });
   assert.equal(r3.status, 200, r3.text.slice(0, 200));
   assert.deepEqual((await row(r3.data.paymentIntentId)).payer, { userId: null, userType: "INTERNAL" });
 });
