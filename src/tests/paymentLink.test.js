@@ -343,6 +343,38 @@ test("full flow: Checkout completed -> PI requires_capture -> AUTHORISED -> exis
   assert.equal(r.failed, "ALREADY_AUTHORISED");
 });
 
+test("P5 (a) application view + label: a captured payment-link fee stays subscriptionFee with its binding; history untouched", { skip }, async () => {
+  await links.handlePaymentLinkRequested(request(A, "app-totals", 1));
+  const link = await PaymentLink.findOne({ tenantId: A, applicationId: "app-totals" }).lean();
+  await payerCompletes(link.checkoutSessionId, "pi_totals_1");
+  // application view (profile approval lookup): the bound subscriptionFee link row, tenant-scoped
+  const latest = await payments.findLatestApplicationPayment("app-totals", { tenantId: A });
+  assert.equal(String(latest._id), String(link.paymentId));
+  assert.equal(latest.purpose, "subscriptionFee");
+  assert.equal(latest.applicationBinding, "app-totals");
+  assert.equal(await payments.findLatestApplicationPayment("app-totals", { tenantId: "t-other" }), null);
+  // approval capture; an application payment never accepts a member link from the caller
+  await assert.rejects(() => payments.capturePaymentIntent("pi_totals_1", { tenantId: A, userId: "crm-1" }, { memberId: "m-x" }), /cannot be supplied for an application payment/);
+  const cap = await payments.capturePaymentIntent("pi_totals_1", { tenantId: A, userId: "crm-1" });
+  assert.equal(cap.captured, true);
+  const pay = await Payment.findById(link.paymentId).lean();
+  assert.equal(pay.status, "succeeded");
+  assert.equal(pay.purpose, "subscriptionFee", "label unchanged by capture");
+  assert.equal(pay.applicationBinding, "app-totals");
+  assert.equal(await Payment.countDocuments({ tenantId: A, applicationId: "app-totals", isActiveAttempt: { $ne: false } }), 1, "one live attempt");
+  // a historical applicationFee link row is not rewritten and still serves its application view
+  const hist = await Payment.create({ tenantId: A, purpose: "applicationFee", ledgerDomain: "membership", amount: 29900, currency: "eur", mode: "stripe", status: "succeeded", applicationId: "app-hist", source: "payment-link", isActiveAttempt: true, attemptNumber: 1, stripe: { paymentIntentId: "pi_hist_1" } });
+  const realRetrieve = stripeClient.paymentIntents.retrieve;
+  stripeClient.paymentIntents.retrieve = async (id, ...rest) => (id === "pi_hist_1" ? { id, status: "succeeded", amount: 29900, amount_received: 29900, currency: "eur", metadata: {} } : realRetrieve(id, ...rest));
+  try {
+    const histLatest = await payments.findLatestApplicationPayment("app-hist", { tenantId: A });
+    assert.equal(String(histLatest._id), String(hist._id));
+  } finally {
+    stripeClient.paymentIntents.retrieve = realRetrieve;
+  }
+  assert.equal((await Payment.findById(hist._id).lean()).purpose, "applicationFee", "history not relabelled");
+});
+
 test("race: old and new link both authorised -> keep the first, cancel the newer uncaptured PI", { skip }, async () => {
   await links.handlePaymentLinkRequested(request(A, "app-race", 1));
   const v1 = await PaymentLink.findOne({ tenantId: A, applicationId: "app-race", linkVersion: 1 }).lean();
