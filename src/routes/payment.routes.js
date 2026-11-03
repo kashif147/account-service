@@ -138,13 +138,15 @@ router.post(
   associateMemberLinksForTransactions
 );
 
-// Creates a succeeded Payment + GL journal: genuine internal S2S, or CRM finance write
-// (Accounts Manager / Deputy / ASU role + finance write permission). Tenant is the trusted
-// req.ctx tenant (recordExternal never reads a body tenant).
+// Creates a succeeded Payment + GL journal: CRM finance write only (Accounts Manager / Deputy /
+// ASU role + finance write permission). P5: the bare x-internal-request branch is removed - no
+// service calls this route, and a header-only internal call could otherwise create paid financial
+// state (a succeeded Payment carrying any applicationId, plus its GL) outside the signed payment
+// authority boundary. Tenant is the trusted req.ctx tenant (recordExternal never reads a body tenant).
 router.post(
   "/record-external",
-  requireInternalOrCrm,
-  requireInternalOrFinanceWrite,
+  requireCrmUser,
+  requireFinanceWrite,
   idempotency(),
   zodValidate(zRecordExternal),
   recordExternalPayment

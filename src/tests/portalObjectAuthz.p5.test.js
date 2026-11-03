@@ -3,8 +3,8 @@
 import { describe, expect, test } from "@jest/globals";
 import {
   requireFinanceRead,
+  requireFinanceWrite,
   requireInternalOrFinanceDataRead,
-  requireInternalOrFinanceWrite,
 } from "../middlewares/financePermission.middleware.js";
 import {
   createRequireCrmOrOwnMember,
@@ -101,22 +101,22 @@ describe("requireCrmUser / requireInternalOrCrm", () => {
   });
 });
 
-describe("record-external chain: requireInternalOrCrm -> requireInternalOrFinanceWrite", () => {
+describe("record-external chain (P5: CRM finance write only): requireCrmUser -> requireFinanceWrite", () => {
   const chain = async (req) => {
-    const a = await run(requireInternalOrCrm, req);
+    const a = await run(requireCrmUser, req);
     if (!a.allowed) return a;
-    return run(requireInternalOrFinanceWrite, req);
+    return run(requireFinanceWrite, req);
   };
   test("portal MEMBER / NON-MEMBER denied, even with payments:write and a finance role name", async () => {
     expect((await chain(PORTAL_A({ roles: ["MEMBER"], permissions: ["payments:write"] }))).allowed).toBe(false);
     expect((await chain(PORTAL_A({ roles: ["NON-MEMBER"], permissions: [] }))).allowed).toBe(false);
     expect((await chain(PORTAL_A({ roles: ["AM"], permissions: ["payments:write"] }))).allowed).toBe(false);
   });
-  test("CRM without finance role+permission denied; CRM AM + payments:write allowed; internal allowed", async () => {
+  test("CRM without finance role+permission denied; CRM AM + payments:write allowed; bare internal denied", async () => {
     expect((await chain(CRM(["payments:read"], { roles: ["MO"] }))).allowed).toBe(false);
     expect((await chain(CRM(["payments:write"], { roles: ["MO"] }))).allowed).toBe(false);
     expect((await chain(CRM(["payments:write"], { roles: ["AM"] }))).allowed).toBe(true);
-    expect((await chain(internal())).allowed).toBe(true);
+    expect((await chain(internal())).allowed).toBe(false);
   });
 });
 
