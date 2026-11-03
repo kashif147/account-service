@@ -384,7 +384,37 @@ async function resolveReusablePaymentAttempt({
  * @param {object} [caller] { userType, internalRequest, req } — used by
  *   assertIntentAuthorized to verify portal callers' amount and member ownership.
  */
+/**
+ * POST /api/payments/intents. P5 (b7): when the portal intent guard verified the caller's own
+ * application in THIS call, the returned Payment row - newly created or an existing attempt for
+ * the same application that is reused - carries applicationBinding (set-once, same tenant, same
+ * applicationId). Without that verification no binding is ever written.
+ */
 export async function createIntent(input, ctx, caller = {}) {
+  const out = {};
+  const result = await createIntentInner(input, ctx, caller, out);
+  await adoptVerifiedApplicationBinding(result, out, ctx);
+  return result;
+}
+
+async function adoptVerifiedApplicationBinding(result, out, ctx) {
+  const binding = out?.applicationBinding;
+  const id = result?.id;
+  if (!binding || !/^[a-f0-9]{24}$/i.test(String(id || "")) || !ctx?.tenantId) return;
+  await Payment.updateOne(
+    {
+      _id: id,
+      tenantId: ctx.tenantId,
+      applicationId: binding,
+      registrationId: { $in: [null, ""] },
+      purpose: { $in: ["applicationFee", "subscriptionFee"] },
+      applicationBinding: { $exists: false },
+    },
+    { $set: { applicationBinding: binding } },
+  );
+}
+
+async function createIntentInner(input, ctx, caller = {}, out = {}) {
   requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const parsed = zCreateIntent.parse(input);
   ensureIntegerCents(parsed.amount);
@@ -437,6 +467,8 @@ export async function createIntent(input, ctx, caller = {}) {
     caller,
   });
 
+  out.applicationBinding =
+    applicationBindingOnCreate({ isApplicationPayment, applicationId, guard: intentGuard }).applicationBinding || null;
   const stripeCaptureMethod =
     isApplicationPayment || isEventRegistrationPayment ? "manual" : "automatic";
   const logger = (await import("../config/logger.js")).default;
