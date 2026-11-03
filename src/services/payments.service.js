@@ -238,6 +238,11 @@ export function isReleasableBindingRow(row = {}) {
 
 const UNPOSTED_MANUAL_FILTER = { mode: "external", status: "manual_review" };
 
+// P5 F1: uncaptured, not-yet-authorised Stripe states that cancelPaymentIntent cancels at Stripe
+// (in addition to requires_capture). A settled/captured row is never overwritten by a cancel.
+const CANCELLABLE_UNAUTHORISED_STRIPE_STATUSES = ["requires_payment_method", "requires_confirmation", "requires_action"];
+const CANCEL_NEVER_OVERWRITE_STATUSES = ["succeeded", "partially_refunded", "refunded", "refund_required"];
+
 /**
  * P5 legacy participation. Rows written before registrationBinding existed (legacy Stripe
  * rows, manual/comp/invoice records) carry registrationId but no binding, so the unique index
@@ -2602,10 +2607,11 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}, opts = {}) 
 
   if (current.status === "canceled") {
     await Payment.updateOne(
-      { _id: payment._id },
+      { _id: payment._id, tenantId: payment.tenantId, status: { $nin: CANCEL_NEVER_OVERWRITE_STATUSES } },
       {
         $set: {
           status: "canceled",
+          "stripe.status": "canceled",
           "audit.updatedBy": ctx.userId || ctx.memberId || "system",
         },
       },
@@ -2642,53 +2648,68 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}, opts = {}) 
     };
   }
 
-  if (current.status !== "requires_capture") {
-    const nextStatus =
-      current.status === "requires_payment_method"
-        ? "payment_required"
-        : normalizeStripeStatusForPayment(current.status);
-    await Payment.updateOne(
-      { _id: payment._id },
-      {
-        $set: {
-          status: nextStatus,
-          "stripe.status": current.status,
-          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
-        },
-      },
-    );
-    return {
-      ok: true,
-      canceled: false,
-      status: nextStatus,
-      stripeStatus: current.status,
-      paymentIntentId,
-      paymentId: payment._id.toString(),
-    };
+  // P5 F1: "processing" is the only uncaptured, non-terminal state Stripe will not cancel (money is
+  // in flight). Refuse without touching the row so the caller can retry once Stripe settles.
+  if (current.status === "processing") {
+    throw new AppError("Payment is processing at Stripe; retry when it settles", 409, "PAYMENT_PROCESSING");
+  }
+  if (current.status !== "requires_capture" && !CANCELLABLE_UNAUTHORISED_STRIPE_STATUSES.includes(current.status)) {
+    throw new AppError(`PaymentIntent in status ${current.status} cannot be cancelled`, 409, "TRANSITION_NOT_ALLOWED");
   }
 
-  const canceled = await stripe.paymentIntents.cancel(
-    paymentIntentId,
-    {},
-    { idempotencyKey: stripeIdempotencyKey("cancel", payment._id.toString(), paymentIntentId) },
-  );
+  // Cancel every uncaptured, non-terminal intent at Stripe - an authorised hold (requires_capture)
+  // AND a not-yet-authorised intent (requires_payment_method / requires_confirmation / requires_action).
+  // Before F1 an unauthorised intent was left OPEN (200 canceled:false): its clientSecret could still
+  // confirm a payment for a rejected / cancelled registration. The key is server-derived and carries the
+  // observed Stripe status, so a retry in the same state reuses it, and a state change (e.g. a confirm
+  // racing this cancel) never replays an earlier cached Stripe error for a different state.
+  let canceled;
+  try {
+    canceled = await stripe.paymentIntents.cancel(
+      paymentIntentId,
+      {},
+      {
+        idempotencyKey: stripeIdempotencyKey(
+          current.status === "requires_capture" ? "cancel" : `cancel-${current.status}`,
+          payment._id.toString(),
+          paymentIntentId,
+        ),
+      },
+    );
+  } catch (err) {
+    // Nothing is written: no status change, no binding release. If the intent moved on
+    // concurrently (confirmed / captured / already canceled) the caller retries and the next
+    // attempt takes the branch for the NEW state; anything else is a retryable upstream failure.
+    if (err instanceof AppError) throw err;
+    throw new AppError("Stripe cancel failed; nothing was changed - retry", 502, "STRIPE_CANCEL_FAILED");
+  }
+  const nextStatus = normalizeStripeStatusForPayment(canceled.status);
 
-  await Payment.updateOne(
-    { _id: payment._id },
+  // One conditional update, only on a row that is not (meanwhile) settled. The registration binding is
+  // NOT unset here: a "canceled" holder is releasable (releasableBindingFilter), and the ONLY way a
+  // registration moves to another intent stays the named REPLACE_RELEASED_BINDING transition.
+  const isCanceled = canceled.status === "canceled";
+  const upd = await Payment.updateOne(
+    { _id: payment._id, tenantId: payment.tenantId, status: { $nin: CANCEL_NEVER_OVERWRITE_STATUSES } },
     {
       $set: {
-        status: normalizeStripeStatusForPayment(canceled.status),
+        status: nextStatus,
+        "stripe.status": canceled.status,
         "audit.updatedBy": ctx.userId || ctx.memberId || "system",
       },
     },
   );
+  if (upd.matchedCount === 0) {
+    const fresh = await Payment.findOne({ _id: payment._id, tenantId: payment.tenantId }).select({ status: 1 }).lean();
+    throw new AppError(`Payment moved to ${fresh?.status || "unknown"} during cancel`, 409, "TRANSITION_NOT_ALLOWED");
+  }
 
-  await recordBoundAudit(payment, bound, normalizeStripeStatusForPayment(canceled.status), ctx);
+  await recordBoundAudit(payment, bound, nextStatus, ctx);
 
   return {
     ok: true,
-    canceled: canceled.status === "canceled",
-    status: normalizeStripeStatusForPayment(canceled.status),
+    canceled: isCanceled,
+    status: nextStatus,
     paymentIntentId,
     paymentId: payment._id.toString(),
   };
