@@ -484,6 +484,52 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
   };
 }
 
+// Display fields GET /payments/attempts takes from the shared enrichment (the Online Payments
+// grid's identity columns). Contact details (email / phone) are deliberately NOT included.
+const ATTEMPT_DISPLAY_KEYS = [
+  "membershipNumber",
+  "fullName",
+  "membershipCategory",
+  "membershipStatus",
+  "joinDate",
+  "renewalDate",
+  "billingCycle",
+  "paymentMethod",
+];
+
+/**
+ * Same lookups / precedence as enrichStripePaymentItems (memberId first, else applicationId),
+ * for Payment attempt rows: one upstream call per distinct id, identity forwarded from req.
+ * @param {{key:string, memberId?:string|null, applicationId?:string|null}[]} refs
+ * @returns {Promise<Map<string, object>>} key -> display fields (allow-listed)
+ */
+export async function resolveAttemptDisplayFields(refs, req) {
+  const out = new Map();
+  if (!Array.isArray(refs) || !refs.length) return out;
+  const memberIds = [...new Set(refs.map((r) => r.memberId).filter(Boolean))];
+  const applicationIds = [
+    ...new Set(refs.filter((r) => !r.memberId).map((r) => r.applicationId).filter(Boolean)),
+  ];
+  if (!memberIds.length && !applicationIds.length) return out;
+  const [pendingByApp, approvedByMember] = await Promise.all([
+    loadPendingApplicationMap(applicationIds, req),
+    loadApprovedMemberMap(memberIds, req),
+  ]);
+  for (const ref of refs) {
+    if (!ref.memberId && !ref.applicationId) continue;
+    const enriched = enrichStripePaymentItem({
+      item: {},
+      identifiers: { memberId: ref.memberId || null, applicationId: ref.applicationId || null },
+      pendingByApp,
+      approvedByMember,
+    });
+    const display = {};
+    for (const k of ATTEMPT_DISPLAY_KEYS) display[k] = enriched[k] ?? null;
+    out.set(ref.key, display);
+  }
+  return out;
+}
+
 export async function enrichStripePaymentItems(rawItems, req) {
   debugLog("raw stripe items", {
     count: Array.isArray(rawItems) ? rawItems.length : 0,
