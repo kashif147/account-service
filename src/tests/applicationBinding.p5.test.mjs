@@ -31,6 +31,8 @@ delete process.env.AUTH_BYPASS_ENABLED;
 const SECRET = process.env.JWT_SECRET;
 const TA = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const APP_ID = "a1a1a1a1a1a1a1a1a1a1a1a1";
+const APP_ID2 = "a6a6a6a6a6a6a6a6a6a6a6a6"; // b8: purpose-switch cases
+const APP_ID3 = "a7a7a7a7a7a7a7a7a7a7a7a7";
 const ANNUAL = 29900;
 
 function freePort() {
@@ -79,8 +81,8 @@ globalThis.fetch = async (url, opts) => {
   const u = String(url);
   if (u.startsWith("http://portal.invalid/api/subscription-details/")) {
     const id = decodeURIComponent(u.split("/").pop());
-    if (id !== APP_ID) return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
-    return new Response(JSON.stringify({ data: { applicationId: APP_ID, subscriptionDetails: { membershipCategory: "General All Grades", paymentType: "Credit Card" } } }), { status: 200, headers: { "content-type": "application/json" } });
+    if (![APP_ID, APP_ID2, APP_ID3].includes(id)) return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
+    return new Response(JSON.stringify({ data: { applicationId: id, subscriptionDetails: { membershipCategory: "General All Grades", paymentType: "Credit Card" } } }), { status: 200, headers: { "content-type": "application/json" } });
   }
   return realFetch(url, opts);
 };
@@ -227,4 +229,56 @@ test("AB6 an existing unbound attempt reused by a guard-verified portal call ado
   const bound = await Payment.findById(res.data.id).lean();
   assert.equal(bound.applicationId, appId);
   assert.equal(bound.applicationBinding, appId);
+});
+
+// ---- P5 b8: portal switches application intents to the explicit purpose "applicationFee" ----
+const appFeeBody = (applicationId, amount = ANNUAL) => ({ purpose: "applicationFee", amount, currency: "eur", applicationId, metadata: { applicationId } });
+const activeAttempts = (applicationId) =>
+  Payment.find({ tenantId: TA, applicationId, mode: "stripe", isActiveAttempt: { $ne: false } }).lean();
+
+test("AB8 applicationFee portal intent: stored applicationFee with binding (no compatibility exception needed)", { skip }, async () => {
+  const appId = APP_ID3;
+  const res = await call("POST", "/api/payments/intents", { auth: PORTAL, body: appFeeBody(appId), headers: { "Idempotency-Key": "ab8-appfee" } });
+  assert.ok(res.status === 200 || res.status === 201, res.text.slice(0, 300));
+  const rows = await activeAttempts(appId);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].purpose, "applicationFee");
+  assert.equal(rows[0].applicationBinding, appId);
+  const pi = rows[0].stripe.paymentIntentId;
+  PIS.get(pi).status = "requires_capture";
+  await Payment.updateOne({ _id: rows[0]._id }, { $set: { status: "requires_capture", "stripe.status": "requires_capture" } });
+  const cap = await call("POST", `/api/payments/intents/${pi}/capture`, { auth: CRM_APP });
+  assert.equal(cap.status, 200, cap.text.slice(0, 300));
+});
+
+test("AB9 switch: an earlier reusable subscriptionFee attempt is REUSED by an applicationFee request (one live intent)", { skip }, async () => {
+  const appId = APP_ID2;
+  const first = await call("POST", "/api/payments/intents", { auth: PORTAL, body: intentBody(appId), headers: { "Idempotency-Key": "ab9-old-attempt" } });
+  assert.ok(first.status === 200 || first.status === 201, first.text.slice(0, 300));
+  const [old] = await activeAttempts(appId);
+  assert.equal(old.purpose, "subscriptionFee");
+  const piCountBefore = PIS.size;
+  const second = await call("POST", "/api/payments/intents", { auth: PORTAL, body: appFeeBody(appId), headers: { "Idempotency-Key": "ab9-new-attempt" } });
+  assert.ok(second.status === 200 || second.status === 201, second.text.slice(0, 300));
+  assert.equal(PIS.size, piCountBefore, "no second PaymentIntent created");
+  const live = await activeAttempts(appId);
+  assert.equal(live.length, 1);
+  assert.equal(String(live[0]._id), String(old._id));
+});
+
+test("AB10 switch: a non-reusable earlier subscriptionFee attempt is SUPERSEDED, never left active beside the new one", { skip }, async () => {
+  const appId = APP_ID2;
+  // different amount -> not reusable -> replacement attempt
+  const res = await call("POST", "/api/payments/intents", { auth: PORTAL, body: appFeeBody(appId, ANNUAL), headers: { "Idempotency-Key": "ab10-new" } });
+  assert.ok(res.status === 200 || res.status === 201, res.text.slice(0, 300));
+  const [prev] = await activeAttempts(appId);
+  PIS.get(prev.stripe.paymentIntentId).status = "canceled"; // earlier hold gone at Stripe -> not reusable
+  const r2 = await call("POST", "/api/payments/intents", { auth: PORTAL, body: appFeeBody(appId), headers: { "Idempotency-Key": "ab10-replacement" } });
+  assert.ok(r2.status === 200 || r2.status === 201, r2.text.slice(0, 300));
+  const live = await activeAttempts(appId);
+  assert.equal(live.length, 1, "exactly one active attempt across both purposes");
+  assert.equal(live[0].purpose, "applicationFee");
+  assert.notEqual(String(live[0]._id), String(prev._id));
+  const superseded = await Payment.findById(prev._id).lean();
+  assert.equal(superseded.isActiveAttempt, false);
 });
