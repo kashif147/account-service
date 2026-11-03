@@ -265,8 +265,10 @@ test("L5 manual void releases the binding atomically; a released (replaced) reco
   assert.equal(card.status, 200, card.text.slice(0, 200));
   const post = await listener.postManualEventPaymentPost({ tenantId: TA, paymentId: rec.paymentId, method: "manual", profileId: "p1", userId: "staff-1" })
     .then((v) => ({ ok: true, v }), (e) => ({ ok: false, code: e.code }));
-  assert.equal(post.ok, true, "cancelled record: post is a no-op");
-  assert.equal(post.v.alreadyPosted, true);
+  // OWNER DECISION (P5 integration): a record cancelled by MANUAL_TO_CARD is refused (#22 fail-closed
+  // transition), never answered "alreadyPosted" - events treats any 2xx post as paid and would confirm an
+  // unpaid registration after a partial failure. Nothing is posted either way.
+  assert.deepEqual(post, { ok: false, code: "ALREADY_VOIDED" }, "cancelled record: post is refused");
   // a still-unposted but released record (simulated) is refused
   const reg2 = oid(0x151);
   const rec2 = await listener.postManualEventPayment({ tenantId: TA, registrationId: reg2, amount: 5000, currency: "eur", method: "manual", userId: "staff-1" });
