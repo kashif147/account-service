@@ -239,6 +239,14 @@ test("B4 binding must equal the stored row: wrong object / purpose / domain -> 4
   for (const r of [a, reg, other, unbound]) assert.equal(stripeMutations(r.pi), 0);
 });
 
+test("B4b legacy application row stored as subscriptionFee + applicationId: bound applicationFee command resolves it; a subscription-only row stays unbound", { skip }, async () => {
+  const legacy = await stripeRow({ purpose: "applicationFee", extra: { purpose: "subscriptionFee" } });
+  const ok = await cap(legacy, cmd("capture", appBinding(legacy)));
+  assert.equal(ok.status, 200, ok.text.slice(0, 200)); assert.equal(ok.data.captured, true);
+  const wrong = await cap(legacy, cmd("capture", { ...appBinding(legacy), applicationId: oid() }));
+  assert.equal(wrong.status, 409); assert.equal(wrong.code, "PAYMENT_BINDING_MISMATCH");
+});
+
 test("B5 pre-payer-binding registration row: capture 409 PAYMENT_BINDING_UNVERIFIED, cancel (releasing money) allowed", { skip }, async () => {
   const legacy = await stripeRow({ purpose: "eventRegistration" });
   const c = await cap(legacy, cmd("capture", regBinding(legacy)));

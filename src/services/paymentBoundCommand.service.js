@@ -243,10 +243,16 @@ export async function resolveBoundPayment(cmd, { tenantId, paymentIntentId }, de
   if (!rowApp && !rowReg) throw err(409, "PAYMENT_UNBOUND", "This payment is not bound to a business object");
   const rowObject = cmd.domain === "application" ? rowApp : rowReg;
   const rowOther = cmd.domain === "application" ? rowReg : rowApp;
+  // Webhook-upserted application payments carry the schema default purpose "subscriptionFee"
+  // (see paymentMutationAuthority.middleware.js APPLICATION_ROW_PURPOSES): equivalent to
+  // applicationFee only for an application binding with a matching applicationId.
+  const purposeMatches =
+    str(row.purpose) === cmd.purpose ||
+    (cmd.domain === "application" && cmd.purpose === "applicationFee" && str(row.purpose) === "subscriptionFee");
   if (
     rowObject !== cmd.objectId ||
     rowOther ||
-    str(row.purpose) !== cmd.purpose ||
+    !purposeMatches ||
     str(row.ledgerDomain || "membership") !== DOMAIN_LEDGER[cmd.domain] ||
     (cmd.paymentId && String(row._id) !== cmd.paymentId)
   ) {
