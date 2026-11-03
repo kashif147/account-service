@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { AppError } from "../errors/AppError.js";
 
 const mem = new Map();
@@ -37,7 +38,18 @@ export function buildIdempotencyCacheKey(req, key) {
   ]);
 }
 
-export function idempotency() {
+function bodyFingerprint(req) {
+  if (req.boundPaymentCommand?.fingerprint) return req.boundPaymentCommand.fingerprint;
+  return crypto.createHash("sha256").update(JSON.stringify(req.body ?? {})).digest("hex");
+}
+
+/**
+ * @param {{ bindBody?: boolean }} [options] bindBody: the cached response is only replayed for
+ *   the SAME request body (bound payment command fingerprint, or the raw JSON body); the same
+ *   key with a different body is 409 IDEMPOTENCY_CONFLICT instead of the earlier response.
+ */
+export function idempotency(options = {}) {
+  const bindBody = options.bindBody === true;
   return (req, res, next) => {
     const key = req.header("Idempotency-Key");
 
@@ -75,8 +87,19 @@ export function idempotency() {
     if (!cacheKey) return next();
 
     // Check if we've seen this key before (same tenant + user + route)
+    const fingerprint = bindBody ? bodyFingerprint(req) : null;
     if (mem.has(cacheKey)) {
       const cached = mem.get(cacheKey);
+      if (bindBody && cached.fingerprint !== fingerprint) {
+        const conflict = new AppError(
+          "Idempotency-Key was already used with a different request",
+          409,
+          "IDEMPOTENCY_CONFLICT",
+        );
+        return res.status(409).json({
+          error: { message: conflict.message, code: conflict.code, status: 409 },
+        });
+      }
       return res.status(cached.status).json(cached.body);
     }
 
@@ -86,7 +109,7 @@ export function idempotency() {
     res.json = (body) => {
       const status = Number(res.statusCode) || 200;
       if (status >= 200 && status < 300) {
-        mem.set(cacheKey, { status, body });
+        mem.set(cacheKey, { status, body, fingerprint });
         const t = setTimeout(() => mem.delete(cacheKey), TTL_MS);
         if (typeof t?.unref === "function") t.unref();
       }

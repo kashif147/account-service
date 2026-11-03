@@ -380,8 +380,10 @@ test("L4 two concurrent different links on an unlinked payment: exactly one wins
   assert.ok([P1, P2].includes((await fresh(m.id)).profileId));
 });
 
-test("L5 genuine internal S2S (no user identity) is unchanged by the containment step", { skip }, async () => {
+test("L5 internal S2S must send the bound command (S1): no binding -> 400, nothing changed", { skip }, async () => {
   const r = await stripeRow({ purpose: "eventRegistration" });
   const res = await call("POST", `/api/payments/intents/${r.pi}/cancel`, { headers: INTERNAL });
-  assert.equal(res.status, 200, res.text.slice(0, 200));
+  assert.equal(res.status, 400, res.text.slice(0, 200));
+  assert.equal(res.code, "PAYMENT_BINDING_REQUIRED");
+  assert.equal(stripeMutations(r.pi), 0);
 });
