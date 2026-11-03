@@ -185,7 +185,10 @@ async function ensureLinkPayment(link) {
   try {
     const doc = await Payment.create({
       tenantId: link.tenantId,
-      purpose: "applicationFee",
+      // P5 decision (a): the membership fee taken at application is a subscription payment
+      // (subscriptionFee, counted in subscription totals). Application authority is the
+      // applicationBinding below, never the label. Historical applicationFee rows are not rewritten.
+      purpose: "subscriptionFee",
       ledgerDomain: "membership",
       amount: link.amount,
       currency: link.currency,
@@ -344,7 +347,7 @@ export async function handlePaymentLinkRequested(payload) {
     paymentId: String(payment._id),
     paymentLinkId: String(link._id),
     linkVersion: String(linkVersion),
-    purpose: "applicationFee",
+    purpose: "subscriptionFee",
     source: "payment-link",
   };
   const base = returnBase.base;

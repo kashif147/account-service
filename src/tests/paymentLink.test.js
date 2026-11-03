@@ -198,8 +198,10 @@ test("issue: Checkout Session (manual capture, <=24h, server price, tenant metad
   assert.equal(pay.status, "requires_action");
   assert.equal(pay.stripe.checkoutSessionId, link.checkoutSessionId);
   assert.equal(String(pay.paymentLinkId), String(link._id));
-  assert.equal(pay.purpose, "applicationFee");
+  assert.equal(pay.purpose, "subscriptionFee"); // P5 decision (a): membership fee = subscription payment
   assert.equal(pay.applicationBinding, "app-1"); // P5 b7: authoritative application binding
+  assert.equal(pay.ledgerDomain, "membership");
+  assert.equal(call.params.payment_intent_data.metadata.purpose, "subscriptionFee");
   const out = await OutboxEvent.findOne({ eventKey: `link:${A}:app-1:v1:issued` }).lean();
   assert.equal(out.tenantId, A);
   assert.equal(out.data.amount, 29900);
