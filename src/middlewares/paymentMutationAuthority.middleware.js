@@ -53,28 +53,49 @@ function norm(v) {
  * Business domain a stored Payment row is bound to, or null when it is not bound to exactly one
  * business object of a known purpose (fail closed).
  */
-// Webhook-upserted application payments are stored with the schema default purpose
-// "subscriptionFee" (payments.service.js reconcileStripeEvent $setOnInsert) while carrying the
-// applicationId - on DEV most open application holds look like this. Such a row is an
-// application payment for authorization purposes; a subscriptionFee row WITHOUT an
-// applicationId stays unbound.
-export const APPLICATION_ROW_PURPOSES = new Set(["applicationFee", "subscriptionFee"]);
+// P5 (b7): a row is an APPLICATION payment only through an authoritative stored binding:
+//   - purpose "applicationFee" with its applicationId (payment-link flow / explicit application
+//     intents), or
+//   - applicationBinding === applicationId, written at creation only when the portal intent
+//     guard verified the caller's own application (payments.service.js createPaymentIntent) or
+//     by account's own payment-link flow.
+// A "subscriptionFee" row that merely carries an applicationId (legacy portal application
+// intents, created before applicationBinding existed) is NOT inferred to be an application
+// payment: it is reported as "unverified-application" and every mutation fails closed (409
+// PAYMENT_APPLICATION_BINDING_UNVERIFIED). Its purpose is left as stored - subscription-service
+// reads purpose "subscriptionFee" for balances, so it is not rewritten.
+export const UNVERIFIED_APPLICATION = "unverified-application";
+
+export function hasAuthoritativeApplicationBinding(row) {
+  const app = norm(row?.applicationId);
+  if (!app) return false;
+  const purpose = norm(row.purpose);
+  if (purpose === "applicationFee") return true;
+  return purpose === "subscriptionFee" && norm(row.applicationBinding) === app;
+}
 
 export function bindingDomainOfRow(row) {
   if (!row) return null;
   const purpose = norm(row.purpose);
   const hasApp = norm(row.applicationId) !== "";
   const hasReg = norm(row.registrationId) !== "";
-  if (
-    APPLICATION_ROW_PURPOSES.has(purpose) && hasApp && !hasReg &&
-    (norm(row.ledgerDomain) || "membership") === "membership"
-  ) {
-    return "application";
+  if (hasApp && !hasReg && (norm(row.ledgerDomain) || "membership") === "membership") {
+    if (hasAuthoritativeApplicationBinding(row)) return "application";
+    if (purpose === "subscriptionFee") return UNVERIFIED_APPLICATION;
+    return null;
   }
   if (REGISTRATION_PURPOSES.has(purpose) && hasReg && !hasApp && norm(row.ledgerDomain) === "events") {
     return "registration";
   }
   return null;
+}
+
+export function unverifiedApplicationError() {
+  return new AppError(
+    "This payment's application binding cannot be verified; it cannot be captured or cancelled through this path",
+    409,
+    "PAYMENT_APPLICATION_BINDING_UNVERIFIED",
+  );
 }
 
 /** Exact business permission (or the ASU "*") - never an alias or a resource wildcard. */
@@ -90,7 +111,7 @@ async function defaultLoadRows({ transition, tenantId, paymentIntentId, paymentI
       ? { tenantId, "stripe.paymentIntentId": paymentIntentId }
       : { tenantId, _id: paymentId };
   return Payment.find(filter)
-    .select({ _id: 1, purpose: 1, ledgerDomain: 1, applicationId: 1, registrationId: 1, mode: 1 })
+    .select({ _id: 1, purpose: 1, ledgerDomain: 1, applicationId: 1, applicationBinding: 1, registrationId: 1, mode: 1 })
     .limit(2)
     .lean();
 }
@@ -149,6 +170,7 @@ export function createRequirePaymentMutationAuthority(transition, deps = {}) {
       }
       const row = rows[0];
       domain = bindingDomainOfRow(row);
+      if (domain === UNVERIFIED_APPLICATION) return next(unverifiedApplicationError());
       if (!domain) {
         return next(
           new AppError("This payment is not bound to a business object", 409, "PAYMENT_UNBOUND"),

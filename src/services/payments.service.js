@@ -96,6 +96,18 @@ function ledgerDomainForPurpose(purpose) {
     : "membership";
 }
 
+/**
+ * P5 (b7): the authoritative application binding written on a new Payment. Only when the portal
+ * intent guard verified that the application exists in this tenant and belongs to the caller
+ * (assertIntentAuthorized -> kind "application"). CRM / internal creations and member payments
+ * get none, so a subscriptionFee row is never treated as an application payment by inference.
+ */
+export function applicationBindingOnCreate({ isApplicationPayment, applicationId, guard }) {
+  const id = applicationId == null ? "" : String(applicationId).trim();
+  if (!isApplicationPayment || !id || guard?.kind !== "application") return {};
+  return { applicationBinding: id };
+}
+
 function isApplicationPaymentRequest({ purpose, applicationId, memberId }) {
   if (!applicationId) return false;
   if (purpose === "applicationFee") return true;
@@ -413,7 +425,7 @@ export async function createIntent(input, ctx, caller = {}) {
 
   // H-11: portal callers may only pay for themselves, and application fees must match the
   // synced catalogue price (see paymentIntentGuard.service.js for the per-kind source).
-  await assertIntentAuthorized({
+  const intentGuard = await assertIntentAuthorized({
     parsed,
     metadata,
     memberId,
@@ -1058,6 +1070,7 @@ export async function createIntent(input, ctx, caller = {}) {
       isActiveAttempt: true,
       // Only set memberId if applicationId is not present
       ...(applicationId ? { applicationId } : memberId ? { memberId } : {}),
+      ...applicationBindingOnCreate({ isApplicationPayment, applicationId, guard: intentGuard }),
       ...(registrationId ? { registrationId } : {}),
       ...(profileId ? { profileId } : {}),
       ...(productCode ? { productCode } : {}),
