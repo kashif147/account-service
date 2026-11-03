@@ -1552,7 +1552,7 @@ export async function setPaymentLinkOnce(payment, linkFields = {}) {
     if (v) set[f] = v;
   }
   if (Object.keys(set).length === 0) return { changed: false };
-  if (payment.purpose === "applicationFee") {
+  if (payment.purpose === "applicationFee" || (payment.applicationId && !payment.registrationId)) {
     throw new AppError(
       "profileId/memberId cannot be supplied for an application payment",
       400,
