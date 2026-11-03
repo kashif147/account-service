@@ -221,13 +221,41 @@ async function postManualEventJournalEntries(payment, { tenantId, registrationId
   }
 }
 
+const MANUAL_RECORD_KEY = (registrationId) => `acct:manual_record:${registrationId}`;
+
+function recordedMethod(payment) {
+  const m = /^manual-(manual|comp|invoice)-/.exec(String(payment?.external?.externalRef || ""));
+  return m ? m[1] : null;
+}
+
+async function appError(status, code, message) {
+  const { AppError } = await import("../errors/AppError.js");
+  return new AppError(message, status, code);
+}
+
+async function pushBoundAudit(Payment, payment, bound, status) {
+  if (!bound) return;
+  const { boundAuditEntry } = await import("../services/paymentBoundCommand.service.js");
+  await Payment.updateOne(
+    { _id: payment._id, tenantId: payment.tenantId },
+    {
+      $push: { auditHistory: boundAuditEntry(bound.cmd, status) },
+      $set: { "audit.updatedBy": `internal:${bound.cmd.actorUserId}` },
+    },
+  );
+}
+
 /**
  * Records a manual (comp/manual/invoice) events/courses payment. Called from
- * the /api/journal/events/manual-payment endpoint (events-service). By
- * default (deferPosting: true, the new normal path since registrations are
- * approval-gated) this only creates the Payment doc - no GL entry, no
- * profileId required yet. Pass deferPosting: false for the old
- * immediate-post behavior (kept for any caller that still wants it).
+ * the /api/journal/events/manual-payment endpoint (events-service). Posting is
+ * always deferred to CRM approval (postManualEventPaymentPost): this only creates the Payment
+ * doc - no GL entry, no profileId required yet. (The old immediate-post branch had no caller and
+ * is removed - P5.)
+ *
+ * P5: one active recorded payment per registration. The row carries a deterministic
+ * idempotencyKey (unique per tenant), so a concurrent or repeated record of the same registration
+ * cannot create a second row: an identical repeat (same amount / currency / method) returns the
+ * existing payment, anything else is 409 ALREADY_RECORDED. Voiding frees the key.
  */
 export async function postManualEventPayment({
   tenantId,
@@ -240,116 +268,167 @@ export async function postManualEventPayment({
   currency,
   method,
   userId,
-  deferPosting = true,
+  purpose = "eventRegistration",
+  bound = null,
 }) {
   const Payment = (await import("../models/payment.model.js")).default;
+  const cur = String(currency || "eur").toLowerCase();
 
-  const purpose = "eventRegistration";
-  const payment = await Payment.create({
+  const sameRecord = (p) =>
+    p.mode === "external" && p.status === "manual_review" && Number(p.amount) === Number(amount) &&
+    String(p.currency || "").toLowerCase() === cur && recordedMethod(p) === method;
+  const existing = await Payment.find({
     tenantId,
-    purpose,
-    ledgerDomain: "events",
     registrationId,
-    ...(profileId ? { profileId } : {}),
-    ...(memberId ? { memberId } : {}),
-    productCode,
-    eventCategoryCode,
-    amount,
-    currency: currency || "eur",
-    // "manual_review" when posting is deferred to approval - nothing has
-    // been recognized in the GL yet, regardless of method (Payment.status
-    // has no plain "pending" value; "manual_review" is the closest existing
-    // enum member and is semantically accurate here - this Payment is
-    // awaiting the CRM approval step before anything posts).
-    status: deferPosting ? "manual_review" : method === "invoice" ? "payment_required" : "succeeded",
-    mode: "external",
-    source: "events-service",
-    external: { externalRef: `manual-${method}-${registrationId}` },
-    audit: { createdBy: userId || "system", updatedBy: userId || "system" },
-  });
-
-  if (deferPosting || amount <= 0) {
-    // Nothing to post yet - either GL posting happens later at CRM approval
-    // (postManualEventPaymentPost below), or there's genuinely nothing to
-    // post (comp/zero-amount already-approved case).
-    return { paymentId: payment._id.toString() };
+    isActiveAttempt: { $ne: false },
+    status: { $in: ["manual_review", "processing", "requires_capture", "requires_action", "created", "payment_required", "succeeded"] },
+  }).limit(2).lean();
+  if (existing.length === 1 && sameRecord(existing[0])) {
+    return { paymentId: existing[0]._id.toString(), alreadyRecorded: true };
+  }
+  if (existing.length) {
+    throw await appError(409, "ALREADY_RECORDED", "A payment is already recorded for this registration");
   }
 
-  await postManualEventJournalEntries(payment, {
-    tenantId, registrationId, method, amount, eventCategoryCode, profileId, memberId,
-  });
-
-  // No payments.events.status.updated.v1 publish here - events-service already
-  // confirms manual/comp/invoice registrations synchronously when it makes this
-  // call; that event is only needed for the async Stripe webhook path above.
+  let payment;
+  try {
+    payment = await Payment.create({
+      tenantId,
+      purpose,
+      ledgerDomain: "events",
+      registrationId,
+      ...(profileId ? { profileId } : {}),
+      ...(memberId ? { memberId } : {}),
+      productCode,
+      eventCategoryCode,
+      amount,
+      currency: cur,
+      // "manual_review": nothing has been recognized in the GL yet, regardless of method
+      // (Payment.status has no plain "pending" value) - awaiting the CRM approval step.
+      status: "manual_review",
+      mode: "external",
+      source: "events-service",
+      idempotencyKey: MANUAL_RECORD_KEY(registrationId),
+      external: { externalRef: `manual-${method}-${registrationId}` },
+      audit: {
+        createdBy: bound ? `internal:${bound.cmd.actorUserId}` : userId || "system",
+        updatedBy: bound ? `internal:${bound.cmd.actorUserId}` : userId || "system",
+      },
+    });
+  } catch (e) {
+    if (e?.code !== 11000) throw e;
+    // Lost a concurrent record of the same registration: answer from the winner.
+    const winner = await Payment.findOne({ tenantId, idempotencyKey: MANUAL_RECORD_KEY(registrationId) }).lean();
+    if (winner && sameRecord(winner)) return { paymentId: winner._id.toString(), alreadyRecorded: true };
+    throw await appError(409, "ALREADY_RECORDED", "A payment is already recorded for this registration");
+  }
+  await pushBoundAudit(Payment, payment, bound, "manual_review");
   return { paymentId: payment._id.toString() };
 }
 
 /**
- * Posts a previously-recorded (deferPosting:true) manual events/courses
- * payment to the GL, at CRM approval time, once profileId is resolved.
- * Idempotent: a Payment that's already been posted (status no longer
- * "manual_review") is a no-op rather than double-posting.
+ * Posts a previously-recorded manual events/courses payment to the GL, at CRM approval time,
+ * once profileId is resolved.
+ *
+ * P5 transitions: manual_review -> processing (atomic claim, so two concurrent posts cannot both
+ * post) -> succeeded | payment_required. Already posted -> 200 alreadyPosted (no-op). Voided ->
+ * 409 ALREADY_VOIDED. The method must equal the recorded one. profileId / memberId are set once.
+ * A GL failure releases the claim back to manual_review.
  */
-export async function postManualEventPaymentPost({ tenantId, paymentId, method, profileId, memberId, userId }) {
+export async function postManualEventPaymentPost({ tenantId, paymentId, method, profileId, memberId, userId, bound = null }) {
   const Payment = (await import("../models/payment.model.js")).default;
 
   const payment = await Payment.findOne({ _id: paymentId, tenantId });
-  if (!payment) {
-    const { AppError } = await import("../errors/AppError.js");
-    throw AppError.notFound("Payment not found", { paymentId });
+  if (!payment) throw await appError(404, "PAYMENT_NOT_FOUND", "Payment not found");
+  if (payment.mode !== "external") {
+    throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment is not a manual payment");
+  }
+  const recorded = recordedMethod(payment);
+  const postMethod = method || recorded;
+  if (!postMethod || (recorded && postMethod !== recorded)) {
+    throw await appError(409, "METHOD_MISMATCH", "method does not match the recorded payment");
+  }
+  if (payment.status === "succeeded" || payment.status === "payment_required") {
+    return { paymentId: payment._id.toString(), alreadyPosted: true };
+  }
+  if (payment.status === "canceled") {
+    throw await appError(409, "ALREADY_VOIDED", "This payment was voided and cannot be posted");
   }
   if (payment.status !== "manual_review") {
-    // Already posted (or in a terminal state) - nothing to do.
-    return { paymentId: payment._id.toString(), alreadyPosted: true };
+    throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment cannot be posted now");
   }
 
   // P5: profileId / memberId are set once - never overwritten from the request body
   // (409 PROFILE_ALREADY_BOUND, nothing posted).
   const { setPaymentLinkOnce } = await import("../services/payments.service.js");
   await setPaymentLinkOnce(payment, { profileId, memberId });
-  payment.audit = { ...(payment.audit || {}), updatedBy: userId || "system" };
-  await payment.save();
+  if (!payment.profileId) throw await appError(400, "PROFILE_REQUIRED", "profileId is required to post");
 
-  if (payment.amount > 0) {
-    await postManualEventJournalEntries(payment, {
-      tenantId,
-      registrationId: payment.registrationId,
-      method,
-      amount: payment.amount,
-      eventCategoryCode: payment.eventCategoryCode,
-      profileId: payment.profileId,
-      memberId: payment.memberId,
-    });
+  const actor = bound ? `internal:${bound.cmd.actorUserId}` : userId || "system";
+  const claimed = await Payment.findOneAndUpdate(
+    { _id: payment._id, tenantId, status: "manual_review" },
+    { $set: { status: "processing", "audit.updatedBy": actor } },
+    { new: true },
+  );
+  if (!claimed) {
+    const now = await Payment.findOne({ _id: payment._id, tenantId }).lean();
+    if (now && (now.status === "succeeded" || now.status === "payment_required")) {
+      return { paymentId: payment._id.toString(), alreadyPosted: true };
+    }
+    throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment is being changed by another request");
   }
 
-  payment.status = method === "invoice" ? "payment_required" : "succeeded";
-  await payment.save();
+  try {
+    if (claimed.amount > 0) {
+      await postManualEventJournalEntries(claimed, {
+        tenantId,
+        registrationId: claimed.registrationId,
+        method: postMethod,
+        amount: claimed.amount,
+        eventCategoryCode: claimed.eventCategoryCode,
+        profileId: claimed.profileId,
+        memberId: claimed.memberId,
+      });
+    }
+  } catch (e) {
+    await Payment.updateOne({ _id: claimed._id, tenantId, status: "processing" }, { $set: { status: "manual_review" } });
+    throw e;
+  }
 
+  const finalStatus = postMethod === "invoice" ? "payment_required" : "succeeded";
+  await Payment.updateOne({ _id: claimed._id, tenantId, status: "processing" }, { $set: { status: finalStatus } });
+  await pushBoundAudit(Payment, claimed, bound, finalStatus);
   return { paymentId: payment._id.toString() };
 }
 
 /**
- * Voids a recorded-but-not-yet-posted manual/comp/invoice event payment, on
- * CRM rejection. Nothing was ever posted to the GL for a "manual_review"
- * Payment, so this is a plain status flip - no reversal needed. A no-op if
- * the payment was already posted or voided.
+ * Voids a recorded-but-not-yet-posted manual/comp/invoice event payment. Nothing was posted to
+ * the GL for a "manual_review" Payment, so this is a conditional status flip.
+ * P5: voided again -> 200 alreadyVoided; posted -> 409 ALREADY_POSTED (a posted GL needs a
+ * reversal, never a void); being posted -> 409. Frees the registration's record key.
  */
-export async function voidManualEventPayment({ tenantId, paymentId, userId }) {
+export async function voidManualEventPayment({ tenantId, paymentId, userId, bound = null }) {
   const Payment = (await import("../models/payment.model.js")).default;
 
-  const payment = await Payment.findOne({ _id: paymentId, tenantId });
-  if (!payment) {
-    const { AppError } = await import("../errors/AppError.js");
-    throw AppError.notFound("Payment not found", { paymentId });
+  const payment = await Payment.findOne({ _id: paymentId, tenantId }).lean();
+  if (!payment) throw await appError(404, "PAYMENT_NOT_FOUND", "Payment not found");
+  if (payment.mode !== "external") {
+    throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment is not a manual payment");
   }
-  if (payment.status !== "manual_review") {
-    return { paymentId: payment._id.toString(), voided: false };
+  const actor = bound ? `internal:${bound.cmd.actorUserId}` : userId || "system";
+  const voided = await Payment.findOneAndUpdate(
+    { _id: payment._id, tenantId, status: "manual_review" },
+    { $set: { status: "canceled", "audit.updatedBy": actor }, $unset: { idempotencyKey: "" } },
+    { new: true },
+  );
+  if (voided) {
+    await pushBoundAudit(Payment, voided, bound, "canceled");
+    return { paymentId: payment._id.toString(), voided: true };
   }
-
-  payment.status = "canceled";
-  payment.audit = { ...(payment.audit || {}), updatedBy: userId || "system" };
-  await payment.save();
-
-  return { paymentId: payment._id.toString(), voided: true };
+  const now = await Payment.findOne({ _id: payment._id, tenantId }).lean();
+  if (now?.status === "canceled") return { paymentId: payment._id.toString(), voided: false, alreadyVoided: true };
+  if (now?.status === "succeeded" || now?.status === "payment_required") {
+    throw await appError(409, "ALREADY_POSTED", "This payment was already posted; it needs a reversal, not a void");
+  }
+  throw await appError(409, "TRANSITION_NOT_ALLOWED", "This payment cannot be voided now");
 }

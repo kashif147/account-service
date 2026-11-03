@@ -16,13 +16,21 @@
 // same key is 409 PAYMENT_AMBIGUOUS. The row is looked up in the verified tenant only.
 //
 // This does NOT verify the caller's authority over the specific object (that needs the bound
-// command from the owning service). Genuine internal S2S calls are unchanged here.
+// command from the owning service). Genuine internal S2S calls must send the bound command
+// (paymentBoundCommand.service.js); an internal request carrying any user identity is refused.
 import mongoose from "mongoose";
 import { AppError } from "../errors/AppError.js";
 import { isCrmCaller, isTrustedInternalCall } from "./callerScope.middleware.js";
 import { collectRequestPermissions } from "../helpers/financePermissions.js";
 import { tenantOf } from "../helpers/tenantScope.js";
 import logger from "../config/logger.js";
+import {
+  carriesUserIdentity,
+  commandFingerprint,
+  expectedCallerKey,
+  parseBoundCommand,
+  resolveBoundPayment,
+} from "../services/paymentBoundCommand.service.js";
 
 export const TRANSITIONS = Object.freeze([
   "capture",
@@ -97,8 +105,38 @@ export function createRequirePaymentMutationAuthority(transition, deps = {}) {
   const log = deps.logger || logger;
 
   return async function requirePaymentMutationAuthority(req, res, next) {
-    // Genuine internal S2S (no user identity): unchanged by the containment step.
-    if (isTrustedInternalCall(req)) return next();
+    // Genuine internal S2S: only as a bound command (contract S1). The stored row must equal
+    // the named business object; nothing else is accepted from an internal caller.
+    if (isTrustedInternalCall(req)) {
+      try {
+        if (carriesUserIdentity(req.headers)) {
+          throw new AppError(
+            "An internal payment command must not carry user identity",
+            403,
+            "MIXED_IDENTITY",
+          );
+        }
+        const cmd = parseBoundCommand(transition, req.body);
+        const tenantId = norm(tenantOf(req));
+        const { row, existing } = await resolveBoundPayment(
+          cmd,
+          { tenantId, paymentIntentId: norm(req.params?.paymentIntentId) },
+          deps.boundDeps,
+        );
+        const callerKey = req.header("Idempotency-Key");
+        if (callerKey && callerKey !== expectedCallerKey(cmd, row ? String(row._id) : null)) {
+          throw new AppError(
+            "Idempotency-Key must be the deterministic key of this command",
+            400,
+            "IDEMPOTENCY_KEY_MISMATCH",
+          );
+        }
+        req.boundPaymentCommand = { cmd, row, existing: existing || [], fingerprint: commandFingerprint(cmd) };
+        return next();
+      } catch (e) {
+        return next(e);
+      }
+    }
     if (!isCrmCaller(req)) {
       return next(new AppError("This action is restricted to CRM staff", 403, "CRM_ONLY"));
     }

@@ -100,7 +100,7 @@ router.post(
   "/intents/:paymentIntentId/capture",
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("capture"),
-  idempotency(),
+  idempotency({ bindBody: true }),
   captureExistingPaymentIntent
 );
 
@@ -108,7 +108,7 @@ router.post(
   "/intents/:paymentIntentId/cancel",
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("cancel"),
-  idempotency(),
+  idempotency({ bindBody: true }),
   cancelExistingPaymentIntent
 );
 

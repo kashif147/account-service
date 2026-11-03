@@ -295,7 +295,7 @@ router.post(
   internalOrAuthenticated,
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("manual_record"),
-  idempotency(),
+  idempotency({ bindBody: true }),
   postManualEventPaymentHandler,
 );
 
@@ -307,7 +307,7 @@ router.post(
   internalOrAuthenticated,
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("manual_post"),
-  idempotency(),
+  idempotency({ bindBody: true }),
   postManualEventPaymentPostHandler,
 );
 
@@ -318,7 +318,7 @@ router.post(
   internalOrAuthenticated,
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("manual_void"),
-  idempotency(),
+  idempotency({ bindBody: true }),
   voidManualEventPaymentHandler,
 );
 

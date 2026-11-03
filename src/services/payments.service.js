@@ -7,6 +7,7 @@ import Payment, {
 } from "../models/payment.model.js";
 import Refund, { zCreateRefund } from "../models/refund.model.js";
 import { AppError } from "../errors/AppError.js";
+import { boundAuditEntry, stripeIdempotencyKey } from "./paymentBoundCommand.service.js";
 import { getStripe } from "../lib/stripe.js";
 import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
 import {
@@ -1575,13 +1576,53 @@ export async function setPaymentLinkOnce(payment, linkFields = {}) {
   return { changed: r.modifiedCount > 0 };
 }
 
-export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields = {}) {
+const NOT_CAPTURABLE_ROW = new Set(["canceled", "refunded", "partially_refunded", "refund_required", "failed"]);
+
+/**
+ * P5: the live PaymentIntent must be the one this row was created for - same amount, currency
+ * and (when Stripe carries one) tenant - before account captures or cancels it.
+ */
+function assertStripeMatchesRow(pi, payment) {
+  const metaTenant = pi?.metadata?.tenantId;
+  if (
+    Number(pi?.amount) !== Number(payment.amount) ||
+    String(pi?.currency || "").toLowerCase() !== String(payment.currency || "").toLowerCase() ||
+    (metaTenant && String(metaTenant) !== String(payment.tenantId))
+  ) {
+    throw new AppError("PaymentIntent does not match this payment", 409, "STRIPE_MISMATCH");
+  }
+}
+
+async function recordBoundAudit(payment, bound, status, ctx = {}) {
+  if (!bound) return;
+  await Payment.updateOne(
+    { _id: payment._id, tenantId: payment.tenantId },
+    {
+      $push: { auditHistory: boundAuditEntry(bound.cmd, status, ctx.correlationId) },
+      $set: { "audit.updatedBy": `internal:${bound.cmd.actorUserId}` },
+    },
+  );
+}
+
+export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields = {}, opts = {}) {
   if (!paymentIntentId) {
     throw AppError.badRequest("paymentIntentId is required");
   }
 
   const stripe = getStripe();
   const payment = await loadPaymentForIntent(paymentIntentId, ctx);
+  const { bound } = opts;
+
+  // P5 transition rules (both the bound command and the transitional user path).
+  if (payment.mode && payment.mode !== "stripe") {
+    throw new AppError("This payment is not a card payment", 409, "TRANSITION_NOT_ALLOWED");
+  }
+  if (payment.isActiveAttempt === false) {
+    throw new AppError("This payment attempt was superseded", 409, "PAYMENT_SUPERSEDED");
+  }
+  if (NOT_CAPTURABLE_ROW.has(payment.status)) {
+    throw new AppError(`A ${payment.status} payment cannot be captured`, 409, "TRANSITION_NOT_ALLOWED");
+  }
 
   // Callers resolving profileId/memberId only at approval (e.g. events-service
   // linking a just-created/linked attendee Profile) can attach it here,
@@ -1593,6 +1634,7 @@ export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields
   await setPaymentLinkOnce(payment, linkFields);
 
   const current = await stripe.paymentIntents.retrieve(paymentIntentId);
+  assertStripeMatchesRow(current, payment);
 
   if (current.status === "succeeded") {
     await reconcileStripeEvent(
@@ -1603,6 +1645,7 @@ export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields
       },
       ctx,
     );
+    await recordBoundAudit(payment, bound, "succeeded", ctx);
     return {
       ok: true,
       captured: false,
@@ -1614,19 +1657,19 @@ export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields
   }
 
   if (current.status !== "requires_capture") {
-    throw AppError.conflict(
+    throw new AppError(
       `PaymentIntent cannot be captured from status ${current.status}`,
+      409,
+      "NOT_CAPTURABLE",
       { stripeStatus: current.status, paymentIntentId },
     );
   }
 
+  // P5: the Stripe idempotency key is derived from the stored row, never from the request.
   const captured = await stripe.paymentIntents.capture(
     paymentIntentId,
     {},
-    {
-      idempotencyKey:
-        ctx.idempotencyKey || `capture-${paymentIntentId}-${payment._id}`,
-    },
+    { idempotencyKey: stripeIdempotencyKey("capture", payment._id.toString(), paymentIntentId) },
   );
 
   if (captured.status !== "succeeded") {
@@ -1653,6 +1696,7 @@ export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields
     },
     ctx,
   );
+  await recordBoundAudit(payment, bound, "succeeded", ctx);
 
   return {
     ok: true,
@@ -1663,14 +1707,20 @@ export async function capturePaymentIntent(paymentIntentId, ctx = {}, linkFields
   };
 }
 
-export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
+export async function cancelPaymentIntent(paymentIntentId, ctx = {}, opts = {}) {
   if (!paymentIntentId) {
     throw AppError.badRequest("paymentIntentId is required");
   }
 
   const stripe = getStripe();
   const payment = await loadPaymentForIntent(paymentIntentId, ctx);
+  const { bound } = opts;
+  if (payment.mode && payment.mode !== "stripe") {
+    throw new AppError("This payment is not a card payment", 409, "TRANSITION_NOT_ALLOWED");
+  }
+  // A superseded attempt may still be cancelled (releases a stray hold).
   const current = await stripe.paymentIntents.retrieve(paymentIntentId);
+  assertStripeMatchesRow(current, payment);
 
   if (current.status === "canceled") {
     await Payment.updateOne(
@@ -1682,6 +1732,7 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
         },
       },
     );
+    await recordBoundAudit(payment, bound, "canceled", ctx);
     return {
       ok: true,
       canceled: false,
@@ -1702,6 +1753,7 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
         },
       },
     );
+    await recordBoundAudit(payment, bound, "refund_required", ctx);
     return {
       ok: true,
       canceled: false,
@@ -1740,10 +1792,7 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
   const canceled = await stripe.paymentIntents.cancel(
     paymentIntentId,
     {},
-    {
-      idempotencyKey:
-        ctx.idempotencyKey || `cancel-${paymentIntentId}-${payment._id}`,
-    },
+    { idempotencyKey: stripeIdempotencyKey("cancel", payment._id.toString(), paymentIntentId) },
   );
 
   await Payment.updateOne(
@@ -1755,6 +1804,8 @@ export async function cancelPaymentIntent(paymentIntentId, ctx = {}) {
       },
     },
   );
+
+  await recordBoundAudit(payment, bound, normalizeStripeStatusForPayment(canceled.status), ctx);
 
   return {
     ok: true,

@@ -83,11 +83,14 @@ export async function getLatestApplicationPayment(req, res, next) {
 
 export async function captureExistingPaymentIntent(req, res, next) {
   try {
-    const { profileId, memberId } = req.body || {};
+    // Bound internal command (P5 S1): link fields only from the validated command.
+    const bound = req.boundPaymentCommand || null;
+    const { profileId, memberId } = bound ? bound.cmd.link || {} : req.body || {};
     const result = await capturePaymentIntent(
       req.params.paymentIntentId,
       req.ctx,
       { profileId, memberId },
+      { bound },
     );
     res.success(result);
   } catch (e) {
@@ -100,6 +103,7 @@ export async function cancelExistingPaymentIntent(req, res, next) {
     const result = await cancelPaymentIntent(
       req.params.paymentIntentId,
       req.ctx,
+      { bound: req.boundPaymentCommand || null },
     );
     res.success(result);
   } catch (e) {
