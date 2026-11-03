@@ -4,66 +4,6 @@ import * as gatewaySecurity from "@membership/policy-middleware/security";
 import { tenantContextMiddleware } from "@membership/policy-middleware";
 const { validateGatewayRequest } = gatewaySecurity;
 
-function decodeBase64Json(value) {
-  try {
-    const json = Buffer.from(value, "base64").toString("utf8");
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-
-function extractFromClientPrincipal(clientPrincipal) {
-  if (!clientPrincipal || typeof clientPrincipal !== "object") return null;
-
-  const claims = Array.isArray(clientPrincipal.claims)
-    ? clientPrincipal.claims
-    : [];
-
-  const claimMap = new Map();
-  for (const c of claims) {
-    if (c && c.typ) claimMap.set(c.typ, c.val);
-  }
-
-  const roleTypes = new Set(
-    [
-      clientPrincipal.role_typ,
-      "roles",
-      "http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
-    ].filter(Boolean)
-  );
-
-  const roles = claims
-    .filter((c) => c && roleTypes.has(c.typ))
-    .map((c) => c.val)
-    .filter(Boolean);
-
-  const tenantId =
-    claimMap.get("http://schemas.microsoft.com/identity/claims/tenantid") ||
-    claimMap.get("tid") ||
-    claimMap.get("tenantId") ||
-    null;
-
-  const userId =
-    claimMap.get(
-      "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier"
-    ) ||
-    claimMap.get("oid") ||
-    claimMap.get("sub") ||
-    claimMap.get(
-      "http://schemas.microsoft.com/identity/claims/objectidentifier"
-    ) ||
-    null;
-
-  return {
-    tenantId,
-    userId,
-    roles,
-    permissions: [],
-    raw: clientPrincipal,
-  };
-}
-
 function jwtSecret() {
   return (
     process.env.JWT_SECRET ||
@@ -72,140 +12,119 @@ function jwtSecret() {
   );
 }
 
-/**
- * userType for a gateway-header request that arrived WITHOUT x-user-type: some calling
- * services (profile-service, reporting-service, audit-service clients) forward the gateway
- * identity headers and the original Bearer token but not x-user-type. Taken only from a
- * Bearer token that verifies with this service's own secret AND names the same user and
- * tenant as the gateway headers; otherwise null (callers then fail closed on userType).
- * Never trusts an unverified header or a decoded-but-unverified payload.
- */
-export function verifiedBearerUserType(req, userId, tenantId) {
-  const header = req.headers.authorization || req.headers.Authorization;
-  if (typeof header !== "string" || !header.startsWith("Bearer ")) return null;
+/** Verify a ProjectShell user JWT with this service's secret: HS256 only, exp/nbf enforced. */
+function verifyUserJwt(token) {
   const secret = jwtSecret();
-  if (!secret) return null;
-  try {
-    const decoded = jwt.verify(header.slice(7), secret);
-    // The gateway sets x-user-id from the token's `id` and x-tenant-id from `tenantId`.
-    const uid = String(userId || "");
-    const tid = String(tenantId || "");
-    const tokenUsers = [decoded?.id, decoded?.sub].filter(Boolean).map(String);
-    const tokenTenant = String(
-      decoded?.tenantId || decoded?.tid || decoded?.tenantID || decoded?.tenant_id || "",
-    );
-    if (!uid || !tokenUsers.includes(uid)) return null;
-    if (!tid || tokenTenant !== tid) return null;
-    return typeof decoded.userType === "string" && decoded.userType
-      ? decoded.userType
-      : null;
-  } catch {
-    return null;
+  if (!secret) throw new Error("JWT secret not configured");
+  return jwt.verify(token, secret, { algorithms: ["HS256"] });
+}
+
+function bearerToken(req) {
+  const header = req.headers.authorization || req.headers.Authorization;
+  if (typeof header !== "string") return null;
+  const m = /^Bearer\s+(\S+)$/.exec(header.trim());
+  return m ? m[1] : null;
+}
+
+function headerValue(req, name) {
+  const v = req.headers[name];
+  return v == null ? "" : String(v).trim();
+}
+
+function normaliseRoles(roles) {
+  return Array.isArray(roles)
+    ? roles.map((role) => (typeof role === "string" ? role : role?.code)).filter(Boolean)
+    : [];
+}
+
+function setIdempotencyKey(req) {
+  const idempotencyKey = req.header("x-idempotency-key");
+  if (idempotencyKey) req.ctx.idempotencyKey = idempotencyKey;
+}
+
+/**
+ * Gateway-forwarded identity (x-jwt-verified / x-auth-source: gateway / x-user-*).
+ *
+ * The gateway does NOT sign the headers it forwards (no HMAC: trusted_headers.lua strips any
+ * x-gateway-signature, and policy-middleware's validateGatewayRequest only checks presence and
+ * shape). The headers are therefore only a claim. The gateway always forwards the original
+ * ProjectShell JWT as Authorization, and every calling service forwards it with the headers, so the
+ * identity is taken from that token, verified here (HS256, exp/nbf enforced). The headers must
+ * agree with the verified claims; on agreement they are rewritten from the claims so downstream
+ * consumers (PDP header path, outbound forwarding) only ever see verified values.
+ * x-token-expires-at is never trusted: it is overwritten from the verified exp.
+ *
+ * Fails closed: no token, invalid/expired token, identity mismatch -> 401; tenant mismatch -> 403.
+ */
+function authenticateForwardedIdentity(req, next) {
+  const validation = validateGatewayRequest(req);
+  if (!validation.valid) {
+    return next(AppError.unauthorized("Invalid gateway request", { tokenError: true, validationError: validation.reason }));
   }
+  const token = bearerToken(req);
+  if (!token) {
+    return next(AppError.unauthorized("Verified user token required", { tokenError: true, code: "VERIFIED_TOKEN_REQUIRED" }));
+  }
+  let decoded;
+  try {
+    decoded = verifyUserJwt(token);
+  } catch (e) {
+    return next(AppError.unauthorized("Invalid or expired token", { tokenError: true, code: "INVALID_TOKEN", jwtError: e?.name }));
+  }
+  const tokenUserId = String(decoded?.id || decoded?.sub || "");
+  const tokenTenantId = String(decoded?.tenantId || "");
+  const tokenUserType = typeof decoded?.userType === "string" ? decoded.userType : "";
+  if (!tokenUserId || !tokenTenantId) {
+    return next(AppError.unauthorized("Invalid token: missing identity", { tokenError: true, code: "INVALID_TOKEN" }));
+  }
+  const fwdUserId = headerValue(req, "x-user-id");
+  const fwdUserType = headerValue(req, "x-user-type");
+  if (fwdUserId !== tokenUserId || (fwdUserType && fwdUserType !== tokenUserType)) {
+    return next(AppError.unauthorized("Forwarded identity does not match the verified token", { tokenError: true, code: "IDENTITY_MISMATCH" }));
+  }
+  if (headerValue(req, "x-tenant-id") !== tokenTenantId) {
+    return next(new AppError("Tenant context mismatch", 403, "TENANT_CONTEXT_MISMATCH"));
+  }
+
+  const roles = normaliseRoles(decoded.roles);
+  const permissions = Array.isArray(decoded.permissions) ? decoded.permissions : [];
+  const email = typeof decoded.email === "string" ? decoded.email : "";
+
+  // Downstream consumers read these headers: make them the verified values.
+  req.headers["x-user-id"] = tokenUserId;
+  req.headers["x-tenant-id"] = tokenTenantId;
+  req.headers["x-user-type"] = tokenUserType;
+  req.headers["x-user-email"] = email;
+  req.headers["x-user-roles"] = JSON.stringify(decoded.roles || []);
+  req.headers["x-user-permissions"] = JSON.stringify(permissions);
+  if (decoded.exp) req.headers["x-token-expires-at"] = String(decoded.exp * 1000);
+  else delete req.headers["x-token-expires-at"];
+
+  req.ctx = { tenantId: tokenTenantId, userId: tokenUserId, roles, permissions };
+  setIdempotencyKey(req);
+  req.user = { sub: tokenUserId, id: tokenUserId, tenantId: tokenTenantId, email, userType: tokenUserType || null, roles, permissions };
+  req.userId = tokenUserId;
+  req.tenantId = tokenTenantId;
+  req.roles = roles;
+  req.permissions = permissions;
+  return next();
 }
 
 export async function ensureAuthenticated(req, res, next) {
-  // 1) Gateway-verified JWT flow (trust gateway headers with validation)
-  const jwtVerified = req.headers["x-jwt-verified"];
-  const authSource = req.headers["x-auth-source"];
-
-  if (jwtVerified === "true" && authSource === "gateway") {
-    // Validate gateway request (signature, IP, format)
-    const validation = validateGatewayRequest(req);
-    if (!validation.valid) {
-      console.warn("Gateway header validation failed:", validation.reason);
-      return next(
-        AppError.unauthorized("Invalid gateway request", {
-          tokenError: true,
-          validationError: validation.reason,
-        })
-      );
-    }
-
-    // Gateway has verified JWT and forwarded claims as headers
-    const userId = req.headers["x-user-id"];
-    const tenantId = req.headers["x-tenant-id"];
-    const userEmail = req.headers["x-user-email"];
-    const userType =
-      req.headers["x-user-type"] ||
-      verifiedBearerUserType(req, userId, tenantId);
-    const userRolesStr = req.headers["x-user-roles"] || "[]";
-    const userPermissionsStr = req.headers["x-user-permissions"] || "[]";
-
-    if (!userId || !tenantId) {
-      return next(
-        AppError.badRequest("Missing required authentication headers", {
-          tokenError: true,
-          missingHeaders: true,
-        })
-      );
-    }
-
-    let normalizedRoles = [];
-    let permissions = [];
-
-    try {
-      const rolesArray = JSON.parse(userRolesStr);
-      normalizedRoles = Array.isArray(rolesArray)
-        ? rolesArray
-            .map((role) => (typeof role === "string" ? role : role?.code))
-            .filter(Boolean)
-        : [];
-    } catch (e) {
-      console.warn("Failed to parse x-user-roles header:", e.message);
-    }
-
-    try {
-      permissions = JSON.parse(userPermissionsStr);
-      if (!Array.isArray(permissions)) {
-        permissions = [];
-      }
-    } catch (e) {
-      console.warn("Failed to parse x-user-permissions header:", e.message);
-    }
-
-    req.ctx = {
-      tenantId,
-      userId,
-      roles: normalizedRoles,
-      permissions,
-    };
-
-    // Handle idempotency key from headers
-    const idempotencyKey = req.header("x-idempotency-key");
-    if (idempotencyKey) {
-      req.ctx.idempotencyKey = idempotencyKey;
-    }
-
-    // Set user object for backward compatibility
-    req.user = {
-      sub: userId,
-      id: userId,
-      tenantId,
-      email: userEmail,
-      userType,
-      roles: normalizedRoles,
-      permissions,
-    };
-
-    req.userId = userId;
-    req.tenantId = tenantId;
-    req.roles = normalizedRoles;
-    req.permissions = permissions;
-
-    return next();
+  // 1) Gateway-forwarded identity: only with a verified original token that matches it.
+  if (req.headers["x-jwt-verified"] === "true" && req.headers["x-auth-source"] === "gateway") {
+    return authenticateForwardedIdentity(req, next);
+  }
+  // Any other forwarded-identity claim without the gateway marker is not an identity source.
+  if (req.headers["x-jwt-verified"] != null) {
+    return next(AppError.unauthorized("Invalid gateway request", { tokenError: true, validationError: "Unsupported auth source" }));
   }
 
-  // 2) Legacy Bearer JWT flow (fallback for direct service calls)
-  const header = req.headers.authorization || req.headers.Authorization;
-  if (header?.startsWith("Bearer ")) {
-    const token = header.split(" ")[1];
+  // 2) Bearer JWT (direct service calls forwarding the user's token)
+  const token = bearerToken(req);
+  if (token) {
     try {
-      const secret =
-        process.env.JWT_SECRET ||
-        process.env.ACCESS_TOKEN_SECRET ||
-        process.env.ACCESS_TOEKN_SECRET; // tolerate legacy typo
-      const decoded = jwt.verify(token, secret);
+      const decoded = verifyUserJwt(token);
 
       const tokenTenantId =
         decoded.tid ||
@@ -223,11 +142,7 @@ export async function ensureAuthenticated(req, res, next) {
         );
       }
 
-      const normalizedRoles = Array.isArray(decoded.roles)
-        ? decoded.roles
-            .map((role) => (typeof role === "string" ? role : role?.code))
-            .filter(Boolean)
-        : [];
+      const normalizedRoles = normaliseRoles(decoded.roles);
 
       req.ctx = {
         tenantId: tokenTenantId,
@@ -235,12 +150,7 @@ export async function ensureAuthenticated(req, res, next) {
         roles: normalizedRoles,
         permissions: decoded.permissions || [],
       };
-
-      // Handle idempotency key from headers
-      const idempotencyKey = req.header("x-idempotency-key");
-      if (idempotencyKey) {
-        req.ctx.idempotencyKey = idempotencyKey;
-      }
+      setIdempotencyKey(req);
       req.user = decoded;
       req.userId = decoded.sub || decoded.id;
       req.tenantId = tokenTenantId;
@@ -248,62 +158,18 @@ export async function ensureAuthenticated(req, res, next) {
       req.permissions = decoded.permissions || [];
       return next();
     } catch (e) {
-      console.error("JWT failed:", e.message);
+      console.error("JWT failed:", e.name);
       return next(
-        AppError.badRequest("Invalid token", {
+        AppError.unauthorized("Invalid token", {
           tokenError: true,
-          jwtError: e.message,
+          jwtError: e.name,
         })
       );
     }
   }
 
-  // 2) Azure App Service EasyAuth compatibility
-  const clientPrincipalB64 =
-    req.headers["x-ms-client-principal"] ||
-    req.headers["X-MS-CLIENT-PRINCIPAL"];
-  const aadAccessToken =
-    req.headers["x-ms-token-aad-access-token"] ||
-    req.headers["X-MS-TOKEN-AAD-ACCESS-TOKEN"];
-
-  if (clientPrincipalB64) {
-    const principal = decodeBase64Json(clientPrincipalB64);
-    const extracted = extractFromClientPrincipal(principal);
-    if (extracted && extracted.tenantId) {
-      // Populate context
-      req.ctx = {
-        tenantId: extracted.tenantId,
-        userId: extracted.userId,
-        roles: extracted.roles,
-        permissions: extracted.permissions,
-      };
-
-      // Handle idempotency key from headers
-      const idempotencyKey = req.header("x-idempotency-key");
-      if (idempotencyKey) {
-        req.ctx.idempotencyKey = idempotencyKey;
-      }
-      req.user = principal;
-      req.userId = extracted.userId;
-      req.tenantId = extracted.tenantId;
-      req.roles = extracted.roles;
-      req.permissions = extracted.permissions;
-
-      // If upstream provided an AAD token, make it available for downstream policy checks
-      if (!header && aadAccessToken) {
-        req.headers.authorization = `Bearer ${aadAccessToken}`;
-      }
-      return next();
-    }
-  }
-
-  // 3) Fallback: if AAD access token exists, surface it as Authorization for downstream
-  if (aadAccessToken) {
-    req.headers.authorization = `Bearer ${aadAccessToken}`;
-    // Do not verify here; allow downstream policy middleware to evaluate permissions
-    return next();
-  }
-
+  // The former Azure EasyAuth (x-ms-client-principal) and bare AAD access-token fallbacks took
+  // tenant and user from unverified headers; they are removed. No other identity source exists.
   return next(
     AppError.unauthorized("Authorization header required", {
       tokenError: true,
@@ -352,13 +218,9 @@ export const authenticate = ensureAuthenticated;
  * tenantId that disagrees, as a non-blocking TenantContextMismatch event — it
  * never returns 403.
  *
- * SECURITY NOTE (EasyAuth): WARN mode does NOT make any auth path trusted that
- * was not already. In particular the Azure EasyAuth `x-ms-client-principal`
- * path in `ensureAuthenticated` establishes the tenant from an UNVERIFIED
- * base64 header; tenantContextWarn only observes/re-pins whatever
- * `ensureAuthenticated` produced. Do NOT read that as cryptographic trust — the
- * EasyAuth (and forwarded-internal) tenant source remains an ENFORCE-mode
- * blocker to be resolved before switching mode away from "warn".
+ * SECURITY NOTE: WARN mode does NOT make any auth path trusted that was not already. The
+ * unverified EasyAuth `x-ms-client-principal` path has been removed from `ensureAuthenticated`;
+ * the forwarded-internal tenant source (x-internal-request) still rests on the network boundary.
  */
 export const tenantContextWarn = tenantContextMiddleware();
 

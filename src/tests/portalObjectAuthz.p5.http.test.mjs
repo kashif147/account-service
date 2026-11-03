@@ -379,21 +379,25 @@ function gatewayHeaders({ userId, tenantId = TENANT_A, userType, permissions = [
   return h;
 }
 
-test("gateway headers without x-user-type (profile-service style forward): CRM resolved only from a verified matching Bearer", async () => {
+test("gateway headers without x-user-type (profile-service style forward): identity only from a verified matching Bearer", async () => {
   const url = "/api/payments/intents/pi_a1/capture";
   await withPayments(async () => {
     const mo = bearer({ userType: "CRM", id: "staff-mo" });
     // matching verified Bearer -> CRM -> passes
     passed(await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo" }) }), "verified fallback");
-    // no Bearer -> userType unknown -> fail closed
-    assert.equal((await call("POST", url, { headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 403);
-    // Bearer for a different user than the gateway identity -> ignored
-    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "member-a1" }) })).status, 403);
-    // Bearer signed with another secret -> ignored
+    // no Bearer -> the forwarded headers are not an identity -> 401
+    assert.equal((await call("POST", url, { headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 401);
+    // Bearer for a different user than the gateway identity -> 401
+    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "member-a1" }) })).status, 401);
+    // Bearer signed with another secret -> 401
     const forged = `Bearer ${jwt.sign({ id: "staff-mo", sub: "staff-mo", tenantId: TENANT_A, userType: "CRM" }, "not-the-secret")}`;
-    assert.equal((await call("POST", url, { auth: forged, headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 403);
-    // explicit x-user-type always wins (PORTAL stays PORTAL)
-    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo", userType: "PORTAL" }) })).status, 403);
+    assert.equal((await call("POST", url, { auth: forged, headers: gatewayHeaders({ userId: "staff-mo" }) })).status, 401);
+    // x-user-type disagreeing with the verified token -> 401
+    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo", userType: "PORTAL" }) })).status, 401);
+    // forwarded tenant disagreeing with the verified token -> 403
+    assert.equal((await call("POST", url, { auth: mo, headers: gatewayHeaders({ userId: "staff-mo", tenantId: TENANT_C }) })).status, 403);
+    // stored/forged headers + x-internal-request, no token: not internal, not a user -> 401
+    assert.equal((await call("POST", url, { headers: { ...gatewayHeaders({ userId: "staff-mo", userType: "CRM" }), "x-internal-request": "true" } })).status, 401);
   });
 });
 
