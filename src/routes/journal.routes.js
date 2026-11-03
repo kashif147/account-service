@@ -287,6 +287,19 @@ router.post(
 // caller is events-service forwarding the originating user's identity: CRM event staff
 // (Add Attendee comp/manual/invoice, approve, reject), already gated there by the events PDP
 // permission. A PORTAL member never records, posts or voids a manual event payment.
+// A cached manual-record response is replayed only while that payment is still the live record
+// (P5 record -> void -> record: after a void inside the cache window the next record is processed
+// fresh and creates a new manual_review record instead of replaying the voided id).
+const LIVE_RECORD_STATUSES = new Set(["manual_review", "processing", "succeeded", "payment_required"]);
+async function manualRecordStillLive(cached, req) {
+  const paymentId = cached?.body?.data?.paymentId;
+  const tenantId = req.ctx?.tenantId || req.tenantId;
+  if (!paymentId || !tenantId) return false;
+  const Payment = (await import("../models/payment.model.js")).default;
+  const row = await Payment.findOne({ _id: paymentId, tenantId }).select({ status: 1 }).lean();
+  return Boolean(row && LIVE_RECORD_STATUSES.has(row.status));
+}
+
 // Events/courses manual (comp/manual/invoice) payment posting - called by
 // events-service, forwarding the original caller's gateway headers (same
 // pattern as internal.routes.js and profile-service's account.service.client.js)
@@ -295,7 +308,7 @@ router.post(
   internalOrAuthenticated,
   requireInternalOrCrm,
   createRequirePaymentMutationAuthority("manual_record"),
-  idempotency({ bindBody: true }),
+  idempotency({ bindBody: true, revalidate: manualRecordStillLive }),
   postManualEventPaymentHandler,
 );
 

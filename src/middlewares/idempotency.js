@@ -44,13 +44,18 @@ function bodyFingerprint(req) {
 }
 
 /**
- * @param {{ bindBody?: boolean }} [options] bindBody: the cached response is only replayed for
- *   the SAME request body (bound payment command fingerprint, or the raw JSON body); the same
- *   key with a different body is 409 IDEMPOTENCY_CONFLICT instead of the earlier response.
+ * @param {{ bindBody?: boolean, revalidate?: (cached: {status:number, body:any}, req) => Promise<boolean> }} [options]
+ *   bindBody: the cached response is only replayed for the SAME request body (bound payment
+ *   command fingerprint, or the raw JSON body); the same key with a different body is 409
+ *   IDEMPOTENCY_CONFLICT instead of the earlier response.
+ *   revalidate: on a cache hit, asked whether the cached response still describes live state. false
+ *   (or a throw) evicts the entry and the request is processed fresh - e.g. a manual record whose
+ *   payment was voided inside the cache window must not be replayed (record -> void -> record).
  */
 export function idempotency(options = {}) {
   const bindBody = options.bindBody === true;
-  return (req, res, next) => {
+  const revalidate = typeof options.revalidate === "function" ? options.revalidate : null;
+  return async (req, res, next) => {
     const key = req.header("Idempotency-Key");
 
     // If no key provided, continue without idempotency
@@ -100,7 +105,16 @@ export function idempotency(options = {}) {
           error: { message: conflict.message, code: conflict.code, status: 409 },
         });
       }
-      return res.status(cached.status).json(cached.body);
+      let live = true;
+      if (revalidate) {
+        try {
+          live = (await revalidate(cached, req)) === true;
+        } catch {
+          live = false;
+        }
+      }
+      if (live) return res.status(cached.status).json(cached.body);
+      mem.delete(cacheKey); // stale: the stored state decides (fresh processing below)
     }
 
     // Intercept the response to cache it — successful (2xx) responses only, so a
