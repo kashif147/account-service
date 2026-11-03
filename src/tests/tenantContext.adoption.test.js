@@ -173,11 +173,24 @@ test("11 only adopted routers reference the guard; no other router changed", () 
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith(".routes.js") || adopted.has(f)) continue;
     const src = fs.readFileSync(path.join(dir, f), "utf8");
+    if (f === "payment.routes.js") continue; // scoped adoption, asserted in 11b
     assert.ok(
       !src.includes("tenantContextWarn") && !src.includes("ensureAuthenticatedWithTenantContext"),
       `${f} must not reference the tenant guard`
     );
   }
+});
+test("11b payment router: guard ONLY on the user-only GET /attempts, registered before internalAuth", () => {
+  const pr = read(path.join("routes", "payment.routes.js"));
+  assert.ok(!pr.includes("tenantContextWarn"));
+  assert.equal((pr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 1);
+  const iRoute = pr.indexOf('"/attempts"');
+  const iChain = pr.indexOf("...ensureAuthenticatedWithTenantContext,");
+  const iInternal = pr.indexOf("\nrouter.use(internalAuth);");
+  assert.ok(iRoute > -1 && iChain > iRoute && iChain - iRoute < 40, "guard is the first middleware of /attempts");
+  assert.ok(iInternal > iChain, "/attempts is registered before the S2S internalAuth router.use");
+  // every route after router.use(internalAuth) stays without the guard
+  assert.ok(!pr.slice(iInternal).includes("ensureAuthenticatedWithTenantContext"));
 });
 test("12 mode remains warn", () => {
   const auth = read(path.join("middlewares", "auth.js"));

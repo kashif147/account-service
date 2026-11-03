@@ -39,7 +39,7 @@ usual `/api` mount.
                                                    posting)
   /reports            → reports.routes.js
   /payments           → payment.routes.js        (Stripe intents, checkout, reconcile, refunds,
-                                                   record-external)
+                                                   record-external, GET /attempts grid read)
   /batch-details      → batch.detail.routes.js
   /internal           → internal.routes.js       (reminder eligibility, internal write-off —
                                                    service-to-service only)

@@ -40,7 +40,9 @@ profile-service `my-profile` returns for the verified principal, else 403 `NOT_O
 journal/credit-note reads (`GET /`, `/stripe-payments`, `/credit-notes`, `/credit-notes/:docNo`
 — CRM finance screens only) and on `POST /online-payment` (no caller anywhere; CRM finance only,
 a PORTAL token is denied whatever permissions it carries, and a bare `x-internal-request` is a
-401). `requireFinanceRead` (DD runs, reconciliation, journal adjustments,
+401). `GET /payments/attempts` (CRM Online Payments grid: every persisted Payment attempt,
+read-only) carries the identical `/journal/stripe-payments` chain plus `validate`, and is
+registered in `payment.routes.js` BEFORE `router.use(internalAuth)` so it has no S2S path. `requireFinanceRead` (DD runs, reconciliation, journal adjustments,
 `GET /payments/refunds`) is CRM + a literal `payments:read`/`accounts.admin:read` claim, with no
 empty-claims bypass and no `accounts.reports:read` alias. On `/payments/*`: capture/cancel,
 `applications/:id/latest`, `batch` and the `/journal/events/manual-payment*` routes are
