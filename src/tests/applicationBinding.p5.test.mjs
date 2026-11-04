@@ -94,7 +94,7 @@ const CRM_PAY = bearer({ userType: "CRM", id: "staff-pay", permissions: ["paymen
 const CRM_APP = bearer({ userType: "CRM", id: "staff-mo", roles: ["MO"], permissions: ["application:write"] });
 
 async function call(method, url, { auth, headers = {}, body } = {}) {
-  const server = app.listen(0);
+  const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); }); // explicit IPv4 loopback: matches the 127.0.0.1 fetch target
   try {
     const h = { "content-type": "application/json", ...headers };
     if (auth) h.authorization = auth;
