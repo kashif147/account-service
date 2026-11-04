@@ -56,9 +56,12 @@ inside each child, which the runner compares with what the parent actually repor
 ran but was not reported, any cancelled test, any file without its done marker, or a wall-clock
 overrun fails the run (exit 2) even if `node --test` exited 0. A bare `node --test <file>` of an
 app-importing file (without the preload or force-exit) hangs after its tests on those cron
-intervals; use the npm script. With `RABBIT_URL` unset, the rabbitmq-middleware defaults to
-`amqp://localhost:5672`, so a file that publishes (e.g. `phase2bStream2.unit`) connects to whatever
-local broker is running. If a new
+intervals; use the npm script. The node:test suite never contacts a broker. The runner refuses to start (exit 2) if `RABBIT_URL` or
+`RABBITMQ_URL` is set to anything other than a loopback amqp(s) URL. When both are unset it pins
+`RABBIT_URL` to a closed loopback port, so the middleware's `amqp://localhost:5672` default is never
+used. The preload also blocks the middleware's `connect()` on the ESM and CJS instances and sets
+`publisher.publish` to the suite's usual no-op stub. A file that asserts on publishing installs its
+own recorder, which replaces that stub (see `scripts/test/rabbit-test-target.mjs`). If a new
 test leaves another handle open, close it in that test's `after` (or add it to the preload) —
 don't bring back `--test-force-exit`. The per-file header comments still saying
 `node --test --test-force-exit` predate this runner.

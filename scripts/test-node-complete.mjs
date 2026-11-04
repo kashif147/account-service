@@ -27,11 +27,15 @@
 //      NODE_TEST_WALL_MS     whole-run wall-clock limit (default 900000); on expiry the run's
 //                            process group is killed and the run fails
 //      NODE_TEST_RUN_DIR     keep ledger/events/summary here (default: a fresh temp dir)
+//      RABBIT_URL / RABBITMQ_URL  must be unset or loopback, otherwise the run is refused (exit 2)
+//                            before any test starts; unset -> RABBIT_URL is pinned to a closed
+//                            loopback port. No test ever connects (scripts/test/rabbit-test-target.mjs).
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pinnedRabbitEnv, rabbitEnvMessage, rabbitEnvProblems } from "./test/rabbit-test-target.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SETUP = path.join(ROOT, "scripts/test/node-test-setup.mjs");
@@ -184,6 +188,12 @@ async function main(argv) {
     return s.complete ? (s.totals.fail ? 1 : 0) : 2;
   }
 
+  // Fail fast, before any test process starts, if the shell points tests at a non-loopback broker.
+  const rabbitProblems = rabbitEnvProblems(process.env);
+  if (rabbitProblems.length) {
+    process.stderr.write(rabbitEnvMessage(rabbitProblems) + "\n");
+    return 2;
+  }
   const files = argv.length ? argv.map((f) => path.resolve(f)) : discoverNodeTestFiles();
   const timeoutMs = Number(process.env.NODE_TEST_TIMEOUT_MS) || 120000;
   const wallMs = Number(process.env.NODE_TEST_WALL_MS) || 900000;
@@ -205,7 +215,7 @@ async function main(argv) {
     cwd: ROOT,
     stdio: "inherit",
     detached: true, // own process group, so a wall-clock kill also takes the test children and their mongods
-    env: { ...process.env, NODE_TEST_LEDGER_DIR: path.join(runDir, "ledger") },
+    env: { ...pinnedRabbitEnv(process.env), NODE_TEST_LEDGER_DIR: path.join(runDir, "ledger") },
   });
   const killGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { /* already gone */ } };
   let timedOut = false;
