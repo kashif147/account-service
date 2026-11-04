@@ -266,3 +266,20 @@ for (const c of C.cases) {
     assert.equal(MUTATIONS.length, moved, `${c.name}: no second Stripe mutation`);
   }));
 }
+
+// Last: production boot runs with autoIndex off (NODE_ENV=production), where Model.init() builds no
+// index. connectDB must still create the replay-store indexes, or replays would pass as valid and
+// nonce rows would never expire.
+test("connectDB with autoIndex off still creates the nonce unique + TTL indexes", { skip }, async () => {
+  const { connectDB } = await import("../config/db.js");
+  await mongoose.disconnect();
+  const probeUri = uri.replace(/\/[^/?]+(\?|$)/, "/service_auth_index_probe$1");
+  await connectDB(probeUri, { autoIndex: false });
+  try {
+    const idx = await ServiceAuthNonce.collection.indexes();
+    assert.ok(idx.some((i) => i.unique && i.key.caller === 1 && i.key.nonce === 1), JSON.stringify(idx));
+    assert.ok(idx.some((i) => i.key.createdAt === 1 && i.expireAfterSeconds === 600), JSON.stringify(idx));
+  } finally {
+    await mongoose.connection.db.dropDatabase().catch(() => {});
+  }
+});
