@@ -180,8 +180,11 @@ router.get(
   listPaymentRefunds
 );
 
+// P5: refunds move money - CRM finance staff only. requireCrmUser (verified userType CRM, never
+// a genuine internal call) before the unchanged finance role + permission check.
 router.post(
   "/refunds",
+  requireCrmUser,
   requireFinanceWrite,
   idempotency(),
   zodValidate(zCreateRefund),

@@ -179,6 +179,11 @@ const PaymentSchema = new Schema(
     authorisedAt: { type: Date },
     expiryWarnedAt: { type: Date },
     lastStripeEventAt: { type: Date },
+    // P5 refund counters (cents), payments.service.js reserveRefundAmount: refundReservedCents is
+    // held only while a refund is in flight; refundCommittedCents counts completed refunds
+    // (initialised from the Refund rows). committed + reserved <= amount, atomically.
+    refundReservedCents: { type: Number, default: 0 },
+    refundCommittedCents: { type: Number },
     webhookEventIds: { type: [String], default: [], index: true },
     auditHistory: { type: [PaymentAuditEventSubSchema], default: [] },
   },

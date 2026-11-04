@@ -3597,8 +3597,10 @@ async function loadRefundPayment(parsed, ctx) {
 
 function assertPaymentAllowsRefund(payment) {
   if (!["succeeded", "partially_refunded"].includes(payment.status)) {
+    // paymentStatus, not `status`: AppError extras are assigned onto the error, and a `status`
+    // extra overwrote the HTTP status (a refund of a refunded payment answered 500).
     throw AppError.badRequest("Payment status does not allow refund", {
-      status: payment.status,
+      paymentStatus: payment.status,
     });
   }
 }
@@ -3658,6 +3660,100 @@ function paymentLikeForRefund(parsed, payment) {
   };
 }
 
+const strOrNull = (v) => (v == null || String(v).trim() === "" ? null : String(v).trim());
+
+/**
+ * P5 refund ownership: a refund request may only name the payment it refunds. Every
+ * identifier the body supplies next to the resolved Payment must agree with that Payment's
+ * stored links (they decide which Stripe charge is refunded and which ledger is debited).
+ */
+async function assertRefundTargetsPayment(parsed, payment, ctx) {
+  const conflict = (field) =>
+    new AppError("Refund request does not match the payment it targets", 409, "REFUND_TARGET_MISMATCH", { field });
+  if (parsed.paymentId && String(parsed.paymentId) !== String(payment._id)) throw conflict("paymentId");
+  const pi = strOrNull(parsed.paymentIntentId);
+  if (pi && pi !== strOrNull(payment.stripe?.paymentIntentId)) throw conflict("paymentIntentId");
+  const charge = strOrNull(parsed.chargeId);
+  if (charge && charge !== strOrNull(payment.stripe?.chargeId)) throw conflict("chargeId");
+  const bodyApp = strOrNull(parsed.applicationId);
+  const payApp = strOrNull(payment.applicationId);
+  if (bodyApp && payApp && bodyApp !== payApp) throw conflict("applicationId");
+  if (bodyApp && !payApp) throw conflict("applicationId");
+  const bodyMember = strOrNull(parsed.memberId);
+  if (bodyMember) {
+    const payMember = strOrNull(payment.memberId);
+    if (payMember) {
+      if (bodyMember !== payMember) throw conflict("memberId");
+    } else {
+      // Payment still linked only to its application: the member is the one that application's
+      // credit was claimed to (CLAIM-<applicationId> GL, finance-posted), never a body value.
+      const claimed = payApp ? await getClaimRecipientMemberIdForApplication(payApp, ctx.tenantId) : null;
+      if (!claimed || claimed !== bodyMember) throw conflict("memberId");
+    }
+  }
+}
+
+function refundAmountUnavailable(details = {}) {
+  return new AppError(
+    "Refund exceeds the remaining refundable amount on the payment (or another refund is in progress)",
+    409,
+    "REFUND_AMOUNT_UNAVAILABLE",
+    details,
+  );
+}
+
+/**
+ * Atomic, counter-based reservation of `amount` on the Payment before any money moves.
+ * Payment.refundCommittedCents = refunds completed through this path (initialised once from the
+ * tenant-scoped Refund rows), Payment.refundReservedCents = refunds in flight. The conditional
+ * update admits a refund only while committed + reserved + amount <= amount captured, so two
+ * concurrent refunds can never take more than what remains. commit() moves the amount from
+ * reserved to committed in ONE update (no window where it is counted twice or not at all);
+ * release() frees it when the refund did not happen.
+ */
+async function reserveRefundAmount(payment, amount, refundedRows) {
+  const scope = { _id: payment._id, tenantId: payment.tenantId };
+  // One-time initialisation for payments refunded before the counter existed.
+  await Payment.updateOne(
+    { ...scope, refundCommittedCents: { $exists: false } },
+    { $set: { refundCommittedCents: refundedRows } },
+  );
+  const reserved = await Payment.findOneAndUpdate(
+    {
+      ...scope,
+      status: { $in: ["succeeded", "partially_refunded"] },
+      $expr: {
+        $lte: [
+          {
+            $add: [
+              { $ifNull: ["$refundReservedCents", 0] },
+              { $ifNull: ["$refundCommittedCents", 0] },
+              amount,
+            ],
+          },
+          "$amount",
+        ],
+      },
+    },
+    { $inc: { refundReservedCents: amount } },
+    { new: true },
+  ).lean();
+  if (!reserved) throw refundAmountUnavailable({ refundCents: amount });
+  let open = true;
+  return {
+    async commit() {
+      if (!open) return;
+      open = false;
+      await Payment.updateOne(scope, { $inc: { refundReservedCents: -amount, refundCommittedCents: amount } });
+    },
+    async release() {
+      if (!open) return;
+      open = false;
+      await Payment.updateOne(scope, { $inc: { refundReservedCents: -amount } });
+    },
+  };
+}
+
 export async function createRefund(input, ctx) {
   requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const parsed = zCreateRefund.parse(input);
@@ -3689,6 +3785,7 @@ export async function createRefund(input, ctx) {
       );
     }
     assertPaymentAllowsRefund(payment);
+    await assertRefundTargetsPayment(parsed, payment, ctx);
   }
 
   const refundAmount =
@@ -3696,8 +3793,9 @@ export async function createRefund(input, ctx) {
   ensureIntegerCents(refundAmount);
 
   let linkedPaymentRemainingCents;
+  let alreadyRefunded = 0;
   if (payment) {
-    const alreadyRefunded = await sumRefundedForPayment(
+    alreadyRefunded = await sumRefundedForPayment(
       ctx.tenantId,
       payment._id,
     );
@@ -3725,129 +3823,138 @@ export async function createRefund(input, ctx) {
     tenantId: ctx.tenantId,
   });
 
-  const meta =
-    parsed.metadata && Object.keys(parsed.metadata).length
-      ? new Map(Object.entries(parsed.metadata))
-      : undefined;
+  // Atomic reservation before Stripe / any write: a concurrent second refund of the same payment
+  // cannot take more than what remains (released in finally, after the Refund row exists).
+  const reservation = payment ? await reserveRefundAmount(payment, refundAmount, alreadyRefunded) : null;
+  try {
+    const meta =
+      parsed.metadata && Object.keys(parsed.metadata).length
+        ? new Map(Object.entries(parsed.metadata))
+        : undefined;
 
-  if (parsed.mode === "stripe") {
-    const piFromRequest =
-      parsed.paymentIntentId != null &&
-      String(parsed.paymentIntentId).trim() !== ""
-        ? String(parsed.paymentIntentId).trim()
-        : null;
+    if (parsed.mode === "stripe") {
+      const piFromRequest =
+        parsed.paymentIntentId != null &&
+        String(parsed.paymentIntentId).trim() !== ""
+          ? String(parsed.paymentIntentId).trim()
+          : null;
 
-    let stripeRefundId = null;
-    let stripeChargeId = parsed.chargeId ?? undefined;
-    const paymentIntentForRecord =
-      piFromRequest ?? payment.stripe?.paymentIntentId ?? undefined;
+      let stripeRefundId = null;
+      let stripeChargeId = parsed.chargeId ?? undefined;
+      const paymentIntentForRecord =
+        piFromRequest ?? payment.stripe?.paymentIntentId ?? undefined;
 
-    if (piFromRequest) {
-      const refund = await stripe.refunds.create(
-        {
-          charge: parsed.chargeId,
-          payment_intent: piFromRequest,
-          amount: refundAmount,
-          metadata: parsed.metadata || {},
+      if (piFromRequest) {
+        const refund = await stripe.refunds.create(
+          {
+            charge: parsed.chargeId,
+            payment_intent: piFromRequest,
+            amount: refundAmount,
+            metadata: parsed.metadata || {},
+          },
+          { idempotencyKey: ctx.idempotencyKey || undefined },
+        );
+        stripeRefundId = refund.id;
+        stripeChargeId = refund.charge || stripeChargeId;
+      }
+
+      const refundDoc = await Refund.create({
+        tenantId: ctx.tenantId,
+        paymentId: payment._id,
+        mode: "stripe",
+        ...(parsed.memberId && { memberId: parsed.memberId }),
+        ...(parsed.applicationId && { applicationId: parsed.applicationId }),
+        amount: refundAmount,
+        currency: payment.currency,
+        refundDate: refundBusinessDate,
+        refNo: parsed.refNo,
+        stripe: {
+          ...(stripeRefundId && { refundId: stripeRefundId }),
+          ...(stripeChargeId && { chargeId: stripeChargeId }),
+          ...(paymentIntentForRecord && {
+            paymentIntentId: paymentIntentForRecord,
+          }),
         },
-        { idempotencyKey: ctx.idempotencyKey || undefined },
+        memo: parsed.memo,
+        ...(parsed.payoutMethod ? { payoutMethod: parsed.payoutMethod } : {}),
+        ...(meta && { metadata: meta }),
+      });
+      if (reservation) await reservation.commit(); // Refund row exists: reserved -> committed
+
+      const newStatus =
+        (await sumRefundedForPayment(ctx.tenantId, payment._id)) < payment.amount ? "partially_refunded" : "refunded";
+      await Payment.updateOne(
+        { _id: payment._id },
+        {
+          $set: {
+            status: newStatus,
+            "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+          },
+        },
       );
-      stripeRefundId = refund.id;
-      stripeChargeId = refund.charge || stripeChargeId;
+
+      const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
+        refundDoc,
+        payment,
+        ctx,
+      );
+
+      return {
+        ...(stripeRefundId != null && { refundId: stripeRefundId }),
+        refundDocId: refundDoc._id.toString(),
+        status: "ok",
+        glPosted,
+        glDocNo,
+        ...(piFromRequest == null && { stripeApiSkipped: true }),
+      };
     }
 
     const refundDoc = await Refund.create({
       tenantId: ctx.tenantId,
-      paymentId: payment._id,
-      mode: "stripe",
+      ...(payment && { paymentId: payment._id }),
       ...(parsed.memberId && { memberId: parsed.memberId }),
       ...(parsed.applicationId && { applicationId: parsed.applicationId }),
+      mode: "external",
       amount: refundAmount,
-      currency: payment.currency,
+      currency: payment?.currency ?? parsed.currency ?? "eur",
       refundDate: refundBusinessDate,
       refNo: parsed.refNo,
-      stripe: {
-        ...(stripeRefundId && { refundId: stripeRefundId }),
-        ...(stripeChargeId && { chargeId: stripeChargeId }),
-        ...(paymentIntentForRecord && {
-          paymentIntentId: paymentIntentForRecord,
-        }),
-      },
       memo: parsed.memo,
-      ...(parsed.payoutMethod ? { payoutMethod: parsed.payoutMethod } : {}),
+      payoutMethod: parsed.payoutMethod ?? "bank_transfer",
       ...(meta && { metadata: meta }),
     });
+    if (reservation) await reservation.commit(); // Refund row exists: reserved -> committed
 
-    const newStatus =
-      refundAmount < payment.amount ? "partially_refunded" : "refunded";
-    await Payment.updateOne(
-      { _id: payment._id },
-      {
-        $set: {
-          status: newStatus,
-          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+    if (payment) {
+      const newStatus =
+        (await sumRefundedForPayment(ctx.tenantId, payment._id)) < payment.amount ? "partially_refunded" : "refunded";
+      await Payment.updateOne(
+        { _id: payment._id },
+        {
+          $set: {
+            status: newStatus,
+            "audit.updatedBy": ctx.userId || ctx.memberId || "system",
+          },
         },
-      },
-    );
+      );
+    }
 
     const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
       refundDoc,
-      payment,
+      paymentLike,
       ctx,
     );
 
     return {
-      ...(stripeRefundId != null && { refundId: stripeRefundId }),
+      ok: true,
       refundDocId: refundDoc._id.toString(),
-      status: "ok",
       glPosted,
       glDocNo,
-      ...(piFromRequest == null && { stripeApiSkipped: true }),
+      ...(isStandaloneExternal && { standaloneExternal: true }),
     };
+  } finally {
+    if (reservation) await reservation.release();
   }
-
-  const refundDoc = await Refund.create({
-    tenantId: ctx.tenantId,
-    ...(payment && { paymentId: payment._id }),
-    ...(parsed.memberId && { memberId: parsed.memberId }),
-    ...(parsed.applicationId && { applicationId: parsed.applicationId }),
-    mode: "external",
-    amount: refundAmount,
-    currency: payment?.currency ?? parsed.currency ?? "eur",
-    refundDate: refundBusinessDate,
-    refNo: parsed.refNo,
-    memo: parsed.memo,
-    payoutMethod: parsed.payoutMethod ?? "bank_transfer",
-    ...(meta && { metadata: meta }),
-  });
-
-  if (payment) {
-    const newStatus =
-      refundAmount < payment.amount ? "partially_refunded" : "refunded";
-    await Payment.updateOne(
-      { _id: payment._id },
-      {
-        $set: {
-          status: newStatus,
-          "audit.updatedBy": ctx.userId || ctx.memberId || "system",
-        },
-      },
-    );
-  }
-
-  const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
-    refundDoc,
-    paymentLike,
-    ctx,
-  );
-
-  return {
-    ok: true,
-    refundDocId: refundDoc._id.toString(),
-    glPosted,
-    glDocNo,
-    ...(isStandaloneExternal && { standaloneExternal: true }),
-  };
 }
 
 /**
