@@ -85,6 +85,7 @@ const profileSvc = http.createServer((req, res) => {
       applicationId: id,
       applicationStatus: processed ? "processed" : "submitted",
       ...(id === "APP-APPROVED" ? { membershipNumber: "M-200" } : {}),
+      ...(id === "APP-SUBNUM" ? { membershipNumber: "M-900" } : {}), // not processed: the number alone decides nothing
       personalDetails: {
         personalInfo: { forename: "Test", surname: `Applicant ${id}` },
         contactInfo: { mobileNumber: "+353000000000", personalEmail: "leak-check@example.invalid" },
@@ -257,6 +258,7 @@ if (!skip) {
     pay("entryMember", { status: "succeeded", applicationId: "APP-ENTRYMEM", createdAt: at(170) }), // receipt entry memberId
     pay("captFail", { status: "succeeded", applicationId: "APP-FAIL-CAP", createdAt: at(180) }), // enrichment fails
     pay("procNoNum", { status: "succeeded", applicationId: "APP-PROCNONUM", createdAt: at(190) }), // processed, number unresolved
+    pay("subNum", { status: "succeeded", applicationId: "APP-SUBNUM", createdAt: at(195) }), // submitted, carries a membership number
   ];
   // Fillers share ONE createdAt so the _id tie-break is exercised across page boundaries.
   for (let i = 0; i < FILLERS; i += 1) {
@@ -283,6 +285,7 @@ if (!skip) {
     receipt("entryMember", { entry: { memberId: "M-300", applicationId: "APP-ENTRYMEM" } }),
     receipt("captFail"),
     receipt("procNoNum"),
+    receipt("subNum"),
     // tenant-B receipt carrying a tenant-A payment's docNo: must never attach to the A row
     { ...receipt("auth", { tenantId: TB }), memo: "foreign" },
   ]);
@@ -509,7 +512,7 @@ test("filters: status (lifecycle), purpose, registrationId, mode, dates", { skip
   assert.deepEqual(await st("partially_refunded"), [ids.partial, ids.partialUnknown].map(String).sort());
   assert.deepEqual(await st("refunded,partially_refunded"), [ids.refunded, ids.partialFull, ids.partial, ids.partialUnknown].map(String).sort());
   assert.deepEqual(await st("cancelled"), [ids.authOld, ids.cancel, ids.expired].map(String).sort());
-  assert.deepEqual(await st("captured"), [ids.captured, ids.member, ids.approved, ids.entryMember, ids.captFail, ids.procNoNum].map(String).sort());
+  assert.deepEqual(await st("captured"), [ids.captured, ids.member, ids.approved, ids.entryMember, ids.captFail, ids.procNoNum, ids.subNum].map(String).sort());
   assert.deepEqual(await st("unknown"), [String(ids.manual)]);
   assert.deepEqual(await st("failed,authorised"), [ids.failed, ids.auth, ids.event].map(String).sort());
   const statusCount = (await call(`${URL}?status=refunded`, { auth: CRM_A })).data.total;
@@ -705,7 +708,7 @@ test("canRefund (d) genuine unapproved application with a captured PENDING recei
 
 test("parity: old stripe-payments enrichment + CRM isRefundableUnapprovedRow vs new canRefund on the same receipts", { skip }, async () => {
   const { enrichStripePaymentItems } = await import("../services/stripe.payment.enrichment.service.js");
-  const keys = ["captured", "approved", "entryMember", "member", "partial", "captFail", "procNoNum"];
+  const keys = ["captured", "approved", "entryMember", "member", "partial", "captFail", "procNoNum", "subNum"];
   const glDocs = await GLTransaction.find({ tenantId: TA, docNo: { $in: keys.map((k) => `RCP-${ids[k]}`) } }).lean();
   assert.equal(glDocs.length, keys.length);
   const fakeReq = { headers: { authorization: CRM_A }, tenantId: TA, ctx: { tenantId: TA } };
@@ -721,10 +724,18 @@ test("parity: old stripe-payments enrichment + CRM isRefundableUnapprovedRow vs 
     if (newRule) assert.equal(oldRule, true, `${k}: new canRefund must imply the old grid's Refund`);
   }
   // identical wherever the shared enrichment resolved the row fully
-  for (const k of ["captured", "approved", "entryMember", "member", "partial"]) {
+  for (const k of ["captured", "approved", "entryMember", "member", "partial", "subNum"]) {
     assert.equal(table[k].newRule, table[k].oldRule, `${k}: ${JSON.stringify(table[k])}`);
   }
   // fail-closed divergences (old grid failed OPEN): enrichment failure, processed app without a resolved number
   assert.deepEqual(table.captFail, { oldRule: true, newRule: false });
   assert.deepEqual(table.procNoNum, { oldRule: true, newRule: false });
+});
+
+test("canRefund: a membership number on a NOT-processed application does not by itself decide approval", { skip }, async () => {
+  const r = await call(`${URL}?applicationId=APP-SUBNUM`, { auth: CRM_A });
+  const it = byId(r.data.items, "subNum");
+  assert.equal(it.lifecycleStatus, "captured");
+  assert.equal(it.receipt.settlementStatus, "PENDING");
+  assert.equal(it.actions.canRefund, true);
 });

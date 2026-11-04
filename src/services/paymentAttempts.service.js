@@ -270,7 +270,9 @@ export function isProvablyUnapprovedApplication(p, ids, identity) {
   if (ids.entryApplicationId && str(p.applicationId) && ids.entryApplicationId !== str(p.applicationId)) return false;
   if (!identity || identity.applicationOutcome !== "ok") return false;
   if (identity.resolvedMemberId) return false;
-  if (identity.applicationProcessed || identity.applicationMembershipNumber) return false;
+  // Approval is decided by the application status only (as the refund endpoint guard does); a
+  // membership number on a not-processed application does not by itself decide it.
+  if (identity.applicationProcessed) return false;
   return true;
 }
 
