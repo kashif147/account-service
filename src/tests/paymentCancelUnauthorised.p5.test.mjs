@@ -85,7 +85,7 @@ stripeClient.paymentIntents.cancel = async (id, _p, opts = {}) => {
 const cancelsOf = (pi) => CALLS.filter((c) => c[0] === "cancel" && c[1] === pi);
 
 async function call(method, url, { auth, headers = {}, body } = {}) {
-  const server = app.listen(0);
+  const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); }); // explicit IPv4 loopback: matches the 127.0.0.1 fetch target
   try {
     const h = { "content-type": "application/json", ...headers };
     if (auth) h.authorization = auth;

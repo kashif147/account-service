@@ -159,6 +159,13 @@ test("10 manual-payment S2S routes remain excluded (internalOrAuthenticated, no 
   }
   assert.equal((jr.match(/\n\s*internalOrAuthenticated,/g) || []).length, 3);
 });
+const ATTEMPTS_ROUTE_RE = /router\.get\(\s*"\/attempts",\s*\.\.\.ensureAuthenticatedWithTenantContext,\s*requireCrmUser,\s*defaultPolicyMiddleware\.requirePermission\("accounts\.journals", "read"\),\s*listPaymentAttemptsRules,\s*validate,\s*listPaymentAttemptsHandler\s*\);/;
+function stripAttemptsRoute(src) {
+  assert.match(src, ATTEMPTS_ROUTE_RE, "GET /attempts route has exactly the expected chain");
+  return src
+    .replace(ATTEMPTS_ROUTE_RE, "")
+    .replace(/^\s*ensureAuthenticatedWithTenantContext,\s*$/m, "");
+}
 test("11 only adopted routers reference the guard; no other router changed", () => {
   const dir = path.join(__dirname, "..", "routes");
   const adopted = new Set([
@@ -172,12 +179,28 @@ test("11 only adopted routers reference the guard; no other router changed", () 
   ]);
   for (const f of fs.readdirSync(dir)) {
     if (!f.endsWith(".routes.js") || adopted.has(f)) continue;
-    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    let src = fs.readFileSync(path.join(dir, f), "utf8");
+    // payment.routes.js: the ONLY exemption is the GET /attempts route itself (and its import);
+    // every other payment route is still checked here. Behaviour of that route through the real
+    // chain is proven in paymentAttempts.p5.test.mjs.
+    if (f === "payment.routes.js") src = stripAttemptsRoute(src);
     assert.ok(
       !src.includes("tenantContextWarn") && !src.includes("ensureAuthenticatedWithTenantContext"),
       `${f} must not reference the tenant guard`
     );
   }
+});
+test("11b payment router: guard ONLY on the user-only GET /attempts (behaviour: paymentAttempts.p5.test.mjs), registered before internalAuth", () => {
+  const pr = read(path.join("routes", "payment.routes.js"));
+  assert.ok(!pr.includes("tenantContextWarn"));
+  assert.equal((pr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 1);
+  const iRoute = pr.indexOf('"/attempts"');
+  const iChain = pr.indexOf("...ensureAuthenticatedWithTenantContext,");
+  const iInternal = pr.indexOf("\nrouter.use(internalAuth);");
+  assert.ok(iRoute > -1 && iChain > iRoute && iChain - iRoute < 40, "guard is the first middleware of /attempts");
+  assert.ok(iInternal > iChain, "/attempts is registered before the S2S internalAuth router.use");
+  // every route after router.use(internalAuth) stays without the guard
+  assert.ok(!pr.slice(iInternal).includes("ensureAuthenticatedWithTenantContext"));
 });
 test("12 mode remains warn", () => {
   const auth = read(path.join("middlewares", "auth.js"));

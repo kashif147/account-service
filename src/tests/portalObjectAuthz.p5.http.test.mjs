@@ -124,7 +124,7 @@ function q(result) {
 }
 
 async function call(method, url, { auth, headers = {}, body } = {}) {
-  const server = app.listen(0);
+  const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); }); // explicit IPv4 loopback: matches the 127.0.0.1 fetch target
   try {
     const base = `http://127.0.0.1:${server.address().port}`;
     const h = { "content-type": "application/json", ...headers };

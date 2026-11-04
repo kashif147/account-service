@@ -83,7 +83,7 @@ stripeClient.paymentIntents.cancel = async (id, _p, opts = {}) => {
 };
 
 async function send(request, bodyOverride) {
-  const server = app.listen(0);
+  const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); }); // explicit IPv4 loopback: matches the 127.0.0.1 fetch target
   try {
     const res = await fetch(`http://127.0.0.1:${server.address().port}${request.path}`, {
       method: request.method,

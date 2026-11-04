@@ -40,7 +40,8 @@ async function loadPaymentIntentIdByPaymentId(paymentIdStrings, tenantId) {
   return map;
 }
 
-function extractIdentifiers(entries = []) {
+/** The receipt's linked member / application ids, exactly as the GL stripe-payments grid reads them. */
+export function extractIdentifiers(entries = []) {
   const linked =
     entries.find((e) => e?.accountCode === "2020" && (e?.memberId || e?.applicationId)) ||
     entries.find((e) => e?.memberId || e?.applicationId) ||
@@ -203,15 +204,19 @@ async function mapWithConcurrency(items, limit, worker) {
   return out;
 }
 
-async function loadPendingApplicationMap(applicationIds, req) {
+// outcomes (optional, attempts listing only): requested applicationId -> "ok" | "not_found" |
+// "failed" | "unavailable", so a caller can fail closed. Behaviour without it is unchanged.
+async function loadPendingApplicationMap(applicationIds, req, outcomes = null) {
   const byApplicationId = new Map();
   if (!applicationIds.length) return byApplicationId;
   debugLog("pending applications input", { applicationIds });
+  const note = (id, v) => { if (outcomes) outcomes.set(String(id), v); };
 
   const base = (process.env.PROFILE_SERVICE_URL || "").replace(/\/$/, "");
   const subscriptionBase = (process.env.SUBSCRIPTION_SERVICE_URL || "").replace(/\/$/, "");
   if (!base) {
     logWarn("PROFILE_SERVICE_URL not configured");
+    for (const id of applicationIds) note(id, "unavailable");
     return byApplicationId;
   }
 
@@ -226,7 +231,10 @@ async function loadPendingApplicationMap(applicationIds, req) {
       const url = `${base}/api/applications/${encodeURIComponent(applicationId)}`;
       const payload = await fetchJson(url, req, { cache: fetchCache });
       const app = resolveApiPayload(payload);
-      if (!app) return;
+      if (!app) {
+        note(applicationId, "not_found");
+        return;
+      }
 
       const status = app?.applicationStatus;
       const hasMembershipNumber =
@@ -282,11 +290,16 @@ async function loadPendingApplicationMap(applicationIds, req) {
       }
 
       if (app && app.applicationId) byApplicationId.set(String(app.applicationId), app);
+      note(
+        applicationId,
+        app && app.applicationId && String(app.applicationId) === String(applicationId) ? "ok" : "not_found",
+      );
       debugLog("pending application map result", {
         applicationId,
         found: !!(app && app.applicationId),
       });
     } catch (error) {
+      note(applicationId, "failed");
       logWarn("Failed to fetch application for stripe payment enrichment", {
         applicationId,
         error: error.message,
@@ -482,6 +495,65 @@ function enrichStripePaymentItem({ item, identifiers, pendingByApp, approvedByMe
     billingCycle,
     paymentMethod,
   };
+}
+
+// Display fields GET /payments/attempts takes from the shared enrichment (the Online Payments
+// grid's identity columns). Contact details (email / phone) are deliberately NOT included.
+const ATTEMPT_DISPLAY_KEYS = [
+  "membershipNumber",
+  "fullName",
+  "membershipCategory",
+  "membershipStatus",
+  "joinDate",
+  "renewalDate",
+  "billingCycle",
+  "paymentMethod",
+];
+
+/**
+ * Same lookups / precedence as enrichStripePaymentItems (memberId first, else applicationId),
+ * for Payment attempt rows: one upstream call per distinct id, identity forwarded from req.
+ * Each entry also carries a non-display `identity` (never serialised as-is): the member id the
+ * stripe-payments grid would resolve for the same identifiers (`resolvedMemberId`: memberId, or
+ * the membership number of a processed application) plus how the application lookup went, so
+ * refund eligibility can fail closed.
+ * @param {{key:string, memberId?:string|null, applicationId?:string|null}[]} refs
+ * @returns {Promise<Map<string, object>>} key -> display fields (allow-listed) + identity
+ */
+export async function resolveAttemptDisplayFields(refs, req) {
+  const out = new Map();
+  if (!Array.isArray(refs) || !refs.length) return out;
+  const memberIds = [...new Set(refs.map((r) => r.memberId).filter(Boolean))];
+  const applicationIds = [
+    ...new Set(refs.filter((r) => !r.memberId).map((r) => r.applicationId).filter(Boolean)),
+  ];
+  if (!memberIds.length && !applicationIds.length) return out;
+  const applicationOutcomes = new Map();
+  const [pendingByApp, approvedByMember] = await Promise.all([
+    loadPendingApplicationMap(applicationIds, req, applicationOutcomes),
+    loadApprovedMemberMap(memberIds, req),
+  ]);
+  for (const ref of refs) {
+    if (!ref.memberId && !ref.applicationId) continue;
+    const enriched = enrichStripePaymentItem({
+      item: {},
+      identifiers: { memberId: ref.memberId || null, applicationId: ref.applicationId || null },
+      pendingByApp,
+      approvedByMember,
+    });
+    const display = {};
+    for (const k of ATTEMPT_DISPLAY_KEYS) display[k] = enriched[k] ?? null;
+    const application = !ref.memberId && ref.applicationId ? pendingByApp.get(String(ref.applicationId)) : null;
+    display.identity = {
+      resolvedMemberId: enriched.memberId || null,
+      applicationOutcome: ref.memberId ? "n/a" : applicationOutcomes.get(String(ref.applicationId)) || "failed",
+      applicationProcessed: isProcessedApplicationStatus(application?.applicationStatus),
+      applicationMembershipNumber:
+        String(application?.membershipNumber || application?._resolvedMembershipNumber || "").trim() || null,
+    };
+    out.set(ref.key, display);
+  }
+  return out;
 }
 
 export async function enrichStripePaymentItems(rawItems, req) {

@@ -2,7 +2,13 @@ import express from "express";
 import { createServiceAuthVerifier, createIntentRegistrationServiceAuth } from "../middlewares/serviceAuth.middleware.js";
 import { requireRegistrationIntentAuthority } from "../middlewares/registrationIntentAuthority.middleware.js";
 import { forwardedInternalContext } from "../middlewares/context.js";
-import { ensureAuthenticated } from "../middlewares/auth.js";
+import {
+  ensureAuthenticated,
+  ensureAuthenticatedWithTenantContext,
+} from "../middlewares/auth.js";
+import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
+import validate from "../middlewares/validate.js";
+import { listPaymentAttemptsRules } from "../validators/paymentAttempts.validators.js";
 import {
   requireFinanceWrite,
   requireInternalOrFinanceDataRead,
@@ -30,6 +36,7 @@ import {
   listPaymentRefunds,
   listPaymentsBatch,
   associateMemberLinksForTransactions,
+  listPaymentAttemptsHandler,
 } from "../controllers/payment.controller.js";
 import {
   zCreateIntent,
@@ -59,6 +66,22 @@ router.post("/intents/:paymentIntentId/cancel", createServiceAuthVerifier("cance
 router.post("/intents", createIntentRegistrationServiceAuth());
 // P5: mixed identity on a payment mutation is refused before authentication (contract negative case).
 router.post(["/intents/:paymentIntentId/capture", "/intents/:paymentIntentId/cancel"], rejectMixedInternalIdentity);
+
+// CRM Online Payments grid: read-only list of every persisted Payment attempt (authorised /
+// cancelled holds included, before any GL Receipt exists). Registered BEFORE
+// router.use(internalAuth) so its chain is exactly the one on GET /journal/stripe-payments
+// (user identity only - no x-internal-request path; PORTAL -> 403 CRM_ONLY before the PDP),
+// plus `validate` so invalid / unknown query params are a 400.
+router.get(
+  "/attempts",
+  ...ensureAuthenticatedWithTenantContext,
+  requireCrmUser,
+  defaultPolicyMiddleware.requirePermission("accounts.journals", "read"),
+  listPaymentAttemptsRules,
+  validate,
+  listPaymentAttemptsHandler
+);
+
 router.use(internalAuth);
 
 // P5 caller rules (internalAuth above only establishes identity). "Internal" below means a

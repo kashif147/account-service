@@ -14,6 +14,7 @@ import {
   associateMemberLinks,
 } from "../services/payments.service.js";
 import { AppError } from "../errors/AppError.js";
+import { listPaymentAttempts } from "../services/paymentAttempts.service.js";
 
 export async function createPaymentIntent(req, res, next) {
   try {
@@ -207,6 +208,31 @@ export async function listPaymentsBatch(req, res, next) {
       purpose: purpose || undefined,
     });
     res.success(payments);
+  } catch (e) {
+    next(e);
+  }
+}
+
+/**
+ * GET /api/payments/attempts - CRM Online Payments grid: every persisted Payment attempt
+ * (pending / authorised / captured / cancelled / failed / refunded), read-only. Tenant comes
+ * only from the verified identity (listPaymentAttempts -> requireTenantId(req)).
+ */
+export async function listPaymentAttemptsHandler(req, res, next) {
+  try {
+    const q = req.query || {};
+    const result = await listPaymentAttempts(req, {
+      statuses: q.status ? String(q.status).split(",").map((s) => s.trim()) : undefined,
+      purpose: q.purpose,
+      mode: q.mode,
+      applicationId: q.applicationId,
+      registrationId: q.registrationId,
+      from: q.from,
+      to: q.to,
+      limit: q.limit != null ? Number(q.limit) : undefined,
+      cursor: q.cursor,
+    });
+    res.success(result);
   } catch (e) {
     next(e);
   }
