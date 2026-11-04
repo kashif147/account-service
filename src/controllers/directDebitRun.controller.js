@@ -2,6 +2,16 @@ import { asyncHandler } from "../helpers/asyncHandler.js";
 import * as ddRunService from "../services/directDebitRun.service.js";
 import * as azureBlob from "../services/azure.blob.service.js";
 import { captureForwardHeaders } from "../services/directDebitUpstream.client.js";
+import {
+  canReadBankData,
+  runForCaller,
+  runItemForCaller,
+} from "../helpers/bankDataAccess.js";
+
+// PDP P3 (Q2, owner item O5 = mask): every response that echoes a run or its items goes through
+// runForCaller / runItemForCaller. Plaintext creditor / debtor bank details and the PAIN.008 XML only for a
+// caller holding payments.bank:read (helpers/bankDataAccess.js); the download route is gated in the router.
+const runOut = (req, run) => runForCaller(run, canReadBankData(req));
 
 function tenantId(req) {
   return req.ctx?.tenantId ?? req.tenantId ?? req.user?.tenantId;
@@ -23,7 +33,7 @@ export const createRun = asyncHandler(async (req, res) => {
     createdBy: actorId(req),
     req,
   });
-  res.created({ run });
+  res.created({ run: runOut(req, run) });
 });
 
 export const prepareRun = asyncHandler(async (req, res) => {
@@ -38,7 +48,7 @@ export const prepareRun = asyncHandler(async (req, res) => {
     status: "success",
     message: "Prepare job queued",
     data: {
-      run,
+      run: runOut(req, run),
       prepareJob: run.prepareJob,
     },
     timestamp: new Date().toISOString(),
@@ -65,7 +75,7 @@ export const validateRun = asyncHandler(async (req, res) => {
     tenantId(req),
     actorId(req),
   );
-  res.success({ run });
+  res.success({ run: runOut(req, run) });
 });
 
 export const approveRun = asyncHandler(async (req, res) => {
@@ -75,7 +85,7 @@ export const approveRun = asyncHandler(async (req, res) => {
     actorId(req),
     req.body.notes,
   );
-  res.success({ run });
+  res.success({ run: runOut(req, run) });
 });
 
 export const generatePain008 = asyncHandler(async (req, res) => {
@@ -84,7 +94,12 @@ export const generatePain008 = asyncHandler(async (req, res) => {
     tenantId(req),
     actorId(req),
   );
-  res.success({ run, xml: req.query.includeXml === "1" ? xml : undefined });
+  // The raw PAIN.008 XML carries every debtor IBAN: echoed only with the bank-data permission.
+  const allowed = canReadBankData(req);
+  res.success({
+    run: runForCaller(run, allowed),
+    xml: allowed && req.query.includeXml === "1" ? xml : undefined,
+  });
 });
 
 export const markSubmitted = asyncHandler(async (req, res) => {
@@ -94,7 +109,7 @@ export const markSubmitted = asyncHandler(async (req, res) => {
     actorId(req),
     req.body,
   );
-  res.success({ run });
+  res.success({ run: runOut(req, run) });
 });
 
 export const cancelRun = asyncHandler(async (req, res) => {
@@ -104,7 +119,7 @@ export const cancelRun = asyncHandler(async (req, res) => {
     actorId(req),
     req.body.reason,
   );
-  res.success({ run });
+  res.success({ run: runOut(req, run) });
 });
 
 export const deleteRun = asyncHandler(async (req, res) => {
@@ -122,7 +137,7 @@ export const importPain002 = asyncHandler(async (req, res) => {
     actorId(req),
     req.body,
   );
-  res.success(result);
+  res.success({ ...result, run: runOut(req, result.run) });
 });
 
 export const listRuns = asyncHandler(async (req, res) => {
@@ -131,7 +146,8 @@ export const listRuns = asyncHandler(async (req, res) => {
     limit: req.query.limit ? parseInt(req.query.limit, 10) : 50,
     skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
   });
-  res.success(result);
+  const allowed = canReadBankData(req);
+  res.success({ ...result, items: result.items.map((r) => runForCaller(r, allowed)) });
 });
 
 export const getRun = asyncHandler(async (req, res) => {
@@ -139,7 +155,7 @@ export const getRun = asyncHandler(async (req, res) => {
     req.params.id,
     tenantId(req),
   );
-  res.success({ run });
+  res.success({ run: runOut(req, run) });
 });
 
 export const listItems = asyncHandler(async (req, res) => {
@@ -152,7 +168,8 @@ export const listItems = asyncHandler(async (req, res) => {
       skip: req.query.skip ? parseInt(req.query.skip, 10) : 0,
     },
   );
-  res.success(result);
+  const allowed = canReadBankData(req);
+  res.success({ ...result, items: result.items.map((i) => runItemForCaller(i, allowed)) });
 });
 
 export const downloadPain008 = asyncHandler(async (req, res) => {
