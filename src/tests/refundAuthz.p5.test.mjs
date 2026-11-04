@@ -61,6 +61,7 @@ stripeClient.refunds.create = async (params, opts = {}) => {
 const { default: Payment } = await import("../models/payment.model.js");
 const { default: Refund } = await import("../models/refund.model.js");
 const { default: GLTransaction } = await import("../models/glTransaction.model.js");
+const { default: MaterializedBalance } = await import("../models/materializedBalance.model.js");
 const { default: app } = await import("../app.js");
 const { default: request } = await import("supertest");
 const appServer = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); });
@@ -102,6 +103,17 @@ async function seed({ tenantId = TA, amount = 5000, applicationId, memberId, sta
   if (applicationId) doc.applicationId = applicationId;
   if (memberId) doc.memberId = memberId;
   await Payment.collection.insertOne(doc);
+  // What the GL holds after the receipt posted (P5 revision: the ledger receipt is required and
+  // the credit the refund journal debits is always a cap): RCP-<id> + 2020 credit on its key.
+  await GLTransaction.collection.insertOne({
+    tenantId, date: new Date(), docType: "Receipt", docNo: `RCP-${_id}`, settlement: { provider: "Stripe", status: "PENDING" },
+    entries: [{ accountCode: "1220", dc: "D", amount }, { accountCode: "2020", dc: "C", amount, ...(applicationId ? { applicationId } : { memberId }) }],
+    createdAt: new Date(), updatedAt: new Date(),
+  });
+  const key = memberId || (applicationId ? `app:${applicationId}` : null);
+  if (key) {
+    await MaterializedBalance.collection.insertOne({ tenantId, memberId: key, accountCode: "2020", bucket: "current", year: new Date().getFullYear(), ledgerDomain: "membership", amount: -amount, updatedAt: new Date() });
+  }
   return { _id, pi, charge: `ch_authz_${seq}` };
 }
 const reservedOf = (row) => (row?.refundReservations || []).reduce((t, r) => t + (Number(r.amount) || 0), 0);
@@ -195,6 +207,7 @@ test("post-approval member refund: body memberId accepted only when it is the ap
     entries: [{ accountCode: "2020", dc: "D", amount: 5000, applicationId: "APP-CLAIMED" }, { accountCode: "2020", dc: "C", amount: 5000, memberId: "M-100" }],
     createdAt: new Date(), updatedAt: new Date(),
   });
+  await MaterializedBalance.collection.insertOne({ tenantId: TA, memberId: "M-100", accountCode: "2020", bucket: "current", year: new Date().getFullYear(), ledgerDomain: "membership", amount: -5000, updatedAt: new Date() });
   const before = stripeRefundCalls.length;
   const wrong = await postRefund(body(p.pi, { memberId: "M-999", amount: 1000 }));
   assert.equal(wrong.status, 409);

@@ -178,6 +178,18 @@ export async function handleRefundEvent(event) {
   if (claim && String(claim) !== String(payment.tenantId)) {
     return { ok: false, rejected: "tenant_mismatch", paymentId: payment._id, tenantId: payment.tenantId };
   }
+  // P5: record every Stripe refund of this charge that the API did not create (dashboard /
+  // support refunds), and complete our own operations the provider reports - so the payment's
+  // remaining amount and the credit its journal debits are never overstated. Idempotent per
+  // Stripe refund id; errors propagate (webhook answers 500, Stripe retries).
+  const refunds = obj.object === "refund"
+    ? [obj]
+    : Array.isArray(charge.refunds?.data) && charge.refunds.data.length && charge.refunds.has_more !== true
+      ? charge.refunds.data
+      : (await stripe().refunds.list({ charge: charge.id, limit: 100 }))?.data || [];
+  const { recordObservedStripeRefunds } = await import("./payments.service.js");
+  await recordObservedStripeRefunds(payment, refunds);
+
   const refundStatus = refundStatusFromCharge(charge);
   if (!refundStatus) return { ok: true, noop: "no_refund_amount" };
   const machine = nextPaymentStatus(payment.status, refundStatus);

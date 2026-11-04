@@ -667,14 +667,23 @@ test("H29-D invoice() forwards the trusted tenant to postBalancedJournal (source
 // exercise the real refundOperations.service flow with fake models.
 function fakeRefundOperationModel() {
   const docs = new Map();
+  const get = (d, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), d);
   const matches = (d, f) => Object.entries(f).every(([k, v]) => {
-    if (k === "state" && v && v.$in) return v.$in.includes(d.state);
-    if (v && typeof v === "object" && !(v instanceof Date) && !v.toHexString) return true;
-    return String(d[k]) === String(v);
+    if (k === "$or") return true;
+    const actual = get(d, k);
+    if (v && typeof v === "object" && Array.isArray(v.$in)) return v.$in.includes(actual);
+    if (v && typeof v === "object" && !(v instanceof Date) && !v.toHexString) return true; // $gt / $lte etc.
+    return String(actual) === String(v);
   });
   const find = (f) => [...docs.values()].find((d) => matches(d, f)) || null;
   const apply = (d, u) => {
-    Object.assign(d, u.$set || {});
+    for (const [k, v] of Object.entries(u.$set || {})) {
+      const parts = k.split(".");
+      let o = d;
+      for (const part of parts.slice(0, -1)) o = o[part] = o[part] || {};
+      o[parts[parts.length - 1]] = v;
+    }
+    for (const [k, v] of Object.entries(u.$inc || {})) d[k] = (Number(d[k]) || 0) + v;
     if (u.$push?.history) d.history = [...(d.history || []), u.$push.history];
     return d;
   };

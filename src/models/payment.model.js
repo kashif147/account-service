@@ -187,6 +187,8 @@ const PaymentSchema = new Schema(
       default: undefined,
     },
     refundCommittedCents: { type: Number },
+    // RefundOperation ids already counted in refundCommittedCents (exactly-once commit).
+    refundCommittedOps: { type: [Schema.Types.ObjectId], default: undefined },
     webhookEventIds: { type: [String], default: [], index: true },
     auditHistory: { type: [PaymentAuditEventSubSchema], default: [] },
   },

@@ -245,7 +245,7 @@ async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
     }
     return { registrationId, skipped: true, reason: started.existing.state === "failed" ? "previous_attempt_failed" : "refund_in_progress" };
   }
-  const result = await executeOperation(deps, started.op);
+  const result = await executeOperation(deps, started.op, started.token);
   return { registrationId, refundId: result.refundDocId, glPosted: result.glPosted, glDocNo: result.glDocNo };
 }
 
@@ -322,4 +322,13 @@ export async function processEventCancellationRefunds(payload, deps = defaultDep
   }
 
   return { processed: results.length, results };
+}
+
+/**
+ * GL for an events-domain Stripe refund made outside the API (observed by the webhook): the same
+ * reversal shape as an automatic cancellation refund (DR income / CR clearing), so the event
+ * payment's recognised revenue is not overstated.
+ */
+export async function postEventRefundJournalForObserved(refundDoc, payment) {
+  return postEventCancellationRefundJournal({ refundDoc, payment, tenantId: refundDoc.tenantId, deps: defaultDeps });
 }

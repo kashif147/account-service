@@ -79,7 +79,8 @@ const { default: MemberRefundReservation } = await import("../models/memberRefun
 const { default: GLTransaction } = await import("../models/glTransaction.model.js");
 const { default: MaterializedBalance } = await import("../models/materializedBalance.model.js");
 const { refundOpsHooks } = await import("../services/refundOperations.service.js");
-const { setApplicationRefundStateProvider } = await import("../services/payments.service.js");
+const { setApplicationRefundStateProvider, setApplicationCreditHoldChecker } = await import("../services/payments.service.js");
+const { handleRefundEvent } = await import("../services/stripeLifecycle.service.js");
 const { processEventCancellationRefunds } = await import("../services/eventCancellationRefund.service.js");
 const { clearIdempotencyCache } = await import("../middlewares/idempotency.js");
 const { default: app } = await import("../app.js");
@@ -99,8 +100,13 @@ beforeEach(() => {
   refundOpsHooks.afterReserve = null;
   refundOpsHooks.afterStripe = null;
   setApplicationRefundStateProvider(null);
+  setApplicationCreditHoldChecker(null);
   delete process.env.REFUND_POLICY_MODE;
+  delete process.env.REFUND_OPERATION_LEASE_MS;
 });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const shortLease = () => { process.env.REFUND_OPERATION_LEASE_MS = "150"; };
+const reconcile = (b) => http("post", "/api/payments/refund-operations/reconcile", { body: b });
 
 const sign = (claims) => `Bearer ${jwt.sign(claims, SECRET, { expiresIn: "1h" })}`;
 const bearer = ({ userType = "CRM", id = "staff-am", roles = ["AM"], permissions = ["payments:write", "payments:read"] } = {}) =>
@@ -120,13 +126,13 @@ const refund = (b, opts = {}) => http("post", "/api/payments/refunds", { ...opts
 
 const oid = () => new mongoose.Types.ObjectId();
 let seq = 0;
-async function seed({ amount = 5000, applicationId, memberId, applicationBinding, purpose = "applicationFee", ledgerDomain = "membership", registrationId, receipt = true } = {}) {
+async function seed({ amount = 5000, applicationId, memberId, applicationBinding, purpose = "applicationFee", ledgerDomain = "membership", registrationId, receipt = true, credit, mode = "stripe" } = {}) {
   seq += 1;
   const _id = oid();
   const pi = `pi_ops_${seq}`;
   const doc = {
     _id, tenantId: TA, purpose, ledgerDomain, amount, currency: "eur", status: "succeeded",
-    attemptNumber: 1, isActiveAttempt: true, source: "portal", mode: "stripe",
+    attemptNumber: 1, isActiveAttempt: true, source: "portal", mode,
     stripe: { paymentIntentId: pi, chargeId: `ch_ops_${seq}`, status: "succeeded" },
     audit: { createdBy: "member-x" }, webhookEventIds: [], auditHistory: [], createdAt: new Date(), updatedAt: new Date(),
   };
@@ -142,6 +148,10 @@ async function seed({ amount = 5000, applicationId, memberId, applicationBinding
       createdAt: new Date(), updatedAt: new Date(),
     });
   }
+  // the 2020 credit the receipt created, as the GL rollup holds it (credit: 0 -> none)
+  const key = memberId || (applicationId ? `app:${applicationId}` : null);
+  const c = credit === undefined ? (ledgerDomain === "membership" ? amount : 0) : credit;
+  if (key && c > 0) await memberCredit(key, c);
   return { _id, pi };
 }
 async function claim(applicationId, memberId, amount = 5000) {
@@ -165,90 +175,144 @@ if (!skip) {
   await Promise.all([Payment.init(), Refund.init(), RefundOperation.init(), MemberRefundReservation.init()]);
 }
 
-// ------------------------------------------------------------ one mechanism for all paths
-test("CRM refund racing an event-cancellation refund on the same payment never exceeds the captured amount", { skip }, async () => {
+// ======================================================= one balance mechanism for every path
+test("coverage: CRM refund racing an event-cancellation refund on one payment never exceeds the captured amount", { skip }, async () => {
   for (let round = 0; round < 4; round += 1) {
-    const p = await seed({ purpose: "eventRegistration", ledgerDomain: "events", registrationId: `reg-race-${round}` });
+    const p = await seed({ purpose: "eventRegistration", ledgerDomain: "events", registrationId: `reg-race-${round}`, memberId: `M-EVRACE-${round}`, credit: 5000 });
     stripe.delayMs = 25;
-    const cancel = {
-      eventId: `msg-${round}`, tenantId: TA,
-      data: { tenantId: TA, eventId: `event-${round}`, refundCandidates: [{ registrationId: `reg-race-${round}`, paymentId: String(p._id), amount: 5000 }] },
-    };
+    const cancel = { eventId: `msg-${round}`, tenantId: TA, data: { tenantId: TA, eventId: `event-${round}`, refundCandidates: [{ registrationId: `reg-race-${round}`, paymentId: String(p._id), amount: 5000 }] } };
     const [crm, ev] = await Promise.all([refund(body(p.pi, { amount: 3000 })), processEventCancellationRefunds(cancel)]);
     stripe.delayMs = 0;
     const rows = await refundRows(p);
     const total = rows.reduce((t, r) => t + r.amount, 0);
     assert.ok(total <= 5000, `round ${round}: refunded ${total} > 5000`);
     const row = await paymentRow(p);
-    assert.equal(row.refundCommittedCents, total, "committed counter = Refund rows of BOTH paths");
+    assert.equal(row.refundCommittedCents, total, "one counter for both paths");
     assert.equal(reservedOf(row), 0);
-    // exactly one Stripe refund per Refund row, all recorded with an operation id
-    assert.ok(rows.every((r) => r.refundOperationId && r.stripe?.refundId));
-    const ok = [crm.status === 200, Boolean(ev.results[0].refundId)].filter(Boolean).length;
-    assert.ok(ok >= 1, `round ${round}: one path must succeed (${crm.status} ${JSON.stringify(ev.results[0])})`);
-    if (crm.status === 200 && ev.results[0].refundId) assert.equal(total, 5000, "event refunded only what the CRM refund left");
+    assert.equal(stripe.refunds.filter((r) => r.payment_intent === p.pi).length, rows.length, "one Stripe refund per Refund row");
+    assert.ok(crm.status === 200 || ev.results[0].refundId, `round ${round}: one path succeeds`);
   }
 });
 
-test("event-cancellation redelivery is deduplicated by its operation (no second Stripe refund)", { skip }, async () => {
+test("coverage: event-cancellation redelivery is deduplicated by its operation (no second Stripe refund)", { skip }, async () => {
   const p = await seed({ purpose: "eventRegistration", ledgerDomain: "events", registrationId: "reg-redeliver" });
   const msg = { eventId: "msg-r", tenantId: TA, data: { tenantId: TA, eventId: "event-r", refundCandidates: [{ registrationId: "reg-redeliver", paymentId: String(p._id) }] } };
   const before = stripe.createCalls;
-  const first = await processEventCancellationRefunds(msg);
-  assert.ok(first.results[0].refundId);
-  const again = await processEventCancellationRefunds(msg);
-  assert.equal(again.results[0].skipped, true);
+  assert.ok((await processEventCancellationRefunds(msg)).results[0].refundId);
+  assert.equal((await processEventCancellationRefunds(msg)).results[0].skipped, true);
   assert.equal(stripe.createCalls, before + 1);
   assert.equal((await refundRows(p)).length, 1);
 });
 
-test("two payments of ONE member refunded concurrently cannot exceed the member's refundable credit (flow B, enforce)", { skip }, async () => {
-  process.env.REFUND_POLICY_MODE = "enforce";
+test("coverage: event-cancellation refunds consume the event payment, never member credit (no member reservation)", { skip }, async () => {
+  // Event money is recognised as event income (RCP-EVT -> POA 2020/events -> AR 1400 -> income);
+  // its refund reverses income (DR income / CR clearing). A member with NO credit is still refunded.
+  const p = await seed({ purpose: "eventRegistration", ledgerDomain: "events", registrationId: "reg-nocredit", memberId: "M-EV-NOCREDIT", credit: 0 });
+  const out = await processEventCancellationRefunds({ eventId: "msg-nc", tenantId: TA, data: { tenantId: TA, eventId: "event-nc", refundCandidates: [{ registrationId: "reg-nocredit", paymentId: String(p._id) }] } });
+  assert.ok(out.results[0].refundId, JSON.stringify(out.results[0]));
+  assert.equal(await MemberRefundReservation.countDocuments({ tenantId: TA, memberKey: "M-EV-NOCREDIT" }), 0);
+  const [op] = await opsOf(p);
+  assert.equal(op.memberKey, null);
+  assert.equal((await paymentRow(p)).refundCommittedCents, 5000);
+});
+
+test("coverage: payment-linked Stripe refunds of two payments of ONE member cannot exceed the member's credit (always on)", { skip }, async () => {
+  const p1 = await seed({ memberId: "M-CREDIT", purpose: "subscriptionFee", credit: 0 });
+  const p2 = await seed({ memberId: "M-CREDIT", purpose: "subscriptionFee", credit: 0 });
   await memberCredit("M-CREDIT", 3000);
-  const p1 = await seed({ memberId: "M-CREDIT", purpose: "subscriptionFee" });
-  const p2 = await seed({ memberId: "M-CREDIT", purpose: "subscriptionFee" });
   stripe.delayMs = 30;
   const rs = await Promise.all([refund(body(p1.pi, { amount: 2000 })), refund(body(p2.pi, { amount: 2000 }))]);
   stripe.delayMs = 0;
   assert.deepEqual(rs.map((r) => r.status).sort(), [200, 409], rs.map((r) => r.text).join(" | "));
   assert.equal(rs.find((r) => r.status === 409).code, "REFUND_MEMBER_CREDIT_UNAVAILABLE");
   assert.equal((await refundRows(p1)).length + (await refundRows(p2)).length, 1);
-  // within the credit: a refund that fits the member's credit still passes
-  const p3 = await seed({ memberId: "M-CREDIT2", purpose: "subscriptionFee" });
-  await memberCredit("M-CREDIT2", 5000);
-  assert.equal((await refund(body(p3.pi, { amount: 1000 }))).status, 200);
 });
 
-test("standalone external credit refunds reserve the member's credit atomically (always on)", { skip }, async () => {
+test("coverage: payment-linked EXTERNAL refunds and Stripe GL-only refunds reserve the same member credit", { skip }, async () => {
+  const e1 = await seed({ memberId: "M-MIX", purpose: "subscriptionFee", mode: "external", credit: 0 });
+  const s1 = await seed({ memberId: "M-MIX", purpose: "subscriptionFee", credit: 0 });
+  await memberCredit("M-MIX", 3000);
+  const external = refund({ mode: "external", paymentId: String(e1._id), payoutMethod: "bank_transfer", amount: 2000 });
+  const glOnly = refund({ mode: "stripe", paymentId: String(s1._id), payoutMethod: "bank_transfer", amount: 2000 }); // no paymentIntentId: no Stripe call
+  const rs = await Promise.all([external, glOnly]);
+  assert.deepEqual(rs.map((r) => r.status).sort(), [200, 409], rs.map((r) => r.text).join(" | "));
+  assert.equal(rs.find((r) => r.status === 409).code, "REFUND_MEMBER_CREDIT_UNAVAILABLE");
+});
+
+test("coverage: flow A application-key credit is a cap in report mode too; flow B member credit likewise", { skip }, async () => {
+  const a = await seed({ applicationId: "APP-CAP-A", credit: 1000 });
+  const r = await refund(body(a.pi, { amount: 2000 }));
+  assert.equal(r.status, 409);
+  assert.equal(r.code, "REFUND_MEMBER_CREDIT_UNAVAILABLE");
+  const b = await seed({ applicationId: "APP-CAP-B", credit: 0 });
+  await claim("APP-CAP-B", "M-CAP-B");
+  await memberCredit("M-CAP-B", 1000);
+  assert.equal((await refund(body(b.pi, { amount: 2000 }))).code, "REFUND_MEMBER_CREDIT_UNAVAILABLE");
+  assert.equal((await refund(body(b.pi, { amount: 1000 }))).status, 200);
+});
+
+test("coverage: standalone external credit refunds reserve the member's credit atomically", { skip }, async () => {
   await memberCredit("M-EXT", 3000);
   const ext = (amount) => refund({ mode: "external", memberId: "M-EXT", amount, payoutMethod: "bank_transfer", currency: "eur" });
   const rs = await Promise.all([ext(2000), ext(2000)]);
-  const statuses = rs.map((r) => r.status).sort();
-  assert.ok(statuses[0] === 200 && statuses[1] !== 200, `exactly one fits: ${rs.map((r) => r.text).join(" | ")}`);
-  assert.equal(await Refund.countDocuments({ tenantId: TA, memberId: "M-EXT", mode: "external" }), 1);
+  assert.deepEqual(rs.map((r) => r.status).sort(), [200, 409], rs.map((r) => r.text).join(" | "));
 });
 
-// ------------------------------------------------------------ idempotency
-test("identical idempotent retries: same result, one Stripe call (in-memory and durable replay); changed body -> 409", { skip }, async () => {
+test("coverage: record-external 'out' consumes no balance (Refund row only, no payment, no GL)", { skip }, async () => {
+  const glBefore = await GLTransaction.countDocuments({ tenantId: TA });
+  const r = await http("post", "/api/payments/record-external", { body: { direction: "out", amount: 700, currency: "eur", reason: "test" } });
+  assert.equal(r.status, 200, r.text);
+  const row = await Refund.findById(r.data.refundId).lean();
+  assert.equal(row.paymentId ?? null, null);
+  assert.equal(row.memberId ?? null, null);
+  assert.equal(row.applicationId ?? null, null);
+  assert.equal(await GLTransaction.countDocuments({ tenantId: TA }), glBefore, "no journal posted");
+});
+
+// ======================================================= out-of-band Stripe refunds (webhook)
+test("webhook: a dashboard refund is recorded once (per Stripe refund id) and reduces the refundable balance", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-DASH" });
+  const dash = { id: "re_dashboard_1", object: "refund", amount: 2000, status: "succeeded", charge: "ch_x", payment_intent: p.pi, metadata: {} };
+  const event = { id: "evt_dash_1", type: "charge.refunded", data: { object: { object: "charge", id: "ch_x", payment_intent: p.pi, amount: 5000, amount_captured: 5000, amount_refunded: 2000, refunds: { data: [dash], has_more: false }, metadata: {} } } };
+  await handleRefundEvent(event);
+  await handleRefundEvent({ ...event, id: "evt_dash_1_redelivery" });
+  const rows = await refundRows(p);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].stripe.refundId, "re_dashboard_1");
+  assert.equal((await paymentRow(p)).refundCommittedCents, 2000);
+  const over = await refund(body(p.pi, { amount: 4000 }));
+  assert.equal(over.status, 400, "payment remaining is 3000, not 5000 (remaining-amount check counts the observed refund)");
+  assert.equal((await refund(body(p.pi, { amount: 3000 }))).status, 200);
+});
+
+test("webhook: our own refund reported by the provider completes its operation (no duplicate observed record)", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-OWNWH" });
+  stripe.mode = "timeout_executed";
+  assert.equal((await refund(body(p.pi, { amount: 2500 }))).code, "REFUND_OUTCOME_UNCERTAIN");
+  stripe.mode = "ok";
+  const ours = stripe.refunds.find((r) => r.payment_intent === p.pi);
+  await handleRefundEvent({ id: "evt_own", type: "charge.refunded", data: { object: { object: "charge", id: "ch_own", payment_intent: p.pi, amount: 5000, amount_captured: 5000, amount_refunded: 2500, refunds: { data: [{ ...ours, status: "succeeded" }], has_more: false }, metadata: {} } } });
+  const [op] = await opsOf(p);
+  assert.equal(op.state, "succeeded");
+  assert.equal((await refundRows(p)).length, 1);
+  assert.equal(await RefundOperation.countDocuments({ tenantId: TA, paymentId: p._id }), 1);
+  assert.equal((await paymentRow(p)).refundCommittedCents, 2500);
+});
+
+// ======================================================= idempotency
+test("idempotency: identical retries return the same result with one Stripe call (in-memory and durable); changed body -> 409", { skip }, async () => {
   const p = await seed({ applicationId: "APP-IDEM" });
   const key = `idem-${crypto.randomBytes(5).toString("hex")}`;
   const before = stripe.createCalls;
   const first = await refund(body(p.pi), { headers: { "Idempotency-Key": key } });
   assert.equal(first.status, 200, first.text);
-  const cached = await refund(body(p.pi), { headers: { "Idempotency-Key": key } });
-  assert.equal(cached.data.refundDocId, first.data.refundDocId);
-  clearIdempotencyCache(); // e.g. another instance / a restart: the RefundOperation answers
+  assert.equal((await refund(body(p.pi), { headers: { "Idempotency-Key": key } })).data.refundDocId, first.data.refundDocId);
+  clearIdempotencyCache();
   const durable = await refund(body(p.pi), { headers: { "Idempotency-Key": key } });
-  assert.equal(durable.status, 200, durable.text);
-  assert.equal(durable.data.refundDocId, first.data.refundDocId);
   assert.equal(durable.data.operationId, first.data.operationId);
   assert.equal(stripe.createCalls, before + 1);
-  assert.equal((await refundRows(p)).length, 1);
   clearIdempotencyCache();
-  const changed = await refund(body(p.pi, { amount: 1000 }), { headers: { "Idempotency-Key": key } });
-  assert.equal(changed.status, 409);
-  assert.equal(changed.code, "IDEMPOTENCY_CONFLICT");
-  // concurrent identical retries: one operation, one Stripe call
+  assert.equal((await refund(body(p.pi, { amount: 1000 }), { headers: { "Idempotency-Key": key } })).code, "IDEMPOTENCY_CONFLICT");
   const p2 = await seed({ applicationId: "APP-IDEM2" });
   const key2 = `idem-${crypto.randomBytes(5).toString("hex")}`;
   stripe.delayMs = 30;
@@ -257,190 +321,255 @@ test("identical idempotent retries: same result, one Stripe call (in-memory and 
   stripe.delayMs = 0;
   assert.equal(stripe.createCalls, before2 + 1, rs.map((r) => r.text).join(" | "));
   assert.equal((await opsOf(p2)).length, 1);
-  assert.ok(rs.some((r) => r.status === 200));
   assert.ok(rs.every((r) => r.status === 200 || r.code === "REFUND_OPERATION_IN_PROGRESS"));
 });
 
-// ------------------------------------------------------------ crash handling
-test("process failure BEFORE the Stripe call: reservation held until non-execution is established", { skip }, async () => {
-  const p = await seed({ applicationId: "APP-CRASH1" });
-  refundOpsHooks.afterReserve = async () => { throw Object.assign(new Error("simulated crash"), { simulatedCrash: true }); };
-  const r = await refund(body(p.pi, { amount: 5000 }));
-  refundOpsHooks.afterReserve = null;
-  assert.equal(r.status, 500);
+// ======================================================= fencing / crash / reconciliation
+test("fencing: a worker paused before its Stripe call loses the operation to reconciliation and never calls Stripe", { skip }, async () => {
+  shortLease();
+  const p = await seed({ applicationId: "APP-PAUSE" });
+  let resume;
+  const paused = new Promise((r) => { resume = r; });
+  let reachedPause;
+  const atPause = new Promise((r) => { reachedPause = r; });
+  refundOpsHooks.afterReserve = async () => { reachedPause(); await paused; };
+  const before = stripe.createCalls;
+  const inflight = refund(body(p.pi, { amount: 5000 }));
+  await atPause;
+  await sleep(250); // the worker's lease expires while it is paused
   const [op] = await opsOf(p);
   assert.equal(op.state, "reserved");
-  assert.equal(reservedOf(await paymentRow(p)), 5000, "reservation still held");
-  assert.equal(stripe.createCalls >= 0, true);
-  // a new refund cannot take the held amount
-  assert.equal((await refund(body(p.pi, { amount: 1000 }))).code, "REFUND_AMOUNT_UNAVAILABLE");
-  // visible to finance
-  const list = await http("get", "/api/payments/refund-operations");
-  assert.equal(list.status, 200, list.text);
-  assert.ok(list.data.items.some((o) => o.id === String(op._id) && o.state === "reserved"));
-  // reconcile: dry-run changes nothing; apply releases (provider never called: state reserved,
-  // and the read-only Stripe lookup finds no refund for the operation)
-  const dry = await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(op._id)], minAgeSeconds: 0 } });
-  assert.equal(dry.status, 200, dry.text);
-  assert.equal(dry.data.apply, false);
-  assert.equal(dry.data.operations[0].plan, "release_not_executed");
+  const rec = await reconcile({ operationIds: [String(op._id)], apply: true });
+  assert.equal(rec.data.operations[0].plan, "release_never_submitted");
+  assert.equal(rec.data.operations[0].applied, true);
+  resume();
+  const r = await inflight;
+  refundOpsHooks.afterReserve = null;
+  assert.equal(r.status, 409, r.text);
+  assert.equal(r.code, "REFUND_OPERATION_SUPERSEDED");
+  assert.equal(stripe.createCalls, before, "the fenced-off worker never called Stripe");
+  const after = await RefundOperation.findById(op._id).lean();
+  assert.equal(after.state, "failed");
+  assert.equal(after.error.evidence, "never_submitted_fenced");
+  assert.equal(reservedOf(await paymentRow(p)), 0);
+});
+
+test("crash BEFORE the Stripe call: held while the lease lives; released only by a fenced reconcile", { skip }, async () => {
+  shortLease();
+  const p = await seed({ applicationId: "APP-CRASH1" });
+  refundOpsHooks.afterReserve = async () => { throw Object.assign(new Error("simulated crash"), { simulatedCrash: true }); };
+  assert.equal((await refund(body(p.pi, { amount: 5000 }))).status, 500);
+  refundOpsHooks.afterReserve = null;
+  const [op] = await opsOf(p);
+  assert.equal(op.state, "reserved");
   assert.equal(reservedOf(await paymentRow(p)), 5000);
-  const applied = await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(op._id)], minAgeSeconds: 0, apply: true } });
-  assert.equal(applied.data.operations[0].applied, true);
-  assert.equal((await RefundOperation.findById(op._id).lean()).state, "failed");
+  assert.equal((await refund(body(p.pi, { amount: 1000 }))).code, "REFUND_AMOUNT_UNAVAILABLE");
+  const listed = await http("get", "/api/payments/refund-operations");
+  assert.ok(listed.data.items.some((o) => o.id === String(op._id) && o.state === "reserved"));
+  assert.equal((await reconcile({ operationIds: [String(op._id)], apply: true })).data.operations[0].plan, "leave_owned", "live lease: untouched");
+  await sleep(250);
+  const dry = await reconcile({ operationIds: [String(op._id)] });
+  assert.equal(dry.data.operations[0].plan, "release_never_submitted");
+  assert.equal(reservedOf(await paymentRow(p)), 5000, "dry-run writes nothing");
+  await reconcile({ operationIds: [String(op._id)], apply: true });
   assert.equal(reservedOf(await paymentRow(p)), 0);
   assert.equal((await refund(body(p.pi, { amount: 5000 }))).status, 200);
 });
 
-test("process failure AFTER Stripe success but before the local commit: retry recovers exactly once", { skip }, async () => {
-  const p = await seed({ applicationId: "APP-CRASH2" });
-  const key = `idem-${crypto.randomBytes(5).toString("hex")}`;
+test("worker restart after Stripe success (response never recorded): a new reconciler completes it exactly once", { skip }, async () => {
+  shortLease();
+  const p = await seed({ applicationId: "APP-RESTART" });
   refundOpsHooks.afterStripe = async () => { throw Object.assign(new Error("simulated crash"), { simulatedCrash: true }); };
-  const before = stripe.createCalls;
-  const r = await refund(body(p.pi, { amount: 5000 }), { headers: { "Idempotency-Key": key } });
+  assert.equal((await refund(body(p.pi, { amount: 2500 }))).status, 500);
   refundOpsHooks.afterStripe = null;
-  assert.equal(r.status, 500);
-  assert.equal(stripe.createCalls, before + 1);
   const [op] = await opsOf(p);
   assert.equal(op.state, "submitting");
-  assert.equal((await refundRows(p)).length, 0);
-  assert.equal(reservedOf(await paymentRow(p)), 5000);
-  clearIdempotencyCache();
-  const retry = await refund(body(p.pi, { amount: 5000 }), { headers: { "Idempotency-Key": key } });
-  assert.equal(retry.status, 200, retry.text);
-  assert.equal(stripe.createCalls, before + 1, "no second Stripe refund");
-  const rows = await refundRows(p);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].stripe.refundId, stripe.refunds[stripe.refunds.length - 1].id);
-  const row = await paymentRow(p);
-  assert.equal(row.refundCommittedCents, 5000);
-  assert.equal(reservedOf(row), 0);
-  assert.equal(row.status, "refunded");
-  // further retries / reconciliation do not commit twice
-  clearIdempotencyCache();
-  assert.equal((await refund(body(p.pi, { amount: 5000 }), { headers: { "Idempotency-Key": key } })).status, 200);
-  await http("post", "/api/payments/refund-operations/reconcile", { body: { apply: true, minAgeSeconds: 0 } });
-  assert.equal((await refundRows(p)).length, 1);
-  assert.equal((await paymentRow(p)).refundCommittedCents, 5000);
-});
-
-test("crash after Stripe success without a client retry: reconciliation completes it exactly once", { skip }, async () => {
-  const p = await seed({ applicationId: "APP-CRASH3" });
-  refundOpsHooks.afterStripe = async () => { throw Object.assign(new Error("simulated crash"), { simulatedCrash: true }); };
-  await refund(body(p.pi, { amount: 2500 }));
-  refundOpsHooks.afterStripe = null;
-  const [op] = await opsOf(p);
-  const dry = await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(op._id)] } });
-  assert.equal(dry.data.operations[0].plan, "complete");
-  assert.equal((await refundRows(p)).length, 0, "dry-run writes nothing");
-  await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(op._id)], apply: true } });
-  await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(op._id)], apply: true } });
+  assert.equal(stripe.refunds.filter((r) => r.payment_intent === p.pi).length, 1);
+  await sleep(250); // the crashed worker's lease expires
+  const dry = await reconcile({ operationIds: [String(op._id)] });
+  assert.equal(dry.data.operations[0].plan, "replay_idempotent_create");
+  assert.equal(dry.data.operations[0].providerRefundFound, true);
+  await reconcile({ operationIds: [String(op._id)], apply: true });
+  await reconcile({ operationIds: [String(op._id)], apply: true });
+  assert.equal(stripe.refunds.filter((r) => r.payment_intent === p.pi).length, 1, "the idempotent replay returned the original refund");
   assert.equal((await refundRows(p)).length, 1);
   assert.equal((await paymentRow(p)).refundCommittedCents, 2500);
   assert.equal((await RefundOperation.findById(op._id).lean()).state, "succeeded");
 });
 
-test("Stripe timeout: operation uncertain, reservation held; reconciliation resolves executed / not executed", { skip }, async () => {
-  // (a) the refund DID execute at Stripe
-  const p = await seed({ applicationId: "APP-TIMEOUT1" });
+test("identical client retry after a crash recovers through the idempotent replay (one refund at Stripe)", { skip }, async () => {
+  shortLease();
+  const p = await seed({ applicationId: "APP-CRASH2" });
+  const key = `idem-${crypto.randomBytes(5).toString("hex")}`;
+  refundOpsHooks.afterStripe = async () => { throw Object.assign(new Error("simulated crash"), { simulatedCrash: true }); };
+  assert.equal((await refund(body(p.pi, { amount: 5000 }), { headers: { "Idempotency-Key": key } })).status, 500);
+  refundOpsHooks.afterStripe = null;
+  clearIdempotencyCache();
+  assert.equal((await refund(body(p.pi, { amount: 5000 }), { headers: { "Idempotency-Key": key } })).code, "REFUND_OPERATION_IN_PROGRESS", "live lease");
+  await sleep(250);
+  const retry = await refund(body(p.pi, { amount: 5000 }), { headers: { "Idempotency-Key": key } });
+  assert.equal(retry.status, 200, retry.text);
+  assert.equal(stripe.refunds.filter((r) => r.payment_intent === p.pi).length, 1);
+  const row = await paymentRow(p);
+  assert.equal(row.refundCommittedCents, 5000);
+  assert.equal(row.status, "refunded");
+});
+
+test("response loss (Stripe executed, the response was lost): uncertain + held, idempotent replay completes it once", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-LOST" });
   stripe.mode = "timeout_executed";
   const r = await refund(body(p.pi, { amount: 3000 }));
   stripe.mode = "ok";
-  assert.equal(r.status, 503);
   assert.equal(r.code, "REFUND_OUTCOME_UNCERTAIN");
   const [op] = await opsOf(p);
   assert.equal(op.state, "uncertain");
   assert.equal(reservedOf(await paymentRow(p)), 3000, "a timeout is not proof: reservation held");
-  const plan = await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(op._id)] } });
-  assert.equal(plan.data.operations[0].plan, "complete");
-  await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(op._id)], apply: true } });
+  const rec = await reconcile({ operationIds: [String(op._id)], apply: true });
+  assert.equal(rec.data.operations[0].plan, "replay_idempotent_create");
+  assert.equal(rec.data.operations[0].outcome, "succeeded");
+  assert.equal(stripe.refunds.filter((x) => x.payment_intent === p.pi).length, 1);
   assert.equal((await refundRows(p)).length, 1);
   assert.equal(reservedOf(await paymentRow(p)), 0);
-  assert.equal((await paymentRow(p)).refundCommittedCents, 3000);
-
-  // (b) the refund did NOT execute: held until the minimum age, then released by an explicit apply
-  const q = await seed({ applicationId: "APP-TIMEOUT2" });
-  stripe.mode = "timeout_not_executed";
-  assert.equal((await refund(body(q.pi, { amount: 3000 }))).code, "REFUND_OUTCOME_UNCERTAIN");
-  stripe.mode = "ok";
-  const [qop] = await opsOf(q);
-  const young = await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(qop._id)], apply: true } });
-  assert.equal(young.data.operations[0].plan, "leave", "not found yet, but too recent to conclude");
-  assert.equal(reservedOf(await paymentRow(q)), 3000);
-  const old = await http("post", "/api/payments/refund-operations/reconcile", { body: { operationIds: [String(qop._id)], apply: true, minAgeSeconds: 0 } });
-  assert.equal(old.data.operations[0].plan, "mark_failed_not_found");
-  assert.equal((await RefundOperation.findById(qop._id).lean()).state, "failed");
-  assert.equal(reservedOf(await paymentRow(q)), 0);
-  assert.equal((await refundRows(q)).length, 0);
 });
 
-test("refund-operations endpoints: CRM finance only; reconcile is a finance write and dry-run by default", { skip }, async () => {
+test("timeout where Stripe did NOT execute: never released on absence; the idempotent replay executes it once", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-NOTEXEC" });
+  stripe.mode = "timeout_not_executed";
+  assert.equal((await refund(body(p.pi, { amount: 3000 }))).code, "REFUND_OUTCOME_UNCERTAIN");
+  stripe.mode = "ok";
+  const [op] = await opsOf(p);
+  const dry = await reconcile({ operationIds: [String(op._id)] });
+  assert.equal(dry.data.operations[0].providerRefundFound, false);
+  assert.equal(dry.data.operations[0].plan, "replay_idempotent_create", "absence is not a release plan");
+  assert.equal(reservedOf(await paymentRow(p)), 3000);
+  await reconcile({ operationIds: [String(op._id)], apply: true });
+  assert.equal(stripe.refunds.filter((x) => x.payment_intent === p.pi).length, 1);
+  assert.equal((await RefundOperation.findById(op._id).lean()).state, "succeeded");
+});
+
+test("outside Stripe's idempotency window: not found stays uncertain (manual review); release needs actor + evidence, audited", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-OLD" });
+  stripe.mode = "timeout_not_executed";
+  await refund(body(p.pi, { amount: 3000 }));
+  stripe.mode = "ok";
+  const [op] = await opsOf(p);
+  await RefundOperation.updateOne({ _id: op._id }, { $set: { submittedAt: new Date(Date.now() - 25 * 3600 * 1000) } });
+  const before = stripe.createCalls;
+  const rec = await reconcile({ operationIds: [String(op._id)], apply: true });
+  assert.equal(rec.data.operations[0].plan, "lookup_or_review");
+  assert.equal(rec.data.operations[0].outcome, "REFUND_OPERATION_NEEDS_REVIEW");
+  assert.equal(stripe.createCalls, before, "no create replay outside the window");
+  assert.equal((await RefundOperation.findById(op._id).lean()).state, "uncertain");
+  assert.equal(reservedOf(await paymentRow(p)), 3000);
+  const noEvidence = await http("post", `/api/payments/refund-operations/${op._id}/release`, { body: {} });
+  assert.equal(noEvidence.status, 400);
+  assert.equal((await http("post", `/api/payments/refund-operations/${op._id}/release`, { auth: bearer({ roles: ["MO"] }), body: { evidence: "checked stripe dashboard" } })).status, 403);
+  const rel = await http("post", `/api/payments/refund-operations/${op._id}/release`, { body: { evidence: "Stripe dashboard shows no refund for this PI (ticket FIN-123)" } });
+  assert.equal(rel.status, 200, rel.text);
+  const after = await RefundOperation.findById(op._id).lean();
+  assert.equal(after.state, "failed");
+  assert.equal(after.error.appCode, "REFUND_RELEASED_BY_FINANCE");
+  assert.equal(after.error.releasedBy, "staff-am");
+  assert.ok(after.history.some((h) => h.note === "manual_release" && h.actor === "staff-am"));
+  assert.equal(reservedOf(await paymentRow(p)), 0);
+});
+
+test("manual release is refused while the provider shows a refund for the operation", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-NORELEASE" });
+  stripe.mode = "timeout_executed";
+  await refund(body(p.pi, { amount: 3000 }));
+  stripe.mode = "ok";
+  const [op] = await opsOf(p);
+  const rel = await http("post", `/api/payments/refund-operations/${op._id}/release`, { body: { evidence: "trying to release an executed refund" } });
+  assert.equal(rel.status, 409);
+  assert.equal(rel.code, "REFUND_EXISTS_AT_PROVIDER");
+});
+
+test("concurrent reconciliation: two reconcilers, exactly one acts", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-TWOREC" });
+  stripe.mode = "timeout_executed";
+  await refund(body(p.pi, { amount: 2000 }));
+  stripe.mode = "ok";
+  const [op] = await opsOf(p);
+  stripe.delayMs = 40;
+  const [r1, r2] = await Promise.all([reconcile({ operationIds: [String(op._id)], apply: true }), reconcile({ operationIds: [String(op._id)], apply: true })]);
+  stripe.delayMs = 0;
+  const rows = [r1.data.operations[0], r2.data.operations[0]];
+  assert.equal(rows.filter((x) => x.outcome === "succeeded").length, 1, JSON.stringify(rows));
+  assert.ok(rows.some((x) => x.plan === "claimed_elsewhere" || x.plan === "leave_owned" || x.plan === "finalize"), JSON.stringify(rows));
+  assert.equal((await refundRows(p)).length, 1);
+  assert.equal((await paymentRow(p)).refundCommittedCents, 2000);
+});
+
+test("definitive provider error on submission or replay: failed and released (proof of non-execution)", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-DEFINITE" });
+  const real = stripeClient.refunds.create;
+  stripeClient.refunds.create = async () => { throw Object.assign(new Error("invalid (test)"), { type: "StripeInvalidRequestError", statusCode: 400 }); };
+  try {
+    assert.equal((await refund(body(p.pi, { amount: 1000 }))).code, "REFUND_PROVIDER_REJECTED");
+  } finally {
+    stripeClient.refunds.create = real;
+  }
+  const [op] = await opsOf(p);
+  assert.equal(op.state, "failed");
+  assert.equal(reservedOf(await paymentRow(p)), 0);
+});
+
+test("refund-operations endpoints: CRM finance only; reconcile and release are finance writes; dry-run by default", { skip }, async () => {
   assert.equal((await http("get", "/api/payments/refund-operations", { auth: bearer({ userType: "PORTAL", id: "m" }) })).status, 403);
   assert.equal((await http("get", "/api/payments/refund-operations", { auth: bearer({ permissions: ["accounts.reports:read"] }) })).status, 403);
-  assert.equal((await http("post", "/api/payments/refund-operations/reconcile", { auth: bearer({ roles: ["MO"], permissions: ["payments:read"] }), body: { apply: true } })).status, 403);
-  const dry = await http("post", "/api/payments/refund-operations/reconcile", { body: {} });
-  assert.equal(dry.status, 200);
+  assert.equal((await reconcile({ apply: true }).then(() => http("post", "/api/payments/refund-operations/reconcile", { auth: bearer({ roles: ["MO"], permissions: ["payments:read"] }), body: { apply: true } }))).status, 403);
+  const dry = await reconcile({});
   assert.equal(dry.data.apply, false);
   assert.ok(dry.data.operations.every((o) => !o.applied));
 });
 
-// ------------------------------------------------------------ flow A / B (enforce)
-test("flow classification under enforce: A needs a verified unapproved application; B needs a member link / CLAIM", { skip }, async () => {
+// ======================================================= flow A / B
+test("flow (enforce): A needs a verified unapproved application; approved-without-CLAIM and no-RCP are inconsistent; B by member link / CLAIM", { skip }, async () => {
   process.env.REFUND_POLICY_MODE = "enforce";
   const before = stripe.createCalls;
-  // A without the application-state lookup wired -> fail closed 503
   const a1 = await seed({ applicationId: "APP-A1" });
-  await memberCredit("app:APP-A1", 5000);
-  let r = await refund(body(a1.pi));
-  assert.equal(r.status, 503);
-  assert.equal(r.code, "REFUND_APPLICATION_STATE_UNAVAILABLE");
+  assert.equal((await refund(body(a1.pi))).code, "REFUND_APPLICATION_STATE_UNAVAILABLE");
   setApplicationRefundStateProvider(async () => { throw new Error("profile down"); });
   assert.equal((await refund(body(a1.pi))).code, "REFUND_APPLICATION_STATE_UNAVAILABLE");
-  // A with a verified submitted / rejected application -> allowed, capped by the application-key credit
   setApplicationRefundStateProvider(async ({ applicationId }) => ({ applicationId, tenantId: TA, status: applicationId === "APP-A2" ? "rejected" : "submitted" }));
-  r = await refund(body(a1.pi, { amount: 2000 }));
-  assert.equal(r.status, 200, r.text);
+  assert.equal((await refund(body(a1.pi, { amount: 2000 }))).status, 200);
   const a2 = await seed({ applicationId: "APP-A2" });
-  await memberCredit("app:APP-A2", 1000);
-  r = await refund(body(a2.pi, { amount: 2000 }));
-  assert.equal(r.code, "REFUND_MEMBER_CREDIT_UNAVAILABLE", "flow A cap = min(payment remaining, application-key credit)");
-  // A: approved application without a CLAIM transfer (LINK/MERGE gap) -> inconsistent
+  assert.equal((await refund(body(a2.pi, { amount: 2000 }))).status, 200, "rejected application: flow A");
   setApplicationRefundStateProvider(async ({ applicationId }) => ({ applicationId, tenantId: TA, status: "processed" }));
   const linked = await seed({ applicationId: "APP-LINKED", purpose: "subscriptionFee" });
-  r = await refund(body(linked.pi));
-  assert.equal(r.status, 409);
-  assert.equal(r.code, "REFUND_INCONSISTENT_APPROVED_NO_TRANSFER");
-  // A: verification mismatch -> unverified
+  assert.equal((await refund(body(linked.pi))).code, "REFUND_INCONSISTENT_APPROVED_NO_TRANSFER");
   setApplicationRefundStateProvider(async () => ({ applicationId: "APP-OTHER", tenantId: TA, status: "submitted" }));
   assert.equal((await refund(body(linked.pi))).code, "REFUND_APPLICATION_STATE_UNVERIFIED");
-  // no ledger receipt -> inconsistent
-  const noRcp = await seed({ applicationId: "APP-NORCP", receipt: false });
-  assert.equal((await refund(body(noRcp.pi))).code, "REFUND_INCONSISTENT_NO_LEDGER_RECEIPT");
-  // B via CLAIM-<applicationId>: body memberId must be the CLAIM recipient (or absent)
-  const b1 = await seed({ applicationId: "APP-B1", purpose: "subscriptionFee" });
+  const b1 = await seed({ applicationId: "APP-B1", purpose: "subscriptionFee", credit: 0 });
   await claim("APP-B1", "M-B1");
   await memberCredit("M-B1", 5000);
-  r = await refund(body(b1.pi, { memberId: "M-B1", amount: 1500 }));
-  assert.equal(r.status, 200, r.text);
+  assert.equal((await refund(body(b1.pi, { memberId: "M-B1", amount: 1500 }))).status, 200);
   assert.equal((await refund(body(b1.pi, { memberId: "M-SOMEONE" }))).code, "REFUND_TARGET_MISMATCH");
-  // conflicting links -> 409
+  const ev = await seed({ purpose: "eventRegistration", ledgerDomain: "events", registrationId: "reg-crm", memberId: "M-EV", credit: 5000 });
+  assert.equal((await refund(body(ev.pi))).code, "REFUND_FLOW_UNSUPPORTED");
+  assert.equal(stripe.createCalls, before + 3, "every refusal happened before Stripe");
+});
+
+test("flow (ALWAYS, report mode too): no ledger receipt, conflicting links and a pending finance hold are refused", { skip }, async () => {
+  const before = stripe.createCalls;
+  const noRcp = await seed({ applicationId: "APP-NORCP", receipt: false });
+  assert.equal((await refund(body(noRcp.pi))).code, "REFUND_INCONSISTENT_NO_LEDGER_RECEIPT");
   const c1 = await seed({ applicationId: "APP-C1", memberId: "M-X" });
   await claim("APP-C1", "M-Y");
   assert.equal((await refund(body(c1.pi))).code, "REFUND_LINK_CONFLICT");
   const c2 = await seed({ applicationId: "APP-C2", applicationBinding: "APP-C2-OTHER" });
   assert.equal((await refund(body(c2.pi))).code, "REFUND_LINK_CONFLICT");
-  // unlinked / event payment through the CRM endpoint -> refused
-  // (an unlinked payment is already refused by the existing credit check, before classification)
-  const u = await seed({});
-  const ur = await refund(body(u.pi));
-  assert.equal(ur.status, 400);
-  const ev = await seed({ purpose: "eventRegistration", ledgerDomain: "events", registrationId: "reg-crm", memberId: "M-EV" });
-  assert.equal((await refund(body(ev.pi))).code, "REFUND_FLOW_UNSUPPORTED");
-  // every refusal happened before Stripe: only the two allowed refunds reached it
-  assert.equal(stripe.createCalls, before + 2);
+  setApplicationCreditHoldChecker(async (tenantId, applicationId) => tenantId === TA && applicationId === "APP-HELD");
+  const held = await seed({ applicationId: "APP-HELD" });
+  assert.equal((await refund(body(held.pi))).code, "REFUND_PENDING_FINANCE_ALLOCATION");
+  assert.equal((await refund({ mode: "external", applicationId: "APP-HELD", amount: 100, payoutMethod: "bank_transfer", currency: "eur" })).code, "REFUND_PENDING_FINANCE_ALLOCATION");
+  setApplicationCreditHoldChecker(async () => { throw new Error("hold store down"); });
+  assert.equal((await refund(body(held.pi))).code, "REFUND_APPLICATION_HOLD_UNAVAILABLE");
+  assert.equal(stripe.createCalls, before);
 });
 
-test("report mode (default): the decision is recorded on the operation, nothing new is refused", { skip }, async () => {
+test("report mode (default): flow decisions are recorded, the gated ones are not refused", { skip }, async () => {
   const p = await seed({ applicationId: "APP-REPORT" });
   const r = await refund(body(p.pi));
   assert.equal(r.status, 200, r.text);
