@@ -33,6 +33,8 @@ const RefundSchema = new Schema(
       enum: ["bank_transfer", "cheque", "credit_card"],
       required: false,
     },
+    // P5: the RefundOperation that produced this row (exactly one row per operation).
+    refundOperationId: { type: Types.ObjectId, default: undefined },
     glDocNo: { type: String, sparse: true, index: true },
     glStatus: {
       type: String,
@@ -60,6 +62,10 @@ RefundSchema.index(
 );
 
 RefundSchema.index({ tenantId: 1, createdAt: -1 });
+RefundSchema.index(
+  { tenantId: 1, refundOperationId: 1 },
+  { unique: true, partialFilterExpression: { refundOperationId: { $type: "objectId" } } },
+);
 
 const isObjectId = (id) => Types.ObjectId.isValid(id);
 

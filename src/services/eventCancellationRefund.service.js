@@ -20,6 +20,15 @@ import Refund from "../models/refund.model.js";
 import { getStripe } from "../lib/stripe.js";
 import { postBalancedJournal } from "../controllers/journal.controller.js";
 import logger from "../config/logger.js";
+import RefundOperation from "../models/refundOperation.model.js";
+import MemberRefundReservation from "../models/memberRefundReservation.model.js";
+import {
+  executeOperation,
+  finalizeOperation,
+  freePaymentAmount,
+  registerRefundOperationSource,
+  startOperation,
+} from "./refundOperations.service.js";
 
 const EVENTS_CLEARING_CODE_STRIPE = "1220";
 const EVENTS_CLEARING_CODE_MANUAL = "1210";
@@ -30,7 +39,9 @@ const EVENT_INCOME_CODE_BY_CATEGORY = { CPD: "4510", EVENT: "4520" };
 // processEventCancellationRefunds's second argument instead of ESM module
 // mocking (jest.unstable_mockModule isn't available on the jest version
 // installed here - see eventCancellationRefund.service.test.js).
-const defaultDeps = { Payment, Refund, getStripe, postBalancedJournal, logger };
+// RefundOperation / MemberRefundReservation: the shared P5 refund operation + reservation
+// mechanism (services/refundOperations.service.js) - the same payment counters as CRM refunds.
+const defaultDeps = { Payment, Refund, RefundOperation, MemberRefundReservation, getStripe, postBalancedJournal, logger };
 
 function resolveEventIncomeCode(eventCategoryCode) {
   return EVENT_INCOME_CODE_BY_CATEGORY[eventCategoryCode] || DEFAULT_EVENTS_INCOME_CODE;
@@ -186,77 +197,84 @@ async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
       "Event cancellation refund: payload amount differs from refundable captured amount - using captured amount",
     );
   }
-  const metadata = new Map([
-    ["reason", "event_cancellation"],
-    ["eventId", eventId],
-    ["registrationId", registrationId],
-  ]);
-
-  let refundDoc;
-  if (payment.mode === "stripe") {
-    if (!payment.stripe?.paymentIntentId) {
-      deps.logger.warn(
-        { tenantId, eventId, registrationId, paymentId },
-        "Stripe payment missing paymentIntentId - skipping refund",
-      );
-      return { registrationId, skipped: true, reason: "missing_payment_intent" };
-    }
-    const stripe = deps.getStripe();
-    const stripeRefund = await stripe.refunds.create(
-      { payment_intent: payment.stripe.paymentIntentId, amount, metadata: { eventId, registrationId } },
-      { idempotencyKey: `event-cancel-refund:${paymentId}` },
+  const isStripe = payment.mode === "stripe";
+  if (isStripe && !payment.stripe?.paymentIntentId) {
+    deps.logger.warn(
+      { tenantId, eventId, registrationId, paymentId },
+      "Stripe payment missing paymentIntentId - skipping refund",
     );
-
-    refundDoc = await deps.Refund.create({
-      tenantId,
-      paymentId: payment._id,
-      mode: "stripe",
-      ...(payment.memberId ? { memberId: payment.memberId } : {}),
-      amount,
-      currency: payment.currency,
-      refundDate: new Date(),
-      stripe: {
-        refundId: stripeRefund.id,
-        chargeId: stripeRefund.charge || undefined,
-        paymentIntentId: payment.stripe.paymentIntentId,
-      },
-      memo: "Event cancelled - automatic refund",
-      metadata,
-    });
-
-    await deps.Payment.updateOne(
-      { _id: payment._id, tenantId },
-      { $set: { status: alreadyRefunded + amount < payment.amount ? "partially_refunded" : "refunded", "audit.updatedBy": "system" } },
-    );
-  } else {
-    // manual/invoice (posted, real GL revenue recognized) - external refund,
-    // no Stripe API call. payoutMethod is a best-effort default (bank_transfer)
-    // since events registrations don't currently record how a manual payment
-    // was physically collected - finance can correct payoutMethod by hand if
-    // the actual method differed.
-    refundDoc = await deps.Refund.create({
-      tenantId,
-      paymentId: payment._id,
-      mode: "external",
-      ...(payment.memberId ? { memberId: payment.memberId } : {}),
-      amount,
-      currency: payment.currency,
-      refundDate: new Date(),
-      payoutMethod: "bank_transfer",
-      memo: "Event cancelled - automatic refund",
-      metadata,
-    });
-
-    await deps.Payment.updateOne(
-      { _id: payment._id, tenantId },
-      { $set: { status: alreadyRefunded + amount < payment.amount ? "partially_refunded" : "refunded", "audit.updatedBy": "system" } },
-    );
+    return { registrationId, skipped: true, reason: "missing_payment_intent" };
   }
 
-  const { glPosted, glDocNo } = await postEventCancellationRefundJournal({ refundDoc, payment, tenantId, deps });
+  // Same payment counters as CRM refunds: only the amount not committed or reserved by another
+  // in-flight refund is refundable here, and the reservation below makes that atomic.
+  const free = await freePaymentAmount(deps, payment);
+  const refundAmount = Math.min(amount, free);
+  if (refundAmount <= 0) {
+    deps.logger.warn(
+      { tenantId, eventId, registrationId, paymentId, alreadyRefunded },
+      "Event cancellation refund: remaining amount is held by another refund in progress - skipping",
+    );
+    return { registrationId, skipped: true, reason: "refund_in_progress" };
+  }
 
-  return { registrationId, refundId: refundDoc._id.toString(), glPosted, glDocNo };
+  const started = await startOperation(deps, {
+    tenantId,
+    source: "event_cancellation",
+    flow: "E",
+    mode: isStripe ? "stripe" : "external",
+    payment,
+    amount: refundAmount,
+    currency: payment.currency,
+    // One automatic cancellation refund per payment (durable dedupe across redeliveries).
+    clientKey: `event-cancel:${payment._id}`,
+    stripeParams: isStripe ? { payment_intent: payment.stripe.paymentIntentId, metadata: { eventId: String(eventId), registrationId: String(registrationId) } } : null,
+    refundTemplate: {
+      ...(payment.memberId ? { memberId: payment.memberId } : {}),
+      refundDate: new Date(),
+      memo: "Event cancelled - automatic refund",
+      ...(isStripe ? {} : { payoutMethod: "bank_transfer" }),
+      metadata: { reason: "event_cancellation", eventId: String(eventId), registrationId: String(registrationId) },
+    },
+    createdBy: "system",
+  });
+  if (started.existing) {
+    if (started.existing.state === "succeeded") {
+      await finalizeOperation(deps, started.existing._id, tenantId);
+      return { registrationId, skipped: true, reason: "already_refunded" };
+    }
+    return { registrationId, skipped: true, reason: started.existing.state === "failed" ? "previous_attempt_failed" : "refund_in_progress" };
+  }
+  const result = await executeOperation(deps, started.op);
+  return { registrationId, refundId: result.refundDocId, glPosted: result.glPosted, glDocNo: result.glDocNo };
 }
+
+registerRefundOperationSource("event_cancellation", {
+  buildRefundDoc(op) {
+    const t = op.refundTemplate || {};
+    return {
+      ...t,
+      tenantId: op.tenantId,
+      paymentId: op.paymentId,
+      refundOperationId: op._id,
+      mode: op.mode,
+      amount: op.amount,
+      currency: op.currency,
+      metadata: new Map(Object.entries(t.metadata || {})),
+      ...(op.mode === "stripe"
+        ? { stripe: { refundId: op.stripeRefundId, ...(op.stripeChargeId ? { chargeId: op.stripeChargeId } : {}), paymentIntentId: op.stripeParams?.payment_intent } }
+        : {}),
+    };
+  },
+  async postGl(op, refundDoc, deps) {
+    const d = deps?.postBalancedJournal ? deps : defaultDeps;
+    const payment = await d.Payment.findOne({ _id: op.paymentId, tenantId: op.tenantId });
+    return postEventCancellationRefundJournal({ refundDoc, payment: payment || {}, tenantId: op.tenantId, deps: d });
+  },
+  result(op, refundDoc, gl) {
+    return { refundDocId: String(refundDoc._id), glPosted: Boolean(gl.glPosted), glDocNo: gl.glDocNo || null, operationId: String(op._id) };
+  },
+});
 
 /** Entry point for the events.event.cancelled.v1 RabbitMQ handler - refunds
  * every candidate independently so one bad candidate doesn't block the rest

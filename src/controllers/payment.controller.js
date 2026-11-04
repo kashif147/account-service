@@ -10,6 +10,8 @@ import {
   recordExternal,
   createRefund,
   listRefunds,
+  listRefundOperations,
+  reconcileRefunds,
   listByMemberIds,
   associateMemberLinks,
 } from "../services/payments.service.js";
@@ -232,6 +234,26 @@ export async function listPaymentAttemptsHandler(req, res, next) {
       cursor: q.cursor,
     });
     res.success(result);
+  } catch (e) {
+    next(e);
+  }
+}
+
+/** GET /payments/refund-operations - CRM finance: unresolved / uncertain refund operations. */
+export async function listRefundOperationsHandler(req, res, next) {
+  try {
+    res.success(await listRefundOperations(req.ctx, { limit: req.query?.limit }));
+  } catch (e) {
+    next(e);
+  }
+}
+
+/** POST /payments/refund-operations/reconcile - CRM finance write; dry-run unless apply:true. */
+export async function reconcileRefundOperationsHandler(req, res, next) {
+  try {
+    const b = req.body || {};
+    const ids = Array.isArray(b.operationIds) ? b.operationIds.filter((x) => /^[a-f0-9]{24}$/i.test(String(x))) : undefined;
+    res.success(await reconcileRefunds(req.ctx, { apply: b.apply === true, operationIds: ids, minAgeSeconds: b.minAgeSeconds }));
   } catch (e) {
     next(e);
   }

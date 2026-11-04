@@ -15,8 +15,20 @@ import { getStripe } from "../lib/stripe.js";
 import { publishDomainEvent, APPLICATION_EVENTS } from "../rabbitMQ/index.js";
 import {
   assertRefundWithinCredit,
+  getAvailableCredit2020ForKey,
   getClaimRecipientMemberIdForApplication,
+  getRefundableBalanceForMember,
 } from "./refundCredit.service.js";
+import RefundOperation from "../models/refundOperation.model.js";
+import {
+  defaultRefundOpsDeps,
+  executeOperation,
+  listUnresolvedOperations,
+  reconcileRefundOperations,
+  registerRefundOperationSource,
+  replayOperation,
+  startOperation,
+} from "./refundOperations.service.js";
 import { centsToEuros } from "../helpers/money.js";
 import { assertIntentAuthorized, isPortalLikeCaller } from "./paymentIntentGuard.service.js";
 import {
@@ -3693,71 +3705,160 @@ async function assertRefundTargetsPayment(parsed, payment, ctx) {
   }
 }
 
-function refundAmountUnavailable(details = {}) {
-  return new AppError(
-    "Refund exceeds the remaining refundable amount on the payment (or another refund is in progress)",
-    409,
-    "REFUND_AMOUNT_UNAVAILABLE",
-    details,
-  );
+// ------------------------------------------------------------------ P5 refund policy (A / B)
+// REFUND_POLICY_MODE (per request): "report" (default) classifies and records the flow decision
+// on the RefundOperation and logs it, refusing nothing new; "enforce" refuses per the contract;
+// "off" skips classification. The authorization boundary, ownership checks, payment / external
+// credit reservations and durable operations are ALWAYS on.
+export function refundPolicyMode(env = process.env) {
+  const m = String(env.REFUND_POLICY_MODE || "report").toLowerCase();
+  return ["off", "report", "enforce"].includes(m) ? m : "report";
 }
 
+const NOT_APPROVED_APPLICATION_STATUSES = new Set(["in-progress", "submitted", "rejected"]);
+
 /**
- * Atomic, counter-based reservation of `amount` on the Payment before any money moves.
- * Payment.refundCommittedCents = refunds completed through this path (initialised once from the
- * tenant-scoped Refund rows), Payment.refundReservedCents = refunds in flight. The conditional
- * update admits a refund only while committed + reserved + amount <= amount captured, so two
- * concurrent refunds can never take more than what remains. commit() moves the amount from
- * reserved to committed in ONE update (no window where it is counted twice or not at all);
- * release() frees it when the refund did not happen.
+ * Application refund-state provider (flow A). Contract: signed p5-svc-sig/1 call to
+ * profile-service (operation application_refund_state). NOT wired yet: with no provider the
+ * state is "unavailable", so flow A FAILS CLOSED under enforce (503) and is only recorded under
+ * report. Tests (and the future client) install a provider here.
  */
-async function reserveRefundAmount(payment, amount, refundedRows) {
-  const scope = { _id: payment._id, tenantId: payment.tenantId };
-  // One-time initialisation for payments refunded before the counter existed.
-  await Payment.updateOne(
-    { ...scope, refundCommittedCents: { $exists: false } },
-    { $set: { refundCommittedCents: refundedRows } },
-  );
-  const reserved = await Payment.findOneAndUpdate(
-    {
-      ...scope,
-      status: { $in: ["succeeded", "partially_refunded"] },
-      $expr: {
-        $lte: [
-          {
-            $add: [
-              { $ifNull: ["$refundReservedCents", 0] },
-              { $ifNull: ["$refundCommittedCents", 0] },
-              amount,
-            ],
-          },
-          "$amount",
-        ],
-      },
-    },
-    { $inc: { refundReservedCents: amount } },
-    { new: true },
-  ).lean();
-  if (!reserved) throw refundAmountUnavailable({ refundCents: amount });
-  let open = true;
-  return {
-    async commit() {
-      if (!open) return;
-      open = false;
-      await Payment.updateOne(scope, { $inc: { refundReservedCents: -amount, refundCommittedCents: amount } });
-    },
-    async release() {
-      if (!open) return;
-      open = false;
-      await Payment.updateOne(scope, { $inc: { refundReservedCents: -amount } });
-    },
-  };
+let applicationRefundStateProvider = null;
+export function setApplicationRefundStateProvider(fn) {
+  applicationRefundStateProvider = typeof fn === "function" ? fn : null;
 }
+
+const policyRefusal = (status, code, message) => ({ refuse: true, status, code, message });
+
+/**
+ * Server-side flow from trusted records only (stored Payment links, CLAIM-<applicationId> GL,
+ * application status from the provider). Never a membership number, email or a body memberId.
+ * @returns {{ flow, memberKey, refusal: null | {status, code, message} }}
+ */
+export async function classifyRefundFlow(parsed, payment, ctx) {
+  const tenantId = ctx.tenantId;
+  if (!payment) {
+    // Standalone external credit refund: the target's own authoritative 2020/1400 credit decides.
+    const memberKey = strOrNull(parsed.memberId) || (strOrNull(parsed.applicationId) ? `app:${strOrNull(parsed.applicationId)}` : null);
+    return { flow: "EXT", memberKey, refusal: null };
+  }
+  if (payment.ledgerDomain === "events" || ["eventRegistration", "courseRegistration"].includes(payment.purpose)) {
+    return {
+      flow: "E_CRM",
+      memberKey: null,
+      refusal: policyRefusal(409, "REFUND_FLOW_UNSUPPORTED", "Event / course payments are refunded through the event cancellation flow"),
+    };
+  }
+  const payMember = strOrNull(payment.memberId);
+  const linkedApp = strOrNull(payment.applicationId);
+  const boundApp = strOrNull(payment.applicationBinding);
+  if (linkedApp && boundApp && linkedApp !== boundApp) {
+    return { flow: "CONFLICT", memberKey: null, refusal: policyRefusal(409, "REFUND_LINK_CONFLICT", "The payment's application links disagree") };
+  }
+  const payApp = linkedApp || boundApp;
+  // The payment's ledger receipt must exist (RCP-<paymentId>: 2020 credit on the application key
+  // when applicationId is set, else on the member). Money captured without it is inconsistent.
+  const GLTransaction = (await import("../models/glTransaction.model.js")).default;
+  const receipt = await GLTransaction.findOne({ tenantId, docType: "Receipt", docNo: `RCP-${payment._id}` }).select({ _id: 1 }).lean();
+  if (!receipt) {
+    return { flow: "INCONSISTENT", memberKey: null, refusal: policyRefusal(409, "REFUND_INCONSISTENT_NO_LEDGER_RECEIPT", "The payment has no ledger receipt; it cannot be refunded until finance resolves it") };
+  }
+  // Authoritative member transfer = CLAIM-<applicationId> (2020 D application key / 2020 C member),
+  // for applicationFee and subscriptionFee alike; Payment.memberId is never written by approval.
+  const claimMember = payApp ? await getClaimRecipientMemberIdForApplication(payApp, tenantId) : null;
+  if (payMember && claimMember && payMember !== claimMember) {
+    return { flow: "CONFLICT", memberKey: null, refusal: policyRefusal(409, "REFUND_LINK_CONFLICT", "The payment's member link and its application's credit transfer disagree") };
+  }
+  if (payMember || claimMember) {
+    // Flow B: authoritative member link or transfer (CLAIM journal) exists.
+    return { flow: "B", memberKey: payMember || claimMember, refusal: null };
+  }
+  if (!payApp) {
+    return { flow: "UNLINKED", memberKey: null, refusal: policyRefusal(409, "REFUND_PAYMENT_UNLINKED", "The payment has no application or member link") };
+  }
+  let state = null;
+  try {
+    state = applicationRefundStateProvider ? await applicationRefundStateProvider({ tenantId, applicationId: payApp }) : null;
+  } catch {
+    state = null;
+  }
+  if (!state || state.unavailable) {
+    return { flow: "A", memberKey: null, refusal: policyRefusal(503, "REFUND_APPLICATION_STATE_UNAVAILABLE", "The application state cannot be checked right now") };
+  }
+  if (String(state.applicationId || "") !== payApp || (state.tenantId && String(state.tenantId) !== String(tenantId))) {
+    return { flow: "A", memberKey: null, refusal: policyRefusal(409, "REFUND_APPLICATION_STATE_UNVERIFIED", "The application state could not be verified") };
+  }
+  const status = String(state.status || "").toLowerCase();
+  if (status === "processed") {
+    // Approved (e.g. LINK/MERGE onto an existing member) but the credit is still on the
+    // application key: neither flow A nor flow B is provable.
+    return { flow: "INCONSISTENT", memberKey: null, refusal: policyRefusal(409, "REFUND_INCONSISTENT_APPROVED_NO_TRANSFER", "The application is approved but its credit was never transferred to the member") };
+  }
+  if (!NOT_APPROVED_APPLICATION_STATUSES.has(status)) {
+    return { flow: "A", memberKey: null, refusal: policyRefusal(409, "REFUND_APPLICATION_STATE_UNVERIFIED", "The application state could not be verified") };
+  }
+  // Flow A: credit still on the application key; cap = min(payment remaining, that credit).
+  return { flow: "A", memberKey: `app:${payApp}`, refusal: null };
+}
+
+function requestFingerprint(parsed) {
+  return nodeCrypto.createHash("sha256").update(JSON.stringify(parsed)).digest("hex");
+}
+
+// Finishes CRM refunds (also later, from retry / reconciliation): the Refund row fields were
+// captured on the operation; GL uses the same postJournalForRefund as before.
+registerRefundOperationSource("crm_refund", {
+  buildRefundDoc(op) {
+    const t = op.refundTemplate || {};
+    return {
+      ...t,
+      tenantId: op.tenantId,
+      ...(op.paymentId ? { paymentId: op.paymentId } : {}),
+      refundOperationId: op._id,
+      amount: op.amount,
+      currency: op.currency,
+      mode: op.mode,
+      ...(t.metadata ? { metadata: new Map(Object.entries(t.metadata)) } : {}),
+      stripe: {
+        ...(op.stripeRefundId ? { refundId: op.stripeRefundId } : {}),
+        ...(op.stripeChargeId ? { chargeId: op.stripeChargeId } : {}),
+        ...(op.stripeParams?.payment_intent ? { paymentIntentId: op.stripeParams.payment_intent } : t.paymentIntentId ? { paymentIntentId: t.paymentIntentId } : {}),
+      },
+    };
+  },
+  async postGl(op, refundDoc) {
+    const payment = op.paymentId
+      ? await Payment.findOne({ _id: op.paymentId, tenantId: op.tenantId }).lean()
+      : { mode: "external", memberId: refundDoc.memberId ?? null, applicationId: refundDoc.applicationId ?? null, metadata: new Map() };
+    return applyRefundGlAndUpdateDoc(refundDoc, payment, { tenantId: op.tenantId, userId: op.createdBy || undefined });
+  },
+  result(op, refundDoc, gl) {
+    return {
+      ...(op.mode === "stripe" ? {} : { ok: true }),
+      ...(op.stripeRefundId ? { refundId: op.stripeRefundId } : {}),
+      refundDocId: String(refundDoc._id),
+      ...(op.mode === "stripe" ? { status: "ok" } : {}),
+      glPosted: Boolean(gl.glPosted),
+      glDocNo: gl.glDocNo || null,
+      operationId: String(op._id),
+      ...(op.mode === "stripe" && !op.stripeParams?.payment_intent ? { stripeApiSkipped: true } : {}),
+      ...(op.flow === "EXT" && !op.paymentId ? { standaloneExternal: true } : {}),
+    };
+  },
+});
 
 export async function createRefund(input, ctx) {
   requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const parsed = zCreateRefund.parse(input);
-  const stripe = getStripe();
+  const deps = defaultRefundOpsDeps();
+  const fingerprint = requestFingerprint(parsed);
+  const clientKey = ctx.idempotencyKey ? `${ctx.userId || "anonymous"}|${ctx.idempotencyKey}` : null;
+
+  // Durable idempotent replay: an identical retry returns the original operation's outcome.
+  if (clientKey) {
+    const existing = await RefundOperation.findOne({ tenantId: ctx.tenantId, clientKey }).lean();
+    if (existing) return replayOperation(deps, existing, fingerprint);
+  }
 
   const isStandaloneExternal =
     parsed.mode === "external" &&
@@ -3793,9 +3894,8 @@ export async function createRefund(input, ctx) {
   ensureIntegerCents(refundAmount);
 
   let linkedPaymentRemainingCents;
-  let alreadyRefunded = 0;
   if (payment) {
-    alreadyRefunded = await sumRefundedForPayment(
+    const alreadyRefunded = await sumRefundedForPayment(
       ctx.tenantId,
       payment._id,
     );
@@ -3823,138 +3923,89 @@ export async function createRefund(input, ctx) {
     tenantId: ctx.tenantId,
   });
 
-  // Atomic reservation before Stripe / any write: a concurrent second refund of the same payment
-  // cannot take more than what remains (released in finally, after the Refund row exists).
-  const reservation = payment ? await reserveRefundAmount(payment, refundAmount, alreadyRefunded) : null;
-  try {
-    const meta =
-      parsed.metadata && Object.keys(parsed.metadata).length
-        ? new Map(Object.entries(parsed.metadata))
-        : undefined;
-
-    if (parsed.mode === "stripe") {
-      const piFromRequest =
-        parsed.paymentIntentId != null &&
-        String(parsed.paymentIntentId).trim() !== ""
-          ? String(parsed.paymentIntentId).trim()
-          : null;
-
-      let stripeRefundId = null;
-      let stripeChargeId = parsed.chargeId ?? undefined;
-      const paymentIntentForRecord =
-        piFromRequest ?? payment.stripe?.paymentIntentId ?? undefined;
-
-      if (piFromRequest) {
-        const refund = await stripe.refunds.create(
-          {
-            charge: parsed.chargeId,
-            payment_intent: piFromRequest,
-            amount: refundAmount,
-            metadata: parsed.metadata || {},
-          },
-          { idempotencyKey: ctx.idempotencyKey || undefined },
-        );
-        stripeRefundId = refund.id;
-        stripeChargeId = refund.charge || stripeChargeId;
-      }
-
-      const refundDoc = await Refund.create({
-        tenantId: ctx.tenantId,
-        paymentId: payment._id,
-        mode: "stripe",
-        ...(parsed.memberId && { memberId: parsed.memberId }),
-        ...(parsed.applicationId && { applicationId: parsed.applicationId }),
-        amount: refundAmount,
-        currency: payment.currency,
-        refundDate: refundBusinessDate,
-        refNo: parsed.refNo,
-        stripe: {
-          ...(stripeRefundId && { refundId: stripeRefundId }),
-          ...(stripeChargeId && { chargeId: stripeChargeId }),
-          ...(paymentIntentForRecord && {
-            paymentIntentId: paymentIntentForRecord,
-          }),
-        },
-        memo: parsed.memo,
-        ...(parsed.payoutMethod ? { payoutMethod: parsed.payoutMethod } : {}),
-        ...(meta && { metadata: meta }),
-      });
-      if (reservation) await reservation.commit(); // Refund row exists: reserved -> committed
-
-      const newStatus =
-        (await sumRefundedForPayment(ctx.tenantId, payment._id)) < payment.amount ? "partially_refunded" : "refunded";
-      await Payment.updateOne(
-        { _id: payment._id },
-        {
-          $set: {
-            status: newStatus,
-            "audit.updatedBy": ctx.userId || ctx.memberId || "system",
-          },
-        },
-      );
-
-      const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
-        refundDoc,
-        payment,
-        ctx,
-      );
-
-      return {
-        ...(stripeRefundId != null && { refundId: stripeRefundId }),
-        refundDocId: refundDoc._id.toString(),
-        status: "ok",
-        glPosted,
-        glDocNo,
-        ...(piFromRequest == null && { stripeApiSkipped: true }),
-      };
-    }
-
-    const refundDoc = await Refund.create({
-      tenantId: ctx.tenantId,
-      ...(payment && { paymentId: payment._id }),
-      ...(parsed.memberId && { memberId: parsed.memberId }),
-      ...(parsed.applicationId && { applicationId: parsed.applicationId }),
-      mode: "external",
-      amount: refundAmount,
-      currency: payment?.currency ?? parsed.currency ?? "eur",
-      refundDate: refundBusinessDate,
-      refNo: parsed.refNo,
-      memo: parsed.memo,
-      payoutMethod: parsed.payoutMethod ?? "bank_transfer",
-      ...(meta && { metadata: meta }),
-    });
-    if (reservation) await reservation.commit(); // Refund row exists: reserved -> committed
-
-    if (payment) {
-      const newStatus =
-        (await sumRefundedForPayment(ctx.tenantId, payment._id)) < payment.amount ? "partially_refunded" : "refunded";
-      await Payment.updateOne(
-        { _id: payment._id },
-        {
-          $set: {
-            status: newStatus,
-            "audit.updatedBy": ctx.userId || ctx.memberId || "system",
-          },
-        },
-      );
-    }
-
-    const { glPosted, glDocNo } = await applyRefundGlAndUpdateDoc(
-      refundDoc,
-      paymentLike,
-      ctx,
-    );
-
-    return {
-      ok: true,
-      refundDocId: refundDoc._id.toString(),
-      glPosted,
-      glDocNo,
-      ...(isStandaloneExternal && { standaloneExternal: true }),
-    };
-  } finally {
-    if (reservation) await reservation.release();
+  // Flow A / B from trusted records (policy mode decides whether a refusal is enforced).
+  const policyMode = refundPolicyMode();
+  const cls = policyMode === "off" ? { flow: payment ? "UNCLASSIFIED" : "EXT", memberKey: null, refusal: null } : await classifyRefundFlow(parsed, payment, ctx);
+  if (cls.flow === "EXT" && !cls.memberKey) cls.memberKey = strOrNull(parsed.memberId);
+  const policy = { mode: policyMode, flow: cls.flow, wouldRefuse: cls.refusal ? cls.refusal.code : null };
+  if (cls.refusal) {
+    const logger = (await import("../config/logger.js")).default;
+    logger.warn({ tenantId: ctx.tenantId, paymentId: payment ? String(payment._id) : null, flow: cls.flow, code: cls.refusal.code, policyMode }, "Refund policy decision");
+    if (policyMode === "enforce") throw new AppError(cls.refusal.message, cls.refusal.status, cls.refusal.code, { flow: cls.flow });
   }
+
+  // Member credit reservation: always for standalone external credit refunds (the existing
+  // credit rule, made atomic); for flow B only under enforce (the new B credit cap).
+  const scope = { tenantId: ctx.tenantId };
+  let memberAvailable = null;
+  if (cls.flow === "EXT" && cls.memberKey) {
+    memberAvailable = String(cls.memberKey).startsWith("app:")
+      ? () => getAvailableCredit2020ForKey(cls.memberKey, journalYear, "membership", scope)
+      : () => getRefundableBalanceForMember(cls.memberKey, journalYear, "membership", scope);
+  } else if (cls.flow === "B" && cls.memberKey && policyMode === "enforce") {
+    // Flow B cap = min(payment remaining [payment reservation], member refundable credit [here]).
+    memberAvailable = () => getRefundableBalanceForMember(cls.memberKey, journalYear, "membership", scope);
+  } else if (cls.flow === "A" && cls.memberKey && policyMode === "enforce") {
+    // Flow A cap = min(payment remaining, credit on the application key).
+    memberAvailable = () => getAvailableCredit2020ForKey(cls.memberKey, journalYear, "membership", scope);
+  } else if (cls.flow === "B" && cls.memberKey) {
+    const available = await getRefundableBalanceForMember(cls.memberKey, journalYear, "membership", scope);
+    if (refundAmount > available) policy.wouldRefuse = policy.wouldRefuse || "REFUND_MEMBER_CREDIT_UNAVAILABLE";
+  }
+
+  const piFromRequest = strOrNull(parsed.paymentIntentId);
+  const meta = parsed.metadata && Object.keys(parsed.metadata).length ? parsed.metadata : undefined;
+  const refundTemplate = {
+    ...(parsed.memberId && { memberId: parsed.memberId }),
+    ...(parsed.applicationId && { applicationId: parsed.applicationId }),
+    refundDate: refundBusinessDate,
+    refNo: parsed.refNo,
+    memo: parsed.memo,
+    ...(parsed.mode === "external"
+      ? { payoutMethod: parsed.payoutMethod ?? "bank_transfer" }
+      : parsed.payoutMethod ? { payoutMethod: parsed.payoutMethod } : {}),
+    ...(meta && { metadata: meta }),
+    ...(parsed.mode === "stripe" && !piFromRequest && payment?.stripe?.paymentIntentId ? { paymentIntentId: payment.stripe.paymentIntentId } : {}),
+  };
+
+  const started = await startOperation(deps, {
+    tenantId: ctx.tenantId,
+    source: "crm_refund",
+    flow: cls.flow,
+    mode: parsed.mode,
+    payment,
+    amount: refundAmount,
+    currency: payment?.currency ?? parsed.currency ?? "eur",
+    clientKey,
+    fingerprint,
+    memberKey: memberAvailable ? cls.memberKey : null,
+    memberAvailable,
+    stripeParams: parsed.mode === "stripe" && piFromRequest
+      ? { payment_intent: piFromRequest, ...(parsed.chargeId ? { charge: parsed.chargeId } : {}), ...(meta ? { metadata: meta } : {}) }
+      : null,
+    refundTemplate,
+    policy,
+    createdBy: ctx.userId || ctx.memberId || null,
+  });
+  if (started.existing) return replayOperation(deps, started.existing, fingerprint);
+  return executeOperation(deps, started.op);
+}
+
+/** CRM finance: unresolved refund operations of the caller's tenant (read-only). */
+export async function listRefundOperations(ctx, { limit } = {}) {
+  requireTenantId(ctx);
+  return { items: await listUnresolvedOperations(defaultRefundOpsDeps(), ctx.tenantId, { limit }) };
+}
+
+/** CRM finance: reconcile unresolved operations. Dry-run unless apply === true. */
+export async function reconcileRefunds(ctx, { apply = false, operationIds, minAgeSeconds } = {}) {
+  requireTenantId(ctx);
+  return reconcileRefundOperations(defaultRefundOpsDeps(), {
+    tenantId: ctx.tenantId,
+    apply: apply === true,
+    operationIds: Array.isArray(operationIds) ? operationIds : null,
+    ...(Number.isFinite(Number(minAgeSeconds)) ? { minAgeMs: Math.max(0, Number(minAgeSeconds)) * 1000 } : {}),
+  });
 }
 
 /**

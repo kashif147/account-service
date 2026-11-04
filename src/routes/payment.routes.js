@@ -8,6 +8,7 @@ import { defaultPolicyMiddleware } from "../middlewares/policy.middleware.js";
 import validate from "../middlewares/validate.js";
 import { listPaymentAttemptsRules } from "../validators/paymentAttempts.validators.js";
 import {
+  requireFinanceRead,
   requireFinanceWrite,
   requireInternalOrFinanceDataRead,
   requireInternalOrFinanceWrite,
@@ -35,6 +36,8 @@ import {
   listPaymentsBatch,
   associateMemberLinksForTransactions,
   listPaymentAttemptsHandler,
+  listRefundOperationsHandler,
+  reconcileRefundOperationsHandler,
 } from "../controllers/payment.controller.js";
 import {
   zCreateIntent,
@@ -190,5 +193,10 @@ router.post(
   zodValidate(zCreateRefund),
   createPaymentRefund
 );
+
+// P5 refund operations: unresolved / uncertain refunds are visible to CRM finance (read), and
+// reconciliation (read-only provider lookup; dry-run unless {apply:true}) is a finance write.
+router.get("/refund-operations", requireCrmUser, requireFinanceRead, listRefundOperationsHandler);
+router.post("/refund-operations/reconcile", requireCrmUser, requireFinanceWrite, reconcileRefundOperationsHandler);
 
 export default router;

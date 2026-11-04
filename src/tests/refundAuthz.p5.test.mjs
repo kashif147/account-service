@@ -104,6 +104,7 @@ async function seed({ tenantId = TA, amount = 5000, applicationId, memberId, sta
   await Payment.collection.insertOne(doc);
   return { _id, pi, charge: `ch_authz_${seq}` };
 }
+const reservedOf = (row) => (row?.refundReservations || []).reduce((t, r) => t + (Number(r.amount) || 0), 0);
 const body = (pi, extra = {}) => ({ mode: "stripe", paymentIntentId: pi, payoutMethod: "credit_card", amount: 5000, ...extra });
 
 async function noMoneyMoved(p, before) {
@@ -111,7 +112,7 @@ async function noMoneyMoved(p, before) {
   assert.equal(await Refund.countDocuments({ paymentId: p._id }), 0, "no Refund row");
   const row = await Payment.findById(p._id).lean();
   assert.equal(row.status, "succeeded");
-  assert.equal(row.refundReservedCents || 0, 0, "no reservation left behind");
+  assert.equal(reservedOf(row), 0, "no reservation left behind");
 }
 
 if (!skip) {
@@ -129,7 +130,7 @@ test("permitted CRM finance caller (AM + payments:write) is allowed: one Stripe 
   assert.equal(await Refund.countDocuments({ paymentId: p._id }), 1);
   const row = await Payment.findById(p._id).lean();
   assert.equal(row.status, "refunded");
-  assert.equal(row.refundReservedCents, 0);
+  assert.equal(reservedOf(row), 0);
 });
 
 test("PORTAL caller is denied even with finance role + permission text in the token", { skip }, async () => {
@@ -218,7 +219,7 @@ test("over-refund and previous refunds: remaining amount counts tenant-scoped Re
   assert.equal(second.status, 200, second.text);
   const row = await Payment.findById(p._id).lean();
   assert.equal(row.status, "refunded", "status from the cumulative Refund rows, not the last amount");
-  assert.equal(row.refundReservedCents, 0);
+  assert.equal(reservedOf(row), 0);
   assert.equal(stripeRefundCalls.length, before + 2);
   assert.equal((await postRefund(body(p.pi, { amount: 1 }))).status, 400, "fully refunded");
 });
@@ -238,7 +239,7 @@ test("two concurrent refunds when only one fits: exactly one succeeds, one 409, 
   assert.equal(stripeRefundCalls.length, before + 1);
   assert.equal(await Refund.countDocuments({ tenantId: TA, paymentId: p._id }), 1);
   const row = await Payment.findById(p._id).lean();
-  assert.equal(row.refundReservedCents, 0);
+  assert.equal(reservedOf(row), 0);
   assert.equal(row.status, "partially_refunded");
 });
 
@@ -254,7 +255,7 @@ test("two concurrent refunds that both fit both succeed (no false refusal)", { s
   }
   assert.equal(stripeRefundCalls.length, before + 2);
   const row = await Payment.findById(p._id).lean();
-  assert.equal(row.refundReservedCents, 0);
+  assert.equal(reservedOf(row), 0);
   assert.equal(row.status, "partially_refunded");
 });
 
@@ -268,27 +269,32 @@ test("idempotent retry (same Idempotency-Key) returns the original result; no se
   assert.equal(retry.status, 200);
   assert.equal(retry.data.refundDocId, first.data.refundDocId);
   assert.equal(stripeRefundCalls.length, before + 1, "one Stripe refund");
-  assert.equal(stripeRefundCalls[stripeRefundCalls.length - 1].idempotencyKey, key, "Stripe gets the same idempotency key");
+  // P5 revision: the Stripe idempotency key is derived server-side from the RefundOperation id,
+  // never the client's key.
+  const sent = stripeRefundCalls[stripeRefundCalls.length - 1].idempotencyKey;
+  assert.match(sent, /^refundop:[a-f0-9]{24}$/);
+  assert.notEqual(sent, key);
   assert.equal(await Refund.countDocuments({ paymentId: p._id }), 1);
 });
 
-test("Stripe failure releases the reservation: nothing committed, a later refund still fits", { skip }, async () => {
+test("definitive Stripe failure releases the reservation; a later refund still fits", { skip }, async () => {
   const p = await seed({ applicationId: "APP-STRIPEFAIL" });
   const real = stripeClient.refunds.create;
-  stripeClient.refunds.create = async () => { throw Object.assign(new Error("stripe down (test)"), { statusCode: 503 }); };
+  stripeClient.refunds.create = async () => { throw Object.assign(new Error("charge already refunded (test)"), { type: "StripeInvalidRequestError", statusCode: 400, code: "charge_already_refunded" }); };
   try {
     const r = await postRefund(body(p.pi, { amount: 5000 }));
-    assert.ok(r.status >= 500, `stripe failure surfaces: ${r.status}`);
+    assert.equal(r.status, 502, r.text);
+    assert.equal(r.code, "REFUND_PROVIDER_REJECTED");
   } finally {
     stripeClient.refunds.create = real;
   }
   let row = await Payment.findById(p._id).lean();
-  assert.equal(row.refundReservedCents, 0);
+  assert.equal(reservedOf(row), 0);
   assert.equal(row.refundCommittedCents || 0, 0);
   assert.equal(await Refund.countDocuments({ paymentId: p._id }), 0);
   const ok = await postRefund(body(p.pi, { amount: 5000 }));
   assert.equal(ok.status, 200, ok.text);
   row = await Payment.findById(p._id).lean();
   assert.equal(row.refundCommittedCents, 5000);
-  assert.equal(row.refundReservedCents, 0);
+  assert.equal(reservedOf(row), 0);
 });
