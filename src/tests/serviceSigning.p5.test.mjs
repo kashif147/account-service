@@ -19,7 +19,7 @@ const RAW = fs.readFileSync(FIXTURE);
 const V = JSON.parse(RAW.toString("utf8"));
 
 const S = await import("../lib/serviceSigning.js");
-const { createServiceAuthVerifier, evaluateServiceAuth } = await import("../middlewares/serviceAuth.middleware.js");
+const { createServiceAuthVerifier, createIntentRegistrationServiceAuth, createManualPaymentServiceAuth, evaluateServiceAuth } = await import("../middlewares/serviceAuth.middleware.js");
 const mongoose = (await import("mongoose")).default;
 
 const EV_SECRET = "TEST-ONLY-unit-events-secret-0123456789abcdef";
@@ -236,7 +236,8 @@ function fakeRes() {
 }
 function captureLogger() {
   const lines = [];
-  const rec = (level) => (msg, meta) => lines.push({ level, msg, meta });
+  // pino signature: (mergingObject, message).
+  const rec = (level) => (meta, msg) => lines.push({ level, msg, meta });
   return { lines, info: rec("info"), warn: rec("warn"), error: rec("error") };
 }
 
@@ -321,5 +322,157 @@ test("log redaction: no secret, signature, nonce, body or header values in any l
   for (const forbidden of [EV_SECRET, EV_NEXT, PR_SECRET, sig, "B".repeat(43), "cmVkYWN0aW9uLW5vbmNlLTAwMDAx", "registrationId", "actorUserId", T]) {
     assert.ok(!text.includes(forbidden), `log must not contain ${forbidden.slice(0, 12)}...`);
   }
-  for (const l of all) assert.deepEqual(Object.keys(l.meta).sort(), ["caller", "internalPath", "kid", "mode", "operation", "outcome"]);
+  for (const l of all) assert.deepEqual(Object.keys(l.meta).sort(), ["caller", "domain", "internalPath", "kid", "mode", "operation", "outcome", "result"]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Report mode (the DEV compatibility-measurement rollout): for every covered route and its allowed
+// caller, unsigned / invalidly-signed / validly-signed commands ALL reach next() (never rejected)
+// and each is logged once with a distinct result marker usable for compatibility counts.
+const RID = "b".repeat(24);
+const COVERED = [
+  // [operation, caller, kid, secret, target, body, mount]
+  ["capture", "profile-service", "pr-1", PR_SECRET, "/api/payments/intents/pi_1/capture", appBody(), "verifier"],
+  ["capture", "events-service", "ev-1", EV_SECRET, "/api/payments/intents/pi_1/capture", regBody(), "verifier"],
+  ["cancel", "profile-service", "pr-1", PR_SECRET, "/api/payments/intents/pi_1/cancel", appBody().replace('"capture"', '"cancel"'), "verifier"],
+  ["cancel", "events-service", "ev-1", EV_SECRET, "/api/payments/intents/pi_1/cancel", regBody({ transition: "cancel" }), "verifier"],
+  ["manual_record", "events-service", "ev-1", EV_SECRET, "/api/journal/events/manual-payment", regBody({ transition: "manual_record" }), "manual"],
+  ["manual_post", "events-service", "ev-1", EV_SECRET, "/api/journal/events/manual-payment/post", regBody({ transition: "manual_post" }), "manual"],
+  ["manual_void", "events-service", "ev-1", EV_SECRET, "/api/journal/events/manual-payment/void", regBody({ transition: "manual_void" }), "manual"],
+  ["intent_registration", "events-service", "ev-1", EV_SECRET, "/api/payments/intents", JSON.stringify({ purpose: "eventRegistration", registrationId: RID, amount: 1000, currency: "eur" }), "intent"],
+];
+const MANUAL_SUFFIX = { manual_record: "/manual-payment", manual_post: "/manual-payment/post", manual_void: "/manual-payment/void" };
+
+function middlewareFor(operation, mount, d) {
+  if (mount === "manual") return createManualPaymentServiceAuth(d);
+  if (mount === "intent") return createIntentRegistrationServiceAuth(d);
+  return createServiceAuthVerifier(operation, d);
+}
+
+async function runCovered(mode, [operation, , , , , , mount], req, over = {}) {
+  const prev = process.env.PAYMENT_SERVICE_AUTH_MODE;
+  process.env.PAYMENT_SERVICE_AUTH_MODE = mode;
+  const log = captureLogger();
+  const mw = middlewareFor(operation, mount, { ...deps(), logger: log, ...over });
+  // createManualPaymentServiceAuth is mounted under router.use("/events") and dispatches on req.path.
+  if (mount === "manual") req.path = MANUAL_SUFFIX[operation];
+  const res = fakeRes();
+  let nexted = false;
+  try {
+    await connected(() => mw(req, res, () => { nexted = true; }))();
+  } finally {
+    if (prev == null) delete process.env.PAYMENT_SERVICE_AUTH_MODE; else process.env.PAYMENT_SERVICE_AUTH_MODE = prev;
+  }
+  return { res, nexted, log };
+}
+
+function unsignedReq(target, body, headers = { "x-internal-request": "true" }) {
+  return { method: "POST", originalUrl: target, body: JSON.parse(body), headers: { "x-tenant-id": T, ...headers } };
+}
+
+for (const c of COVERED) {
+  const [operation, caller, kid, secret, target, body, mount] = c;
+  const domain = JSON.parse(body).binding?.domain || "registration";
+  const sign = (tamper) => signedReq({ caller, kid, secret, target, body, idem: `${domain}:${operation}:x:pi_1` }, tamper);
+  const expectLine = (log, want) => {
+    assert.equal(log.lines.length, 1, `${operation}/${caller}: exactly one log line`);
+    const [l] = log.lines;
+    assert.equal(l.level, want.result === "valid" ? "info" : "warn");
+    for (const [k, v] of Object.entries(want)) assert.equal(l.meta[k], v, `${operation}/${caller} ${k}`);
+    assert.equal(l.meta.operation, operation);
+    assert.equal(l.meta.mode, "report");
+    assert.equal(l.meta.domain, domain);
+    assert.equal(l.msg, `[service-auth] payment command op=${operation} mode=report result=${want.result} outcome=${want.outcome} caller=${want.caller || "none"} domain=${domain} internalPath=true`);
+  };
+
+  test(`report: ${operation} from ${caller} - unsigned accepted and logged result=unsigned`, async () => {
+    const r = await runCovered("report", c, unsignedReq(target, body));
+    assert.equal(r.nexted, true);
+    assert.equal(r.res.statusCode, 200);
+    assert.equal(r.res.body, null);
+    expectLine(r.log, { result: "unsigned", outcome: "SERVICE_AUTH_REQUIRED", caller: null });
+  });
+
+  test(`report: ${operation} from ${caller} - invalid signature accepted and logged result=invalid`, async () => {
+    for (const [tamper, outcome] of [
+      [(r) => ({ ...r, headers: { ...r.headers, "x-svc-sig": "A".repeat(43) } }), "SERVICE_AUTH_INVALID"],
+      [(r) => ({ ...r, rawBody: Buffer.from(body + " ") }), "SERVICE_AUTH_INVALID"],
+      [(r) => ({ ...r, headers: { ...r.headers, "x-svc-kid": "nope-9" } }), "SERVICE_AUTH_UNKNOWN_KID"],
+      [(r) => ({ ...r, headers: { ...r.headers, "x-svc-ts": String(NOW - 600) } }), "SERVICE_AUTH_STALE"],
+    ]) {
+      const r = await runCovered("report", c, sign(tamper));
+      assert.equal(r.nexted, true, outcome);
+      assert.equal(r.res.statusCode, 200, outcome);
+      expectLine(r.log, { result: "invalid", outcome, caller });
+    }
+  });
+
+  test(`report: ${operation} from ${caller} - valid signature accepted and logged result=valid`, async () => {
+    const req = sign();
+    const r = await runCovered("report", c, req);
+    assert.equal(r.nexted, true);
+    expectLine(r.log, { result: "valid", outcome: "valid", caller, kid });
+    assert.deepEqual(req.serviceCaller, { caller, kid });
+  });
+}
+
+test("report: wrong caller for the domain, replay and store-down are accepted and logged result=invalid", async () => {
+  const cap = COVERED[1]; // capture, registration domain
+  const wrong = signedReq({ caller: "profile-service", kid: "pr-1", secret: PR_SECRET });
+  const w = await runCovered("report", cap, wrong);
+  assert.equal(w.nexted, true);
+  assert.equal(w.log.lines[0].meta.result, "invalid");
+  assert.equal(w.log.lines[0].meta.outcome, "SERVICE_NOT_ALLOWED");
+  const NonceModel = memoryNonceModel();
+  const once = signedReq({ nonce: "cmVwb3J0LXJlcGxheS0wMDAwMDE" });
+  await runCovered("report", cap, once, { NonceModel });
+  const again = await runCovered("report", cap, { ...once, headers: { ...once.headers } }, { NonceModel });
+  assert.equal(again.nexted, true);
+  assert.equal(again.log.lines[0].meta.outcome, "SERVICE_AUTH_REPLAY");
+  assert.equal(again.log.lines[0].meta.result, "invalid");
+  const down = await runCovered("report", cap, signedReq(), { NonceModel: { async create() { throw new Error("down"); } } });
+  assert.equal(down.nexted, true);
+  assert.equal(down.log.lines[0].meta.outcome, "SERVICE_AUTH_STORE_UNAVAILABLE");
+});
+
+test("report: an unsigned USER-path command (CRM token, no x-internal-request) is accepted and logged internalPath=false", async () => {
+  for (const c of COVERED.filter(([, , , , , , mount]) => mount !== "intent")) {
+    const r = await runCovered("report", c, unsignedReq(c[4], c[5], { authorization: "Bearer x" }));
+    assert.equal(r.nexted, true);
+    assert.equal(r.log.lines[0].meta.result, "unsigned");
+    assert.equal(r.log.lines[0].meta.internalPath, false);
+  }
+  // intent_registration evaluates the internal path only: a user-path create is not logged at all.
+  const i = await runCovered("report", COVERED[7], unsignedReq(COVERED[7][4], COVERED[7][5], { authorization: "Bearer x" }));
+  assert.equal(i.nexted, true);
+  assert.equal(i.log.lines.length, 0);
+});
+
+test("report: a domain outside the known set is never echoed into the log", async () => {
+  const r = await runCovered("report", COVERED[1], unsignedReq(COVERED[1][4], JSON.stringify({ binding: { domain: "x-secret-ish-value" } })));
+  assert.equal(r.nexted, true);
+  assert.equal(r.log.lines[0].meta.domain, null);
+  assert.ok(!JSON.stringify(r.log.lines).includes("x-secret-ish-value"));
+});
+
+test("real pino logger: verifier fields survive into the emitted JSON line (not dropped)", async () => {
+  const pino = (await import("pino")).default;
+  const out = [];
+  const stream = { write: (s) => out.push(s) };
+  const log = pino({}, stream);
+  const prev = process.env.PAYMENT_SERVICE_AUTH_MODE;
+  process.env.PAYMENT_SERVICE_AUTH_MODE = "report";
+  try {
+    const mw = createServiceAuthVerifier("capture", { ...deps(), logger: log });
+    await connected(() => mw(unsignedReq("/api/payments/intents/pi_1/capture", regBody()), fakeRes(), () => {}))();
+  } finally {
+    if (prev == null) delete process.env.PAYMENT_SERVICE_AUTH_MODE; else process.env.PAYMENT_SERVICE_AUTH_MODE = prev;
+  }
+  assert.equal(out.length, 1);
+  const line = JSON.parse(out[0]);
+  assert.equal(line.operation, "capture");
+  assert.equal(line.result, "unsigned");
+  assert.equal(line.outcome, "SERVICE_AUTH_REQUIRED");
+  assert.equal(line.domain, "registration");
+  assert.equal(line.msg, "[service-auth] payment command op=capture mode=report result=unsigned outcome=SERVICE_AUTH_REQUIRED caller=none domain=registration internalPath=true");
 });

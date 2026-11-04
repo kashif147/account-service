@@ -28,7 +28,8 @@
 //
 // Mode: PAYMENT_SERVICE_AUTH_MODE, read per request.
 //   off      (default) - not evaluated.
-//   report   - evaluated and logged (operation, caller, kid, outcome code only); NEVER rejects.
+//   report   - evaluated and logged (operation, result valid|invalid|unsigned, outcome code, caller,
+//              kid, known command domain, internalPath only); NEVER rejects.
 //              Measures compatibility only; it is not a security boundary.
 //   enforce  - a signed request must pass every check; an UNSIGNED request on the internal path
 //              (x-internal-request) is refused. Unsigned user-path (CRM token) requests are left to
@@ -154,6 +155,23 @@ export async function evaluateServiceAuth(req, operation, deps = {}) {
   return { outcome: "valid", caller: h.caller, kid: h.kid };
 }
 
+// Domain for the compatibility log only (attributes an UNSIGNED command to its expected caller via
+// ALLOW). Restricted to the known domains so a body value is never echoed into the log.
+const LOG_DOMAINS = new Set(["application", "registration"]);
+function logDomain(req, operation) {
+  try {
+    const d = commandDomain(req, operation);
+    return LOG_DOMAINS.has(d) ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Single-line, grep-able form of a verifier log entry (outcome codes and identifiers only). */
+export function serviceAuthLogMessage(m) {
+  return `[service-auth] payment command op=${m.operation} mode=${m.mode} result=${m.result} outcome=${m.outcome} caller=${m.caller || "none"} domain=${m.domain || "none"} internalPath=${m.internalPath}`;
+}
+
 export function createServiceAuthVerifier(operation, deps = {}) {
   if (!OPERATIONS.includes(operation)) throw new Error(`unknown payment operation ${operation}`);
   const log = deps.logger || logger;
@@ -167,14 +185,19 @@ export function createServiceAuthVerifier(operation, deps = {}) {
       result = { outcome: "SERVICE_AUTH_STORE_UNAVAILABLE", caller: null, kid: null };
     }
     const unsigned = result.outcome === "SERVICE_AUTH_REQUIRED";
-    (result.outcome === "valid" ? log.info : log.warn).call(log, "[service-auth] payment command", {
+    const meta = {
       operation,
       mode,
+      result: result.outcome === "valid" ? "valid" : unsigned ? "unsigned" : "invalid",
       outcome: result.outcome,
       caller: result.caller,
       kid: result.kid,
+      domain: logDomain(req, operation),
       internalPath: isInternalPath(req),
-    });
+    };
+    // pino takes (mergingObject, message): fields passed after the message are silently dropped.
+    // The countable tuple is also in the message so it survives any transport (pretty or JSON).
+    (result.outcome === "valid" ? log.info : log.warn).call(log, meta, serviceAuthLogMessage(meta));
     if (result.outcome === "valid") {
       req.serviceCaller = { caller: result.caller, kid: result.kid };
       return next();
