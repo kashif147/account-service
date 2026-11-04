@@ -663,6 +663,39 @@ test("H29-D invoice() forwards the trusted tenant to postBalancedJournal (source
 
 // ======================= H-27 event-cancellation refunds =======================
 
+// In-memory RefundOperation model for the shared refund-operation mechanism (P5): the H27 tests
+// exercise the real refundOperations.service flow with fake models.
+function fakeRefundOperationModel() {
+  const docs = new Map();
+  const get = (d, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), d);
+  const matches = (d, f) => Object.entries(f).every(([k, v]) => {
+    if (k === "$or") return true;
+    const actual = get(d, k);
+    if (v && typeof v === "object" && Array.isArray(v.$in)) return v.$in.includes(actual);
+    if (v && typeof v === "object" && !(v instanceof Date) && !v.toHexString) return true; // $gt / $lte etc.
+    return String(actual) === String(v);
+  });
+  const find = (f) => [...docs.values()].find((d) => matches(d, f)) || null;
+  const apply = (d, u) => {
+    for (const [k, v] of Object.entries(u.$set || {})) {
+      const parts = k.split(".");
+      let o = d;
+      for (const part of parts.slice(0, -1)) o = o[part] = o[part] || {};
+      o[parts[parts.length - 1]] = v;
+    }
+    for (const [k, v] of Object.entries(u.$inc || {})) d[k] = (Number(d[k]) || 0) + v;
+    if (u.$push?.history) d.history = [...(d.history || []), u.$push.history];
+    return d;
+  };
+  return {
+    findOne: async (f) => find(f),
+    create: async (doc) => { docs.set(String(doc._id), { ...doc }); return { ...doc }; },
+    findOneAndUpdate: async (f, u) => { const d = find(f); return d ? { ...apply(d, u) } : null; },
+    updateOne: async (f, u) => { const d = find(f); if (d) apply(d, u); return {}; },
+    deleteOne: async (f) => { const d = find(f); if (d) docs.delete(String(d._id)); return {}; },
+  };
+}
+
 function refundDeps({ payments: paymentDocs = {}, refundedTotal = 0 } = {}) {
   const calls = { stripe: [], refundCreate: [], paymentFind: [], paymentUpdate: [] };
   return {
@@ -674,10 +707,16 @@ function refundDeps({ payments: paymentDocs = {}, refundedTotal = 0 } = {}) {
           const p = paymentDocs[String(f._id)];
           return p && p.tenantId === f.tenantId ? p : null;
         },
+        // reservation (refundOperations.service reservePayment): the fake always admits
+        findOneAndUpdate: async (f) => {
+          const p = paymentDocs[String(f._id)];
+          return p && p.tenantId === f.tenantId ? p : null;
+        },
         updateOne: async (f, u) => (calls.paymentUpdate.push({ f, u }), {}),
       },
+      RefundOperation: fakeRefundOperationModel(),
       Refund: {
-        findOne: () => ({ lean: async () => null }),
+        findOne: (f, p, o) => (o?.lean ? Promise.resolve(null) : { lean: async () => null }),
         create: async (doc) => (calls.refundCreate.push(doc), { _id: "refund-1", ...doc }),
         updateOne: async () => ({}),
         aggregate: async () => (refundedTotal ? [{ total: refundedTotal }] : []),

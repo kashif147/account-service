@@ -179,6 +179,18 @@ const PaymentSchema = new Schema(
     authorisedAt: { type: Date },
     expiryWarnedAt: { type: Date },
     lastStripeEventAt: { type: Date },
+    // P5 refund accounting (cents), services/refundOperations.service.js: one entry per in-flight
+    // RefundOperation (exactly-once by opId); refundCommittedCents counts completed refunds of
+    // every source (initialised once from the Refund rows). committed + reserved <= amount.
+    refundReservations: {
+      type: [new Schema({ opId: { type: Schema.Types.ObjectId, required: true }, amount: { type: Number, required: true }, at: { type: Date, default: Date.now } }, { _id: false })],
+      default: undefined,
+    },
+    refundCommittedCents: { type: Number },
+    // RefundOperation ids already counted in refundCommittedCents (exactly-once commit).
+    refundCommittedOps: { type: [Schema.Types.ObjectId], default: undefined },
+    // Stripe refund ids whose committed amount was restored after a later provider failure.
+    refundReversedRefunds: { type: [String], default: undefined },
     webhookEventIds: { type: [String], default: [], index: true },
     auditHistory: { type: [PaymentAuditEventSubSchema], default: [] },
   },

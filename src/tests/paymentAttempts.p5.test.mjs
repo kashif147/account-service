@@ -115,6 +115,7 @@ publisher.publish = async (type, data) => { published.push({ type, data }); retu
 const { default: Payment } = await import("../models/payment.model.js");
 const { default: Refund } = await import("../models/refund.model.js");
 const { default: GLTransaction } = await import("../models/glTransaction.model.js");
+const { default: MaterializedBalance } = await import("../models/materializedBalance.model.js");
 const { processStripeEvent } = await import("../controllers/webhook.controller.js");
 const { default: app } = await import("../app.js");
 const { default: request } = await import("supertest");
@@ -135,8 +136,8 @@ after(async () => {
 });
 
 // ---- callers ----
-const bearer = ({ tenantId = TA, userType, id, permissions = [] }) =>
-  `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles: [], permissions }, SECRET, { expiresIn: "1h" })}`;
+const bearer = ({ tenantId = TA, userType, id, permissions = [], roles = [] }) =>
+  `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles, permissions }, SECRET, { expiresIn: "1h" })}`;
 const CRM_A = bearer({ userType: "CRM", id: "staff-a", permissions: ["accounts.journals:read"] });
 const CRM_B = bearer({ tenantId: TB, userType: "CRM", id: "staff-b", permissions: ["accounts.journals:read"] });
 const CRM_NOPERM = bearer({ userType: "CRM", id: "staff-mo", permissions: ["profiles:read", "payments:read"] });
@@ -296,6 +297,14 @@ if (!skip) {
     // tenant-B refund rows for tenant-A captured / partialUnknown payments: never counted
     { tenantId: TB, paymentId: ids.captured, mode: "stripe", amount: 5000, currency: "eur", createdAt: at(38) },
     { tenantId: TB, paymentId: ids.partialUnknown, mode: "stripe", amount: 1000, currency: "eur", createdAt: at(149) },
+  ]);
+  // 2020 credit still held on the application key, as the GL rollup holds it (receipt credit
+  // minus refunds). canRefund is narrowed to what the refund endpoint enforces (P5 #38).
+  const year = new Date().getFullYear();
+  await MaterializedBalance.collection.insertMany([
+    { tenantId: TA, memberId: "app:APP-CAP", accountCode: "2020", bucket: "current", year, ledgerDomain: "membership", amount: -5000, updatedAt: new Date() },
+    { tenantId: TA, memberId: "app:APP-PART", accountCode: "2020", bucket: "current", year, ledgerDomain: "membership", amount: -3000, updatedAt: new Date() },
+    { tenantId: TA, memberId: "app:APP-PUNK", accountCode: "2020", bucket: "current", year, ledgerDomain: "membership", amount: -5000, updatedAt: new Date() },
   ]);
 }
 
@@ -727,4 +736,104 @@ test("parity: old stripe-payments enrichment + CRM isRefundableUnapprovedRow vs 
   // fail-closed divergences (old grid failed OPEN): enrichment failure, processed app without a resolved number
   assert.deepEqual(table.captFail, { oldRule: true, newRule: false });
   assert.deepEqual(table.procNoNum, { oldRule: true, newRule: false });
+});
+
+// ---- canRefund under REFUND_POLICY_MODE=enforce, same classifier as the refund endpoint ----
+test("enforce: canRefund matches the enforced refund operation (submitted / rejected / processed / unavailable / unverified)", { skip }, async () => {
+  const { default: stripeClient } = await import("../lib/stripe.js");
+  const { setApplicationRefundStateProvider } = await import("../services/payments.service.js");
+  const created = [];
+  stripeClient.refunds.create = async (params) => { created.push(params); return { id: `re_enf_${created.length}`, status: "succeeded", charge: "ch_enf" }; };
+  const STATES = {
+    "ENF-SUB": { status: "submitted" },
+    "ENF-REJ": { status: "rejected" },
+    "ENF-PROC": { status: "processed" },
+    "ENF-UNVER": { status: "submitted", applicationId: "ENF-SOMETHING-ELSE" },
+  };
+  const lookups = [];
+  setApplicationRefundStateProvider(async ({ tenantId, applicationId }) => {
+    lookups.push(applicationId);
+    if (applicationId === "ENF-UNAV") throw new Error("profile-service unavailable");
+    const st = STATES[applicationId];
+    if (!st) throw new Error("unavailable");
+    return { applicationId: st.applicationId || applicationId, tenantId, status: st.status };
+  });
+  process.env.REFUND_POLICY_MODE = "enforce";
+  const FIN = bearer({ userType: "CRM", id: "staff-fin-enf", roles: ["AM"], permissions: ["accounts.journals:read", "payments:write", "payments:read"] });
+  const expected = {
+    "ENF-SUB": { canRefund: true, status: 200 },
+    "ENF-REJ": { canRefund: true, status: 200 },
+    "ENF-PROC": { canRefund: false, status: 409, code: "REFUND_INCONSISTENT_APPROVED_NO_TRANSFER" },
+    "ENF-UNAV": { canRefund: false, status: 503, code: "REFUND_APPLICATION_STATE_UNAVAILABLE" },
+    "ENF-UNVER": { canRefund: false, status: 409, code: "REFUND_APPLICATION_STATE_UNVERIFIED" },
+  };
+  try {
+    for (const appId of Object.keys(expected)) {
+      const key = `enf_${appId}`;
+      const doc = pay(key, { status: "succeeded", applicationId: appId, createdAt: at(2) });
+      for (const k of Object.keys(doc)) if (doc[k] === undefined) delete doc[k];
+      await Payment.collection.insertOne(doc);
+      await GLTransaction.collection.insertOne(receipt(key));
+      await MaterializedBalance.collection.insertOne({ tenantId: TA, memberId: `app:${appId}`, accountCode: "2020", bucket: "current", year: new Date().getFullYear(), ledgerDomain: "membership", amount: -5000, updatedAt: new Date() });
+    }
+    for (const [appId, exp] of Object.entries(expected)) {
+      const row = byId((await call(`${URL}?applicationId=${appId}`, { auth: CRM_A })).data.items, `enf_${appId}`);
+      assert.equal(row.actions.canRefund, exp.canRefund, `${appId} canRefund`);
+      const res = await request(appServer)
+        .post("/api/payments/refunds")
+        .set("authorization", FIN)
+        .set("content-type", "application/json")
+        .send({ mode: "stripe", paymentIntentId: row.paymentIntentId, applicationId: appId, payoutMethod: "credit_card", amount: row.refundableAmount });
+      const body = JSON.parse(res.text);
+      assert.equal(res.status, exp.status, `${appId}: ${res.text}`);
+      if (exp.code) assert.equal(body.code, exp.code);
+      // the two directions: canRefund=true -> accepted; refused -> canRefund=false
+      if (row.actions.canRefund) assert.equal(res.status, 200);
+      if (res.status !== 200) assert.equal(row.actions.canRefund, false);
+    }
+    // every other row on the page: canRefund=true never appears where the enforced endpoint
+    // could not establish the application state (unknown fixtures -> provider unavailable)
+    const page = (await call(`${URL}?limit=200`, { auth: CRM_A })).data.items;
+    assert.ok(page.filter((x) => x.actions.canRefund && !String(x.applicationId).startsWith("ENF-")).length === 0, "rows whose state is unavailable are never offered under enforce");
+    assert.ok(lookups.length > 0 && lookups.length <= 400, "batched / bounded lookups");
+  } finally {
+    delete process.env.REFUND_POLICY_MODE;
+    setApplicationRefundStateProvider(null);
+  }
+  assert.equal(created.length, 2, "only the two accepted refunds reached Stripe");
+});
+
+// ---- canRefund parity with the ENFORCED refund operation (P5 #38) ----
+// For every grid row with canRefund=true, POST /payments/refunds (as a CRM finance user, in the
+// mode that will be deployed first: REFUND_POLICY_MODE unset = report) must accept the refund the
+// grid offers (refundableAmount). Runs last: it refunds the fixtures.
+test("canRefund=true implies the refund endpoint accepts that refund; insufficient credit / receipt-less rows are not offered", { skip }, async () => {
+  const { default: stripeClient } = await import("../lib/stripe.js");
+  const created = [];
+  stripeClient.refunds.create = async (params) => { created.push(params); return { id: `re_grid_${created.length}`, charge: "ch_grid" }; };
+  delete process.env.REFUND_POLICY_MODE;
+  const FIN = bearer({ userType: "CRM", id: "staff-fin", roles: ["AM"], permissions: ["accounts.journals:read", "payments:write", "payments:read"] });
+  // a captured, unapproved application whose application-key credit no longer covers the payment
+  const low = pay("lowCredit", { status: "succeeded", applicationId: "APP-LOWCRED", createdAt: at(1) });
+  for (const k of Object.keys(low)) if (low[k] === undefined) delete low[k];
+  await Payment.collection.insertOne(low);
+  await GLTransaction.collection.insertOne(receipt("lowCredit"));
+  await MaterializedBalance.collection.insertOne({ tenantId: TA, memberId: "app:APP-LOWCRED", accountCode: "2020", bucket: "current", year: new Date().getFullYear(), ledgerDomain: "membership", amount: -1000, updatedAt: new Date() });
+  const lowRow = byId((await call(`${URL}?applicationId=APP-LOWCRED`, { auth: CRM_A })).data.items, "lowCredit");
+  assert.equal(lowRow.lifecycleStatus, "captured");
+  assert.equal(lowRow.refundableAmount, 5000);
+  assert.equal(lowRow.actions.canRefund, false, "credit 1000 < refundable 5000: the endpoint would refuse, so the grid must not offer it");
+
+  const items = (await call(`${URL}?limit=200`, { auth: CRM_A })).data.items;
+  const offered = items.filter((it) => it.actions.canRefund === true);
+  assert.ok(offered.length >= 2, `fixtures with canRefund=true: ${offered.map((i) => i.id).join(",")}`);
+  for (const it of offered) {
+    const res = await request(appServer)
+      .post("/api/payments/refunds")
+      .set("authorization", FIN)
+      .set("content-type", "application/json")
+      .send({ mode: "stripe", paymentIntentId: it.paymentIntentId, applicationId: it.applicationId, payoutMethod: "credit_card", amount: it.refundableAmount });
+    assert.equal(res.status, 200, `${it.id} (${it.applicationId}) canRefund=true but the endpoint answered ${res.status}: ${res.text}`);
+  }
+  assert.equal(created.length, offered.length);
 });
