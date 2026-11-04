@@ -43,6 +43,16 @@ export async function connectDB(
   } catch (e) {
     logger.warn({ err: e.message }, "Model init failed");
   }
+  // P5 S3 replay store: the unique (caller, nonce) index IS the replay check and the TTL index
+  // bounds the collection, so they are created explicitly - Model.init() builds nothing when
+  // autoIndex is off (NODE_ENV=production). New, account-owned collection; idempotent.
+  try {
+    const { default: ServiceAuthNonce } = await import("../models/serviceAuthNonce.model.js");
+    await ServiceAuthNonce.createIndexes();
+    logger.info({ collection: "serviceAuthNonces" }, "Service-auth nonce indexes ensured");
+  } catch (e) {
+    logger.warn({ err: e.message, collection: "serviceAuthNonces" }, "Service-auth nonce index creation failed");
+  }
   return mongoose.connection;
 }
 

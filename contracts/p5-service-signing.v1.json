@@ -1,0 +1,137 @@
+{
+  "contract": "p5-svc-sig",
+  "version": 1,
+  "audience": "account-service",
+  "maxSkewSeconds": 60,
+  "note": "TEST-ONLY secrets. Shared vectors for account-service (verifier), events-service and profile-service (signers); byte-identical in all three repos, SHA-256 pinned in each suite.",
+  "headers": [
+    "x-svc-version",
+    "x-svc-caller",
+    "x-svc-kid",
+    "x-svc-ts",
+    "x-svc-nonce",
+    "x-svc-sig"
+  ],
+  "vectors": [
+    {
+      "name": "events registration capture",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-events-0001",
+      "input": {
+        "caller": "events-service",
+        "kid": "ev-2026-11",
+        "method": "POST",
+        "target": "/api/payments/intents/pi_vec_reg_1/capture",
+        "tenant": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "idem": "registration:capture:bbbbbbbbbbbbbbbbbbbbbbbb:pi_vec_reg_1",
+        "ts": "1793000000",
+        "nonce": "Zm9vYmFyYmF6cXV4MTIzNDU2",
+        "body": "{\"binding\":{\"domain\":\"registration\",\"registrationId\":\"bbbbbbbbbbbbbbbbbbbbbbbb\",\"purpose\":\"eventRegistration\"},\"transition\":\"capture\",\"reason\":\"approve\",\"actorUserId\":\"cccccccccccccccccccccccc\"}"
+      },
+      "expect": {
+        "bodySha256": "e907c4625f3b8eb00dae34ec589b22aa31e4eaedaaa9f2a4a20266ea7797ce15",
+        "canonical": "p5-svc-sig/1\naud=15:account-service\ncaller=14:events-service\nkid=10:ev-2026-11\nmethod=4:POST\ntarget=42:/api/payments/intents/pi_vec_reg_1/capture\ntenant=24:aaaaaaaaaaaaaaaaaaaaaaaa\nidem=58:registration:capture:bbbbbbbbbbbbbbbbbbbbbbbb:pi_vec_reg_1\nbody=64:e907c4625f3b8eb00dae34ec589b22aa31e4eaedaaa9f2a4a20266ea7797ce15\nts=10:1793000000\nnonce=24:Zm9vYmFyYmF6cXV4MTIzNDU2",
+        "sig": "lMHPglNMPDGOmqy_rsXS_gwnXGK8yLy72C9P3MqAciw"
+      }
+    },
+    {
+      "name": "profile application cancel",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-profile-0001",
+      "input": {
+        "caller": "profile-service",
+        "kid": "pr-2026-11",
+        "method": "post",
+        "target": "/api/payments/intents/pi_vec_app_1/cancel",
+        "tenant": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "idem": "application:cancel:dddddddddddddddddddddddd:pi_vec_app_1",
+        "ts": "1793000001",
+        "nonce": "bm9uY2UtcHJvZmlsZS0wMDAx",
+        "body": "{\"binding\":{\"domain\":\"application\",\"applicationId\":\"dddddddddddddddddddddddd\",\"purpose\":\"subscriptionFee\"},\"transition\":\"cancel\",\"reason\":\"reject\",\"actorUserId\":\"cccccccccccccccccccccccc\"}"
+      },
+      "expect": {
+        "bodySha256": "b0fa4f52965d869a5bee98f93acd35f474d04bef9da2a651831a10f934fddca1",
+        "canonical": "p5-svc-sig/1\naud=15:account-service\ncaller=15:profile-service\nkid=10:pr-2026-11\nmethod=4:POST\ntarget=41:/api/payments/intents/pi_vec_app_1/cancel\ntenant=24:aaaaaaaaaaaaaaaaaaaaaaaa\nidem=56:application:cancel:dddddddddddddddddddddddd:pi_vec_app_1\nbody=64:b0fa4f52965d869a5bee98f93acd35f474d04bef9da2a651831a10f934fddca1\nts=10:1793000001\nnonce=24:bm9uY2UtcHJvZmlsZS0wMDAx",
+        "sig": "NtzEX0gNGjZkQVHHzXJCVfJs5w0wDIWxkjFJTgGZhv8"
+      }
+    },
+    {
+      "name": "events manual record with raw query string",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-events-0001",
+      "input": {
+        "caller": "events-service",
+        "kid": "ev-2026-11",
+        "method": "POST",
+        "target": "/api/journal/events/manual-payment?x=1&y=%20z",
+        "tenant": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "idem": "registration:manual_record:eeeeeeeeeeeeeeeeeeeeeeee:new",
+        "ts": "1793000002",
+        "nonce": "bWFudWFsLXJlY29yZC0wMDAx",
+        "body": "{\"binding\":{\"domain\":\"registration\",\"registrationId\":\"eeeeeeeeeeeeeeeeeeeeeeee\",\"purpose\":\"eventRegistration\"},\"transition\":\"manual_record\",\"reason\":\"crm_add_attendee\",\"actorUserId\":\"cccccccccccccccccccccccc\",\"record\":{\"amount\":0,\"currency\":\"eur\",\"method\":\"comp\"}}"
+      },
+      "expect": {
+        "bodySha256": "8d2286dbcb5d0c69943a62bd235caed0fd38f6d1d7bde9c8fdd517cc7cf41e80",
+        "canonical": "p5-svc-sig/1\naud=15:account-service\ncaller=14:events-service\nkid=10:ev-2026-11\nmethod=4:POST\ntarget=45:/api/journal/events/manual-payment?x=1&y=%20z\ntenant=24:aaaaaaaaaaaaaaaaaaaaaaaa\nidem=55:registration:manual_record:eeeeeeeeeeeeeeeeeeeeeeee:new\nbody=64:8d2286dbcb5d0c69943a62bd235caed0fd38f6d1d7bde9c8fdd517cc7cf41e80\nts=10:1793000002\nnonce=24:bWFudWFsLXJlY29yZC0wMDAx",
+        "sig": "sTEy9mxzuz81Z8cmi7e6BC6igA9EnltqEwAl_2xZXtg"
+      }
+    },
+    {
+      "name": "empty body",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-events-0001",
+      "input": {
+        "caller": "events-service",
+        "kid": "ev-2026-11",
+        "method": "POST",
+        "target": "/api/journal/events/manual-payment/void",
+        "tenant": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "idem": "k",
+        "ts": "1793000003",
+        "nonce": "ZW1wdHktYm9keS0wMDAwMDAx",
+        "body": ""
+      },
+      "expect": {
+        "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "canonical": "p5-svc-sig/1\naud=15:account-service\ncaller=14:events-service\nkid=10:ev-2026-11\nmethod=4:POST\ntarget=39:/api/journal/events/manual-payment/void\ntenant=24:aaaaaaaaaaaaaaaaaaaaaaaa\nidem=1:k\nbody=64:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nts=10:1793000003\nnonce=24:ZW1wdHktYm9keS0wMDAwMDAx",
+        "sig": "8I8AGTa8vCcGrGqL3QfkKb2hlkSDxH9hOPLeINCkDss"
+      }
+    },
+    {
+      "name": "length prefix A (tenant=ab, idem=)",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-events-0001",
+      "input": {
+        "caller": "events-service",
+        "kid": "ev-2026-11",
+        "method": "POST",
+        "target": "/x",
+        "tenant": "ab",
+        "idem": "",
+        "ts": "1793000004",
+        "nonce": "YW1iaWd1aXR5LWNhc2UtQUFB",
+        "body": "{}"
+      },
+      "expect": {
+        "bodySha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "canonical": "p5-svc-sig/1\naud=15:account-service\ncaller=14:events-service\nkid=10:ev-2026-11\nmethod=4:POST\ntarget=2:/x\ntenant=2:ab\nidem=0:\nbody=64:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\nts=10:1793000004\nnonce=24:YW1iaWd1aXR5LWNhc2UtQUFB",
+        "sig": "c6DREDBsyhUkoNedA_QoRRdRuN7en8k3fLHcbV8TWFA"
+      }
+    },
+    {
+      "name": "length prefix B (tenant=a, idem=b)",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-events-0001",
+      "input": {
+        "caller": "events-service",
+        "kid": "ev-2026-11",
+        "method": "POST",
+        "target": "/x",
+        "tenant": "a",
+        "idem": "b",
+        "ts": "1793000004",
+        "nonce": "YW1iaWd1aXR5LWNhc2UtQUFB",
+        "body": "{}"
+      },
+      "expect": {
+        "bodySha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "canonical": "p5-svc-sig/1\naud=15:account-service\ncaller=14:events-service\nkid=10:ev-2026-11\nmethod=4:POST\ntarget=2:/x\ntenant=1:a\nidem=1:b\nbody=64:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\nts=10:1793000004\nnonce=24:YW1iaWd1aXR5LWNhc2UtQUFB",
+        "sig": "cRNA-abiGXT-UGZ_OGfuOBPNNPaw-hVJ4Wkh9C4RWuk"
+      }
+    }
+  ]
+}

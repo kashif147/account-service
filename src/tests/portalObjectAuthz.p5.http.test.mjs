@@ -258,7 +258,7 @@ test("member statement: portal own-statement still needs the PDP permission (own
 });
 
 // ---------------- payments ----------------
-test("record-external: portal MEMBER / NON-MEMBER denied; CRM without finance write denied; CRM AM + payments:write and internal pass", async () => {
+test("record-external: portal MEMBER / NON-MEMBER denied; CRM without finance write denied; CRM AM + payments:write passes; bare internal refused (P5)", async () => {
   const body = { direction: "in", amount: 1000, currency: "eur", memberId: "M-A2" };
   for (const auth of [PORTAL_A1, PORTAL_A1_BARE, PORTAL_C1, UNKNOWN_TYPE]) {
     assert.equal((await call("POST", "/api/payments/record-external", { auth, body })).status, 403);
@@ -267,7 +267,8 @@ test("record-external: portal MEMBER / NON-MEMBER denied; CRM without finance wr
   assert.equal((await call("POST", "/api/payments/record-external", { auth: CRM_FIN_READ, body })).status, 403);
   // Allowed callers are sent an invalid body (400 from validation) so nothing is created.
   assert.equal((await call("POST", "/api/payments/record-external", { auth: CRM_FIN_WRITE, body: { direction: "sideways" } })).status, 400);
-  assert.equal((await call("POST", "/api/payments/record-external", { headers: INTERNAL, body: { direction: "sideways" } })).status, 400);
+  // P5: the bare x-internal-request branch is removed (no service caller) - refused before validation.
+  assert.equal((await call("POST", "/api/payments/record-external", { headers: INTERNAL, body: { direction: "sideways" } })).status, 403);
 });
 
 test("record-external: a user JWT + spoofed x-internal-request does not get the internal grant", async () => {

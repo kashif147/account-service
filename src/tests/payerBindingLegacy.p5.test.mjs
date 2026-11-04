@@ -94,6 +94,9 @@ const PORTAL_A = bearer({ userType: "PORTAL", id: "member-a" });
 const PORTAL_B = bearer({ userType: "PORTAL", id: "member-b" });
 const PORTAL_C = bearer({ tenantId: TC, userType: "PORTAL", id: "member-c" });
 const CRM = bearer({ userType: "CRM", id: "staff-1" });
+// P5 (b12): the manual-to-card takeover via intent create stands for events retry-payment, a CRM action
+// gated by the exact events:write permission - the switch calls use a CRM token carrying it.
+const CRM_EVENTS_WRITE = `Bearer ${jwt.sign({ id: "staff-1", sub: "staff-1", tenantId: TA, userType: "CRM", roles: [], permissions: ["events:write"] }, SECRET, { expiresIn: "1h" })}`;
 
 async function call(method, url, { auth, headers = {}, body } = {}) {
   const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); }); // explicit IPv4 loopback: matches the 127.0.0.1 fetch target
@@ -261,7 +264,7 @@ test("L5 manual void releases the binding atomically; a released (replaced) reco
   const reg = oid(0x15);
   const rec = await listener.postManualEventPayment({ tenantId: TA, registrationId: reg, amount: 5000, currency: "eur", method: "manual", userId: "staff-1" });
   assert.equal(String((await holders(reg))[0]._id), rec.paymentId, "new manual record claims the binding at creation");
-  const card = await call("POST", "/api/payments/intents", { auth: CRM, body: crmBody(reg) });
+  const card = await call("POST", "/api/payments/intents", { auth: CRM_EVENTS_WRITE, body: crmBody(reg) });
   assert.equal(card.status, 200, card.text.slice(0, 200));
   const post = await listener.postManualEventPaymentPost({ tenantId: TA, paymentId: rec.paymentId, method: "manual", profileId: "p1", userId: "staff-1" })
     .then((v) => ({ ok: true, v }), (e) => ({ ok: false, code: e.code }));

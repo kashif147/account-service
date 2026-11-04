@@ -206,7 +206,16 @@ app.use(compressionMiddleware);
 app.use("/api/webhook", webhookRoutes);
 
 // JSON body parser for all other routes
-app.use(bodyParser.json({ limit: "1mb" }));
+// P5 S3: a signed service command (x-svc-sig) is verified over the EXACT transmitted body bytes, so
+// keep them for middlewares/serviceAuth.middleware.js. Only signed requests keep a copy.
+app.use(
+  bodyParser.json({
+    limit: "1mb",
+    verify: (req, _res, buf) => {
+      if (req.headers["x-svc-sig"]) req.rawBody = Buffer.from(buf);
+    },
+  })
+);
 
 app.use("/api", createSystemLogsRouter(bizLogger));
 
