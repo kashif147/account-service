@@ -35,8 +35,23 @@ import {
   settleReconciliationHandler,
 } from "../controllers/reconciliation.controller.js";
 import { profileMergeReassignHandler } from "../controllers/profileMerge.controller.js";
+import { listApplicationCreditHoldsHandler } from "../controllers/applicationCreditHold.controller.js";
+import { query } from "express-validator";
 
 const router = express.Router();
+
+// P5: application credit held pending finance review (existing-profile approval, no CLAIM).
+// Read only; CRM staff with an explicit finance data read claim.
+router.get(
+  "/application-credit-holds",
+  ...ensureAuthenticatedWithTenantContext,
+  requireFinanceRead,
+  query("status").optional().isIn(["pending_finance_review", "released_by_claim"]),
+  query("limit").optional().isInt({ min: 1, max: 200 }),
+  query("skip").optional().isInt({ min: 0 }),
+  validate,
+  listApplicationCreditHoldsHandler,
+);
 
 router.post(
   "/journal-adjustments",
