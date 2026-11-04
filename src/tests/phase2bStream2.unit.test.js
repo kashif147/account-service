@@ -6,11 +6,25 @@
 // injected fakes (deps) or a patched global fetch.
 //
 //   node --test --test-force-exit src/tests/phase2bStream2.unit.test.js
-import test from "node:test";
+import test, { after, afterEach } from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Test completeness (P5): with --test-force-exit the process exits as soon as the last test
+// ends. On macOS stdout to a pipe is asynchronous, so this very chatty file (pino-pretty logs)
+// could exit with the last tests' reporter results still queued: H27-B..F silently missing
+// from a full-suite run, exit code 0. Blocking stdout flushes every write before exit.
+process.stdout._handle?.setBlocking?.(true);
+// ...and an explicit completion check: every registered top-level test must have run.
+const EXPECTED_TESTS = 36;
+let executedTests = 0;
+afterEach(() => { executedTests += 1; });
+after(() => {
+  if (executedTests !== EXPECTED_TESTS) process.exitCode = 1; // flagged even if output were lost
+  assert.equal(executedTests, EXPECTED_TESTS, "every phase2bStream2.unit test executed");
+});
 
 process.env.LOG_ROOT =
   process.env.LOG_ROOT || fs.mkdtempSync(path.join(os.tmpdir(), "as-p2b-unit-"));
