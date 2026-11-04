@@ -17,6 +17,10 @@ import Refund from "../models/refund.model.js";
 import { globalDBLimiter } from "../config/globalLimiter.js";
 import { isNoFeeMembershipCategory } from "../helpers/noFeeMembershipCategory.js";
 import { resolveLedgerEventTenant } from "../helpers/eventTenant.js";
+import {
+  recordApplicationCreditHoldIfUnallocated,
+  releaseApplicationCreditHoldOnClaim,
+} from "../services/applicationCreditHold.service.js";
 
 /**
  * Maps membership category to income account code
@@ -558,6 +562,31 @@ export async function getMembershipPricing({
  * Creates invoice for the newly processed member
  */
 export async function handleApplicationApproved(payload) {
+  // Outside the try (like handleMemberCreated): a tenant mismatch must reach the consumer's
+  // retry -> DLQ path rather than record a hold under a possibly wrong tenant.
+  const tenantId = resolveLedgerEventTenant(payload, {
+    logger,
+    eventType: "applications.review.processed.v1",
+  });
+  {
+    const d = payload?.data || payload || {};
+    // P5 hold (owner policy): approval onto an EXISTING profile (LINK / MERGE / email match).
+    // When the profile already has a live subscription, subscription-service publishes no
+    // members.subscription.current.updated.v1 for this application, so no CLAIM is posted and
+    // the credit stays on the application. Record it as pending finance review: no journal,
+    // no invoice, no transfer, no refund. A later CLAIM (normal subscription flow) releases it.
+    // Errors propagate so the message is retried (the record is idempotent).
+    if (d.isExistingProfile === true && tenantId && d.applicationId) {
+      await recordApplicationCreditHoldIfUnallocated({
+        tenantId,
+        applicationId: d.applicationId,
+        memberId: d.memberId,
+        profileId: d.profileId,
+        sourceEventId: payload?.eventId,
+        correlationId: payload?.correlationId || d.correlationId,
+      });
+    }
+  }
   try {
     const {
       applicationId,
@@ -565,7 +594,6 @@ export async function handleApplicationApproved(payload) {
       memberId: payloadMemberId,
       effective,
       subscriptionAttributes,
-      tenantId,
     } = payload.data || payload; // Handle both wrapped and unwrapped payloads
 
     if (!applicationId || !profileId) {
@@ -1039,6 +1067,20 @@ export async function handleMemberCreated(payload) {
             );
           }
         }
+      }
+
+      // P5 hold: once CLAIM-<applicationId> exists, a pending finance-review hold for this
+      // application is released (the subscription flow allocated the credit).
+      try {
+        const claimed = await GLTransaction.findOne({ tenantId, docNo: claimDocNo })
+          .select({ _id: 1 })
+          .lean();
+        if (claimed) await releaseApplicationCreditHoldOnClaim({ tenantId, applicationId });
+      } catch (err) {
+        logger.warn(
+          { tenantId, applicationId, error: err.message },
+          "Failed to release application credit hold after CLAIM (hold stays pending)",
+        );
       }
 
       // Keep historical refunds aligned with member after application approval claim.

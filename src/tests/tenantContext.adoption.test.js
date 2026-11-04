@@ -236,9 +236,10 @@ test("15 journal pilot unchanged (19 guarded routes, 3 S2S excluded)", () => {
 });
 
 // ---- grouped remaining-router adoption ----
-test("16 finance: exactly 11 guarded external routes; guard precedes finance authz", () => {
+test("16 finance: exactly 12 guarded external routes; guard precedes finance authz", () => {
   const fr = read(path.join("routes", "finance.routes.js"));
-  assert.equal((fr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 11);
+  // 11 + GET /application-credit-holds (P5 application credit hold listing).
+  assert.equal((fr.match(/\.\.\.ensureAuthenticatedWithTenantContext,/g) || []).length, 12);
   // ordering: at least one route has the spread immediately followed by requireFinance*
   assert.match(
     fr,
