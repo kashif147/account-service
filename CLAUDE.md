@@ -24,6 +24,8 @@ npm run start:staging    # NODE_ENV=staging
 # Testing
 npm run unittest         # Run all Jest tests (requires --experimental-vm-modules)
 npm run unittest -- --testPathPattern=payments  # Run a single test file by pattern
+npm run test:node        # Run every node:test file, with the completeness check (see below)
+npm run test:node -- src/tests/payerBinding.p5.test.mjs   # selected node:test files
 npm run test:rabbitmq    # Manual RabbitMQ event testing via scripts/
 
 # Data / maintenance scripts (see scripts/)
@@ -43,7 +45,23 @@ Tests live in `src/tests/` and match `**/*.test.js`. Some files use Node's built
 `testPublishEventRemoved`, `ledgerTenancy`, and the P5 route matrix
 `portalObjectAuthz.p5.http.test.mjs` and the payer-binding matrix `payerBinding.p5.test.mjs`, the attempts listing `paymentAttempts.p5.test.mjs` —
 `.mjs` so jest's `*.test.js` match skips them) and must be run with
-`node --test --test-force-exit <file>` (jest cannot load them); the rest are jest.
+`npm run test:node [-- <file>...]` (jest cannot load them); the rest are jest.
+That runner (`scripts/test-node-complete.mjs`) does **not** use `--test-force-exit`: force-exit made
+each test child `process.exit()` as soon as its last test ended, and on macOS the results still
+queued in the stdout pipe behind a chatty file's logs were dropped, so tests vanished with exit 0.
+Instead the shared preload `scripts/test/node-test-setup.mjs` stops what `src/app.js` starts at
+import (the batch and direct-debit-prepare cron intervals) and closes a lazily opened
+rabbitmq-middleware connection, so children exit naturally. It also writes a per-test ledger from
+inside each child, which the runner compares with what the parent actually reported: any test that
+ran but was not reported, any cancelled test, any file without its done marker, or a wall-clock
+overrun fails the run (exit 2) even if `node --test` exited 0. A bare `node --test <file>` of an
+app-importing file (without the preload or force-exit) hangs after its tests on those cron
+intervals; use the npm script. With `RABBIT_URL` unset, the rabbitmq-middleware defaults to
+`amqp://localhost:5672`, so a file that publishes (e.g. `phase2bStream2.unit`) connects to whatever
+local broker is running. If a new
+test leaves another handle open, close it in that test's `after` (or add it to the preload) —
+don't bring back `--test-force-exit`. The per-file header comments still saying
+`node --test --test-force-exit` predate this runner.
 `ledgerTenancy.test.js` is the GL Tenant A/B suite: it starts a throwaway `mongod` from PATH
 (or uses `LEDGER_TEST_MONGO_URI`) and skips when neither is available. There is no lint script configured despite
 `eslint` being a devDependency — don't assume `npm run lint` exists.
