@@ -79,10 +79,12 @@ const profileSvc = http.createServer((req, res) => {
   const m = /^\/api\/applications\/([^/?]+)/.exec(req.url);
   if (m) {
     const id = decodeURIComponent(m[1]);
-    if (id === "APP-FAIL") { res.statusCode = 500; return res.end("{}"); }
+    if (id.startsWith("APP-FAIL")) { res.statusCode = 500; return res.end("{}"); }
+    const processed = id === "APP-APPROVED" || id === "APP-PROCNONUM";
     return res.end(JSON.stringify({ data: {
       applicationId: id,
-      applicationStatus: "submitted",
+      applicationStatus: processed ? "processed" : "submitted",
+      ...(id === "APP-APPROVED" ? { membershipNumber: "M-200" } : {}),
       personalDetails: {
         personalInfo: { forename: "Test", surname: `Applicant ${id}` },
         contactInfo: { mobileNumber: "+353000000000", personalEmail: "leak-check@example.invalid" },
@@ -156,6 +158,7 @@ const oid = () => new mongoose.Types.ObjectId();
 const T0 = Date.parse("2026-10-20T12:00:00.000Z");
 const at = (minutesAgo) => new Date(T0 - minutesAgo * 60000);
 const ids = {};
+const docs = {};
 const seedStripe = (key) => ({
   paymentIntentId: `pi_${key}`,
   clientSecret: `pi_${key}_secret_DO_NOT_LEAK`,
@@ -169,7 +172,7 @@ const seedStripe = (key) => ({
 function pay(key, over = {}) {
   const _id = oid();
   ids[key] = _id;
-  return {
+  return (docs[key] = {
     _id,
     tenantId: TA,
     purpose: "applicationFee",
@@ -190,9 +193,13 @@ function pay(key, over = {}) {
     updatedAt: at(0),
     ...over,
     stripe: { ...seedStripe(key), ...(over.stripe || {}) },
-  };
+  });
 }
-function receipt(paymentKey, { tenantId = TA, status = "PENDING", amount = 5000, prefix = "RCP-" } = {}) {
+// The 2020 credit line carries the payment's own application / member link (as postJournalForPayment
+// writes it), unless the test overrides it via `entry`.
+function receipt(paymentKey, { tenantId = TA, status = "PENDING", amount = 5000, prefix = "RCP-", entry } = {}) {
+  const d = docs[paymentKey] || {};
+  const link = entry || (d.applicationId ? { applicationId: d.applicationId } : d.memberId ? { memberId: d.memberId } : {});
   return {
     _id: oid(),
     tenantId,
@@ -203,7 +210,7 @@ function receipt(paymentKey, { tenantId = TA, status = "PENDING", amount = 5000,
     settlement: { provider: "Stripe", status },
     entries: [
       { accountCode: "1220", dc: "D", amount },
-      { accountCode: "2020", dc: "C", amount, applicationId: "APP-X" },
+      { accountCode: "2020", dc: "C", amount, ...link },
       { accountCode: "5100", dc: "D", amount: 100 },
       { accountCode: "1220", dc: "C", amount: 100 },
     ],
@@ -245,6 +252,11 @@ if (!skip) {
     pay("refundReq", { status: "refund_required", applicationId: "APP-RREQ", createdAt: at(140) }),
     // stored partially_refunded with NO Refund rows (Stripe-side refund): refunded total unknown
     pay("partialUnknown", { status: "partially_refunded", applicationId: "APP-PUNK", createdAt: at(150) }),
+    // canRefund parity with the stripe-payments grid (captured, receipt PENDING, no Payment.memberId):
+    pay("approved", { status: "succeeded", applicationId: "APP-APPROVED", createdAt: at(160) }), // approved app -> member M-200
+    pay("entryMember", { status: "succeeded", applicationId: "APP-ENTRYMEM", createdAt: at(170) }), // receipt entry memberId
+    pay("captFail", { status: "succeeded", applicationId: "APP-FAIL-CAP", createdAt: at(180) }), // enrichment fails
+    pay("procNoNum", { status: "succeeded", applicationId: "APP-PROCNONUM", createdAt: at(190) }), // processed, number unresolved
   ];
   // Fillers share ONE createdAt so the _id tie-break is exercised across page boundaries.
   for (let i = 0; i < FILLERS; i += 1) {
@@ -267,6 +279,10 @@ if (!skip) {
     receipt("refunded"),
     receipt("bCap", { tenantId: TB }),
     receipt("partialUnknown"),
+    receipt("approved"),
+    receipt("entryMember", { entry: { memberId: "M-300", applicationId: "APP-ENTRYMEM" } }),
+    receipt("captFail"),
+    receipt("procNoNum"),
     // tenant-B receipt carrying a tenant-A payment's docNo: must never attach to the A row
     { ...receipt("auth", { tenantId: TB }), memo: "foreign" },
   ]);
@@ -493,7 +509,7 @@ test("filters: status (lifecycle), purpose, registrationId, mode, dates", { skip
   assert.deepEqual(await st("partially_refunded"), [ids.partial, ids.partialUnknown].map(String).sort());
   assert.deepEqual(await st("refunded,partially_refunded"), [ids.refunded, ids.partialFull, ids.partial, ids.partialUnknown].map(String).sort());
   assert.deepEqual(await st("cancelled"), [ids.authOld, ids.cancel, ids.expired].map(String).sort());
-  assert.deepEqual(await st("captured"), [ids.captured, ids.member].map(String).sort());
+  assert.deepEqual(await st("captured"), [ids.captured, ids.member, ids.approved, ids.entryMember, ids.captFail, ids.procNoNum].map(String).sort());
   assert.deepEqual(await st("unknown"), [String(ids.manual)]);
   assert.deepEqual(await st("failed,authorised"), [ids.failed, ids.auth, ids.event].map(String).sort());
   const statusCount = (await call(`${URL}?status=refunded`, { auth: CRM_A })).data.total;
@@ -643,4 +659,72 @@ test("response items carry exactly the allow-listed keys; secrets / metadata / h
   }
   // enrichment forwarded the caller's identity (no anonymous upstream call) and stayed batched
   assert.ok(upstreamAuth.length > 0 && upstreamAuth.every((a) => a === "bearer"));
+});
+
+// ---- canRefund parity with the GET /journal/stripe-payments grid (fail closed) ----
+// CRM OnlinePayment.js (origin/develop be125d1) rule, verbatim in substance:
+//   isRefundableUnapprovedRow(row) = settlement status "pending" && String(row.memberId).trim() === ""
+const crmNormalizePaymentStatus = (row) => String(row?.paymentStatus || row?.settlement?.status || row?.status || "").trim().toLowerCase();
+const crmIsRefundableUnapprovedRow = (row) => crmNormalizePaymentStatus(row) === "pending" && String(row?.memberId || "").trim() === "";
+
+test("canRefund (a) approved application linked to a member -> false; membershipNumber is the resolved one", { skip }, async () => {
+  const r = await call(`${URL}?applicationId=APP-APPROVED`, { auth: CRM_A });
+  const a = byId(r.data.items, "approved");
+  assert.equal(a.lifecycleStatus, "captured");
+  assert.equal(a.receipt.settlementStatus, "PENDING");
+  assert.equal(a.memberId, null, "item.memberId stays the Payment field");
+  assert.equal(a.membershipNumber, "M-200", "display membershipNumber = enrichment-resolved member");
+  assert.equal(a.refundableAmount, 5000);
+  assert.equal(a.actions.canRefund, false);
+  // processed application whose membership number could not be resolved: still not provably unapproved
+  const pn = byId((await call(`${URL}?applicationId=APP-PROCNONUM`, { auth: CRM_A })).data.items, "procNoNum");
+  assert.equal(pn.actions.canRefund, false);
+});
+
+test("canRefund (b) receipt entry carries a memberId -> false", { skip }, async () => {
+  const e = byId((await call(`${URL}?applicationId=APP-ENTRYMEM`, { auth: CRM_A })).data.items, "entryMember");
+  assert.equal(e.memberId, null);
+  assert.equal(e.membershipNumber, "M-300");
+  assert.equal(e.actions.canRefund, false);
+});
+
+test("canRefund (c) enrichment failure for the row -> false (fail closed)", { skip }, async () => {
+  const f = byId((await call(`${URL}?applicationId=APP-FAIL-CAP`, { auth: CRM_A })).data.items, "captFail");
+  assert.equal(f.lifecycleStatus, "captured");
+  assert.equal(f.receipt.settlementStatus, "PENDING");
+  assert.equal(f.fullName, null);
+  assert.equal(f.actions.canRefund, false);
+});
+
+test("canRefund (d) genuine unapproved application with a captured PENDING receipt -> true", { skip }, async () => {
+  const c = byId((await call(`${URL}?applicationId=APP-CAP`, { auth: CRM_A })).data.items, "captured");
+  assert.equal(c.memberId, null);
+  assert.equal(c.membershipNumber, null);
+  assert.equal(c.actions.canRefund, true);
+});
+
+test("parity: old stripe-payments enrichment + CRM isRefundableUnapprovedRow vs new canRefund on the same receipts", { skip }, async () => {
+  const { enrichStripePaymentItems } = await import("../services/stripe.payment.enrichment.service.js");
+  const keys = ["captured", "approved", "entryMember", "member", "partial", "captFail", "procNoNum"];
+  const glDocs = await GLTransaction.find({ tenantId: TA, docNo: { $in: keys.map((k) => `RCP-${ids[k]}`) } }).lean();
+  assert.equal(glDocs.length, keys.length);
+  const fakeReq = { headers: { authorization: CRM_A }, tenantId: TA, ctx: { tenantId: TA } };
+  const oldRows = await enrichStripePaymentItems(glDocs, fakeReq);
+  const oldByKey = new Map(keys.map((k) => [k, oldRows.find((row) => row.docNo === `RCP-${ids[k]}`)]));
+  const items = (await call(`${URL}?limit=200`, { auth: CRM_A })).data.items;
+  const table = {};
+  for (const k of keys) {
+    const oldRule = crmIsRefundableUnapprovedRow(oldByKey.get(k));
+    const newRule = byId(items, k).actions.canRefund;
+    table[k] = { oldRule, newRule };
+    // never broader than the old grid
+    if (newRule) assert.equal(oldRule, true, `${k}: new canRefund must imply the old grid's Refund`);
+  }
+  // identical wherever the shared enrichment resolved the row fully
+  for (const k of ["captured", "approved", "entryMember", "member", "partial"]) {
+    assert.equal(table[k].newRule, table[k].oldRule, `${k}: ${JSON.stringify(table[k])}`);
+  }
+  // fail-closed divergences (old grid failed OPEN): enrichment failure, processed app without a resolved number
+  assert.deepEqual(table.captFail, { oldRule: true, newRule: false });
+  assert.deepEqual(table.procNoNum, { oldRule: true, newRule: false });
 });
