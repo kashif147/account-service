@@ -19,11 +19,21 @@
 //    any process.exit, so the ledger is the record of what actually ran, independent of what
 //    reached the parent reporter.
 //
+// 3. RabbitMQ isolation (always on; see scripts/test/rabbit-test-target.mjs):
+//    - refuses to load (the file fails before any test) if RABBIT_URL / RABBITMQ_URL is not a
+//      loopback amqp(s) URL; pins RABBIT_URL to a closed loopback port when neither is set;
+//    - blocks connectionManager.connect() on both the ESM and CJS middleware instances, so no
+//      code path (publish, publishConfirmed, consumers) can open a broker connection;
+//    - installs the suite's existing no-op stub as the default `publisher.publish`
+//      ({ success: true, eventId: "test" }). Files that assert on publishing already replace it
+//      with their own recorder at import, after this preload, so theirs wins.
+//
 // Inert in the `node --test` parent process (which inherits --import): NODE_TEST_CONTEXT is only
 // set in test children.
-import { registerHooks } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import { appendFileSync } from "node:fs";
 import path from "node:path";
+import { PINNED_TEST_RABBIT_URL, RABBIT_URL_VARS, rabbitEnvMessage, rabbitEnvProblems } from "./rabbit-test-target.mjs";
 
 if (process.env.NODE_TEST_CONTEXT) {
   const { after, beforeEach, afterEach } = await import("node:test");
@@ -64,6 +74,24 @@ if (process.env.NODE_TEST_CONTEXT) {
     RABBIT_ESM = import.meta.resolve("@projectShell/rabbitmq-middleware");
   } catch {
     /* not installed: nothing to close */
+  }
+
+  const rabbitProblems = rabbitEnvProblems(process.env);
+  if (rabbitProblems.length) throw new Error(rabbitEnvMessage(rabbitProblems));
+  if (!RABBIT_URL_VARS.some((n) => process.env[n])) process.env.RABBIT_URL = PINNED_TEST_RABBIT_URL;
+  const isolate = (m) => {
+    if (!m?.connectionManager || !m?.publisher) return;
+    m.connectionManager.maxReconnectAttempts = 0;
+    m.connectionManager.connect = async () => {
+      throw new Error("RabbitMQ is disabled in the account-service node:test suite (scripts/test/node-test-setup.mjs)");
+    };
+    m.publisher.publish = async () => ({ success: true, eventId: "test" });
+  };
+  if (RABBIT_ESM) isolate(await import(RABBIT_ESM));
+  try {
+    isolate(createRequire(import.meta.url)("@projectShell/rabbitmq-middleware"));
+  } catch {
+    /* CJS entry not installed */
   }
 
   after(async () => {
