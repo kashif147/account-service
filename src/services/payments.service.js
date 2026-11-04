@@ -3722,16 +3722,20 @@ const NOT_APPROVED_APPLICATION_STATUSES = new Set(["in-progress", "submitted", "
 
 /**
  * Application refund-state provider (flow A). Contract: signed p5-svc-sig/1 call to
- * profile-service (operation application_refund_state). NOT wired yet: with no provider the
- * state is "unavailable", so flow A FAILS CLOSED under enforce (503) and is only recorded under
- * report. Tests (and the future client) install a provider here.
+ * profile-service (operation application_refund_state), implemented by
+ * services/applicationRefundState.client.js and installed by app.js. With no provider the state
+ * is "unavailable", so flow A FAILS CLOSED under enforce (503) and is only recorded under report.
+ * The provider returns { applicationId, tenantId, status } on success, { unavailable: true,
+ * reason } for an outage (503), or { unverified: true, reason: "auth" | "business" } (409); the
+ * reason is carried on the refusal so authentication failures stay distinct from business-state
+ * conflicts and outages.
  */
 let applicationRefundStateProvider = null;
 export function setApplicationRefundStateProvider(fn) {
   applicationRefundStateProvider = typeof fn === "function" ? fn : null;
 }
 
-const policyRefusal = (status, code, message) => ({ refuse: true, status, code, message });
+const policyRefusal = (status, code, message, reason) => ({ refuse: true, status, code, message, ...(reason ? { reason } : {}) });
 
 /**
  * Application credit hold (account PR #41: ApplicationCreditHold, pending_finance_review). A
@@ -3833,10 +3837,14 @@ export async function classifyRefundFlow(parsed, payment, ctx, opts = {}) {
     state = null;
   }
   if (!state || state.unavailable) {
-    return { flow: "A", memberKey: null, refusal: policyRefusal(503, "REFUND_APPLICATION_STATE_UNAVAILABLE", "The application state cannot be checked right now") };
+    return { flow: "A", memberKey: null, refusal: policyRefusal(503, "REFUND_APPLICATION_STATE_UNAVAILABLE", "The application state cannot be checked right now", "unavailable") };
+  }
+  if (state.unverified) {
+    const reason = state.reason === "auth" ? "auth" : "business";
+    return { flow: "A", memberKey: null, refusal: policyRefusal(409, "REFUND_APPLICATION_STATE_UNVERIFIED", "The application state could not be verified", reason) };
   }
   if (String(state.applicationId || "") !== payApp || (state.tenantId && String(state.tenantId) !== String(tenantId))) {
-    return { flow: "A", memberKey: null, refusal: policyRefusal(409, "REFUND_APPLICATION_STATE_UNVERIFIED", "The application state could not be verified") };
+    return { flow: "A", memberKey: null, refusal: policyRefusal(409, "REFUND_APPLICATION_STATE_UNVERIFIED", "The application state could not be verified", "business") };
   }
   const status = String(state.status || "").toLowerCase();
   if (status === "processed") {
@@ -3845,7 +3853,7 @@ export async function classifyRefundFlow(parsed, payment, ctx, opts = {}) {
     return { flow: "INCONSISTENT", memberKey: null, refusal: policyRefusal(409, "REFUND_INCONSISTENT_APPROVED_NO_TRANSFER", "The application is approved but its credit was never transferred to the member") };
   }
   if (!NOT_APPROVED_APPLICATION_STATUSES.has(status)) {
-    return { flow: "A", memberKey: null, refusal: policyRefusal(409, "REFUND_APPLICATION_STATE_UNVERIFIED", "The application state could not be verified") };
+    return { flow: "A", memberKey: null, refusal: policyRefusal(409, "REFUND_APPLICATION_STATE_UNVERIFIED", "The application state could not be verified", "business") };
   }
   // Flow A: credit still on the application key; cap = min(payment remaining, that credit).
   return { flow: "A", memberKey: `app:${payApp}`, refusal: null };
@@ -4043,12 +4051,12 @@ export async function createRefund(input, ctx) {
   // receipt, conflicting links) and every balance cap below are always enforced.
   const policyMode = refundPolicyMode();
   const cls = await classifyRefundFlow(parsed, payment, ctx);
-  const policy = { mode: policyMode, flow: cls.flow, wouldRefuse: cls.refusal ? cls.refusal.code : null };
+  const policy = { mode: policyMode, flow: cls.flow, wouldRefuse: cls.refusal ? cls.refusal.code : null, ...(cls.refusal?.reason ? { wouldRefuseReason: cls.refusal.reason } : {}) };
   if (cls.refusal) {
     const logger = (await import("../config/logger.js")).default;
-    logger.warn({ tenantId: ctx.tenantId, paymentId: payment ? String(payment._id) : null, flow: cls.flow, code: cls.refusal.code, policyMode, unconditional: Boolean(cls.refusal.unconditional) }, "Refund policy decision");
+    logger.warn({ tenantId: ctx.tenantId, paymentId: payment ? String(payment._id) : null, flow: cls.flow, code: cls.refusal.code, reason: cls.refusal.reason || null, policyMode, unconditional: Boolean(cls.refusal.unconditional) }, "Refund policy decision");
     if (cls.refusal.unconditional || policyMode === "enforce") {
-      throw new AppError(cls.refusal.message, cls.refusal.status, cls.refusal.code, { flow: cls.flow });
+      throw new AppError(cls.refusal.message, cls.refusal.status, cls.refusal.code, { flow: cls.flow, ...(cls.refusal.reason ? { reason: cls.refusal.reason } : {}) });
     }
   }
 
