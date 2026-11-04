@@ -103,7 +103,7 @@ async function fullyRefundedPartialIds(tenantId) {
         from: Refund.collection.name,
         let: { pid: "$_id" },
         pipeline: [
-          { $match: { $expr: { $and: [{ $eq: ["$paymentId", "$$pid"] }, { $eq: ["$tenantId", tenantId] }] } } },
+          { $match: { reversedAt: { $exists: false }, $expr: { $and: [{ $eq: ["$paymentId", "$$pid"] }, { $eq: ["$tenantId", tenantId] }] } } },
           { $group: { _id: null, total: { $sum: "$amount" } } },
         ],
         as: "refunds",
@@ -156,7 +156,7 @@ async function loadRefundTotals(tenantId, ids) {
   const map = new Map();
   if (!ids.length) return map;
   const rows = await Refund.aggregate([
-    { $match: { tenantId, paymentId: { $in: ids } } },
+    { $match: { tenantId, paymentId: { $in: ids }, reversedAt: { $exists: false } } },
     { $group: { _id: "$paymentId", total: { $sum: "$amount" } } },
   ]);
   for (const r of rows) map.set(String(r._id), Number(r.total) || 0);
@@ -407,17 +407,24 @@ export async function listPaymentAttempts(req, q = {}) {
 async function alignCanRefundWithEnforcedOperation(page, items, tenantId) {
   const candidates = items.filter((it) => it.actions?.canRefund === true);
   if (!candidates.length) return;
-  const { refundCreditKey } = await import("./payments.service.js");
+  const { refundCreditKey, classifyRefundFlow, refundPolicyMode, lookupApplicationRefundStates } = await import("./payments.service.js");
   const { getAvailableCredit2020ForKey, getRefundableBalanceForMember } = await import("./refundCredit.service.js");
   const { default: MemberRefundReservation } = await import("../models/memberRefundReservation.model.js");
   const byId = new Map(page.map((p) => [String(p._id), p]));
+  const mode = refundPolicyMode();
+  // Same classifier as POST /payments/refunds; under enforce it needs the application state:
+  // one batched, bounded lookup per page; unavailable -> fail closed (canRefund false).
+  const states = mode === "enforce"
+    ? await lookupApplicationRefundStates(tenantId, candidates.map((it) => byId.get(it.id)?.applicationId || byId.get(it.id)?.applicationBinding))
+    : new Map();
   const year = new Date().getFullYear();
   for (const it of candidates) {
     const p = byId.get(it.id);
     const deny = () => { it.actions.canRefund = false; };
     if (!p || it.receipt?.docNo !== `RCP-${it.id}`) { deny(); continue; }
-    if (str(p.applicationBinding) && str(p.applicationId) && str(p.applicationBinding) !== str(p.applicationId)) { deny(); continue; }
     if (Array.isArray(p.refundReservations) && p.refundReservations.length) { deny(); continue; }
+    const cls = await classifyRefundFlow({}, p, { tenantId }, { applicationState: async (appId) => states.get(appId) ?? null });
+    if (cls.refusal && (cls.refusal.unconditional || mode === "enforce")) { deny(); continue; }
     const key = await refundCreditKey({}, p, tenantId);
     if (!key) { deny(); continue; }
     const available = String(key).startsWith("app:")

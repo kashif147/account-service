@@ -26,6 +26,7 @@ import {
   executeOperation,
   finalizeOperation,
   freePaymentAmount,
+  postReversalOfJournal,
   registerRefundOperationSource,
   startOperation,
 } from "./refundOperations.service.js";
@@ -107,7 +108,7 @@ const EVENT_PURPOSES = new Set(["eventRegistration", "courseRegistration"]);
 /** Sum of every refund already recorded against this payment (any reason). */
 async function sumAlreadyRefunded({ tenantId, paymentId, deps }) {
   const agg = await deps.Refund.aggregate([
-    { $match: { tenantId, paymentId } },
+    { $match: { tenantId, paymentId, reversedAt: { $exists: false } } },
     { $group: { _id: null, total: { $sum: "$amount" } } },
   ]);
   return Number(agg?.[0]?.total) || 0;
@@ -250,6 +251,18 @@ async function refundOneCandidate({ tenantId, eventId, candidate, deps }) {
 }
 
 registerRefundOperationSource("event_cancellation", {
+  async postReversalGl(op, refundDoc, refund, deps) {
+    const d = deps?.postBalancedJournal ? deps : defaultDeps;
+    const GL = (await import("../models/glTransaction.model.js")).default;
+    return postReversalOfJournal({
+      tenantId: op.tenantId,
+      originalDocNo: refundDoc.glDocNo,
+      reversalDocNo: `${refundDoc.glDocNo}-REV`,
+      memo: `Reversal of ${refundDoc.glDocNo}: provider refund ${refund.id} ${refund.status}`,
+      postBalancedJournal: d.postBalancedJournal,
+      GL,
+    });
+  },
   buildRefundDoc(op) {
     const t = op.refundTemplate || {};
     return {

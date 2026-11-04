@@ -35,6 +35,12 @@ const RefundSchema = new Schema(
     },
     // P5: the RefundOperation that produced this row (exactly one row per operation).
     refundOperationId: { type: Types.ObjectId, default: undefined },
+    // P5: a refund that later failed / was canceled at the provider is kept (history) and marked
+    // reversed; a reversing journal (reversalGlDocNo) offsets the original. Reversed rows are
+    // excluded from every refunded-amount sum.
+    providerStatus: { type: String, default: undefined },
+    reversedAt: { type: Date, default: undefined },
+    reversalGlDocNo: { type: String, default: undefined },
     glDocNo: { type: String, sparse: true, index: true },
     glStatus: {
       type: String,

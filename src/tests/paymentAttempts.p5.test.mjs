@@ -738,6 +738,71 @@ test("parity: old stripe-payments enrichment + CRM isRefundableUnapprovedRow vs 
   assert.deepEqual(table.procNoNum, { oldRule: true, newRule: false });
 });
 
+// ---- canRefund under REFUND_POLICY_MODE=enforce, same classifier as the refund endpoint ----
+test("enforce: canRefund matches the enforced refund operation (submitted / rejected / processed / unavailable / unverified)", { skip }, async () => {
+  const { default: stripeClient } = await import("../lib/stripe.js");
+  const { setApplicationRefundStateProvider } = await import("../services/payments.service.js");
+  const created = [];
+  stripeClient.refunds.create = async (params) => { created.push(params); return { id: `re_enf_${created.length}`, status: "succeeded", charge: "ch_enf" }; };
+  const STATES = {
+    "ENF-SUB": { status: "submitted" },
+    "ENF-REJ": { status: "rejected" },
+    "ENF-PROC": { status: "processed" },
+    "ENF-UNVER": { status: "submitted", applicationId: "ENF-SOMETHING-ELSE" },
+  };
+  const lookups = [];
+  setApplicationRefundStateProvider(async ({ tenantId, applicationId }) => {
+    lookups.push(applicationId);
+    if (applicationId === "ENF-UNAV") throw new Error("profile-service unavailable");
+    const st = STATES[applicationId];
+    if (!st) throw new Error("unavailable");
+    return { applicationId: st.applicationId || applicationId, tenantId, status: st.status };
+  });
+  process.env.REFUND_POLICY_MODE = "enforce";
+  const FIN = bearer({ userType: "CRM", id: "staff-fin-enf", roles: ["AM"], permissions: ["accounts.journals:read", "payments:write", "payments:read"] });
+  const expected = {
+    "ENF-SUB": { canRefund: true, status: 200 },
+    "ENF-REJ": { canRefund: true, status: 200 },
+    "ENF-PROC": { canRefund: false, status: 409, code: "REFUND_INCONSISTENT_APPROVED_NO_TRANSFER" },
+    "ENF-UNAV": { canRefund: false, status: 503, code: "REFUND_APPLICATION_STATE_UNAVAILABLE" },
+    "ENF-UNVER": { canRefund: false, status: 409, code: "REFUND_APPLICATION_STATE_UNVERIFIED" },
+  };
+  try {
+    for (const appId of Object.keys(expected)) {
+      const key = `enf_${appId}`;
+      const doc = pay(key, { status: "succeeded", applicationId: appId, createdAt: at(2) });
+      for (const k of Object.keys(doc)) if (doc[k] === undefined) delete doc[k];
+      await Payment.collection.insertOne(doc);
+      await GLTransaction.collection.insertOne(receipt(key));
+      await MaterializedBalance.collection.insertOne({ tenantId: TA, memberId: `app:${appId}`, accountCode: "2020", bucket: "current", year: new Date().getFullYear(), ledgerDomain: "membership", amount: -5000, updatedAt: new Date() });
+    }
+    for (const [appId, exp] of Object.entries(expected)) {
+      const row = byId((await call(`${URL}?applicationId=${appId}`, { auth: CRM_A })).data.items, `enf_${appId}`);
+      assert.equal(row.actions.canRefund, exp.canRefund, `${appId} canRefund`);
+      const res = await request(appServer)
+        .post("/api/payments/refunds")
+        .set("authorization", FIN)
+        .set("content-type", "application/json")
+        .send({ mode: "stripe", paymentIntentId: row.paymentIntentId, applicationId: appId, payoutMethod: "credit_card", amount: row.refundableAmount });
+      const body = JSON.parse(res.text);
+      assert.equal(res.status, exp.status, `${appId}: ${res.text}`);
+      if (exp.code) assert.equal(body.code, exp.code);
+      // the two directions: canRefund=true -> accepted; refused -> canRefund=false
+      if (row.actions.canRefund) assert.equal(res.status, 200);
+      if (res.status !== 200) assert.equal(row.actions.canRefund, false);
+    }
+    // every other row on the page: canRefund=true never appears where the enforced endpoint
+    // could not establish the application state (unknown fixtures -> provider unavailable)
+    const page = (await call(`${URL}?limit=200`, { auth: CRM_A })).data.items;
+    assert.ok(page.filter((x) => x.actions.canRefund && !String(x.applicationId).startsWith("ENF-")).length === 0, "rows whose state is unavailable are never offered under enforce");
+    assert.ok(lookups.length > 0 && lookups.length <= 400, "batched / bounded lookups");
+  } finally {
+    delete process.env.REFUND_POLICY_MODE;
+    setApplicationRefundStateProvider(null);
+  }
+  assert.equal(created.length, 2, "only the two accepted refunds reached Stripe");
+});
+
 // ---- canRefund parity with the ENFORCED refund operation (P5 #38) ----
 // For every grid row with canRefund=true, POST /payments/refunds (as a CRM finance user, in the
 // mode that will be deployed first: REFUND_POLICY_MODE unset = report) must accept the refund the
