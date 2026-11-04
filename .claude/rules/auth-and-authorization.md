@@ -44,7 +44,12 @@ a PORTAL token is denied whatever permissions it carries, and a bare `x-internal
 read-only) carries the identical `/journal/stripe-payments` chain plus `validate`, and is
 registered in `payment.routes.js` BEFORE `router.use(internalAuth)` so it has no S2S path. `requireFinanceRead` (DD runs, reconciliation, journal adjustments,
 `GET /payments/refunds`) is CRM + a literal `payments:read`/`accounts.admin:read` claim, with no
-empty-claims bypass and no `accounts.reports:read` alias. On `/payments/*`: capture/cancel,
+empty-claims bypass and no `accounts.reports:read` alias. PDP P3: on the DD-run routes bank data is
+separate (`helpers/bankDataAccess.js`): plaintext creditor/debtor IBAN+BIC in run/item responses (reads and
+writes), `download-pain008`, `generate-pain008` and `prepare` need a literal `payments.bank:read` or `*`
+claim on a CRM token (never `payments:*`/`admin`, never via the PDP); without it reads are masked
+(first4****last4, BIC and PAIN.008 blob URL removed) and those three routes 403
+`BANK_DATA_PERMISSION_REQUIRED`. On `/payments/*`: capture/cancel,
 `applications/:id/latest`, `batch` and the `/journal/events/manual-payment*` routes are
 internal or CRM; `attach-registration` / `by-stripe` also admit a PORTAL caller for a Payment it
 created (`payer.userId`, or `audit.createdBy` on a legacy row without `payer`);

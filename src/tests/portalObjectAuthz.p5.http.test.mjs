@@ -200,7 +200,17 @@ test("finance read gate: CRM with only accounts.reports:read denied; unknown use
 });
 
 test("finance read gate: CRM + payments:read passes authz", async () => {
-  for (const url of FINANCE_READ_ROUTES) passed(await call("GET", url, { auth: CRM_FIN_READ }), url);
+  for (const url of FINANCE_READ_ROUTES) {
+    // PDP P3 (Q2): the PAIN.008 file additionally needs payments.bank:read (see directDebitBankData.p3.test.mjs);
+    // finance read alone now gets 403 BANK_DATA_PERMISSION_REQUIRED there, i.e. it passed the finance gate.
+    if (url.endsWith("/download-pain008")) {
+      const r = await call("GET", url, { auth: CRM_FIN_READ });
+      assert.equal(r.status, 403, url);
+      assert.equal(r.code, "BANK_DATA_PERMISSION_REQUIRED", url);
+      continue;
+    }
+    passed(await call("GET", url, { auth: CRM_FIN_READ }), url);
+  }
 });
 
 // ---------------- reports ----------------

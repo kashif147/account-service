@@ -188,6 +188,9 @@ export async function fetchDirectDebitMandates(req, profileIds = []) {
     0,
     BULK_MAX_PROFILE_IDS,
   );
+  // PDP P3: profile-service refuses an empty profileIds list (it used to mean "every active mandate").
+  // No direct-debit subscriptions -> no mandates to fetch.
+  if (ids.length === 0) return [];
   const body = JSON.stringify({ profileIds: ids });
 
   const primaryUrl = profileApiUrl(
