@@ -1,6 +1,7 @@
 import express from "express";
 import { ensureAuthenticated, tenantContextWarn } from "../middlewares/auth.js";
 import {
+  requireCrmStaff,
   requireFinanceRead,
   requireFinanceWrite,
 } from "../middlewares/financePermission.middleware.js";
@@ -36,7 +37,11 @@ import {
 
 const router = express.Router();
 
+// PDP P3: CRM staff only on every DD-run route (reads already required it via requireFinanceRead; the write
+// routes now too). Bank data is a separate READ grant (payments.bank:read, helpers/bankDataAccess.js): it never
+// substitutes for requireFinanceWrite; generate-pain008 / prepare need finance write AND the bank grant.
 router.use(ensureAuthenticated, tenantContextWarn);
+router.use(requireCrmStaff);
 
 router.post(
   "/",

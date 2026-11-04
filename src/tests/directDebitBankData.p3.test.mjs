@@ -100,8 +100,9 @@ async function withStubs(fn) {
     rf: DirectDebitRun.findOne, rl: DirectDebitRun.find, rc: DirectDebitRun.countDocuments,
     il: DirectDebitRunItem.find, ic: DirectDebitRunItem.countDocuments,
   };
-  DirectDebitRun.findOne = () => q({ ...runDoc(), save: async () => {} });
-  DirectDebitRun.find = () => q([runDoc()]);
+  // tenant-scoped like the real queries: another tenant's caller finds nothing
+  DirectDebitRun.findOne = (f = {}) => q(f.tenantId === TENANT_A ? { ...runDoc(), save: async () => {} } : null);
+  DirectDebitRun.find = (f = {}) => q(f.tenantId === TENANT_A ? [runDoc()] : []);
   DirectDebitRun.countDocuments = () => Promise.resolve(1);
   DirectDebitRunItem.find = () => q([JSON.parse(JSON.stringify(ITEM))]);
   DirectDebitRunItem.countDocuments = () => Promise.resolve(1);
@@ -310,4 +311,93 @@ test("prepare upstream: no direct-debit profiles -> no mandates-for-prepare call
 
 test("the DD-run routes made no PDP call (local gates only)", () => {
   assert.equal(pdpCalls.length, 0);
+});
+
+// ---------------- exact permission matrix (route x caller) ----------------
+// Callers: finance read only; finance read + bank read; finance write only; finance write + bank read; ASU;
+// portal; unknown userType; cross-tenant (another tenant's ASU). Expected: "plain" (200, plaintext), "masked"
+// (200, masked), "ok" (passes every authz gate; the stubbed service may still answer 4xx business errors, never
+// 401/403), or a 403 code.
+const TENANT_B = "bbbbbbbbbbbbbbbbbbbbbbbb";
+const bearerFor = (tenantId, { userType = "CRM", roles = [], permissions = [], id = "x" }) =>
+  `Bearer ${jwt.sign({ id, sub: id, tenantId, userType, roles, permissions }, SECRET, { expiresIn: "1h" })}`;
+const M = {
+  readOnly: bearerFor(TENANT_A, { id: "m-r", roles: ["AA"], permissions: ["payments:read"] }),
+  readBank: bearerFor(TENANT_A, { id: "m-rb", roles: ["AA"], permissions: ["payments:read", "payments.bank:read"] }),
+  writeOnly: bearerFor(TENANT_A, { id: "m-w", roles: ["AM"], permissions: ["payments:write"] }),
+  writeBank: bearerFor(TENANT_A, { id: "m-wb", roles: ["AM"], permissions: ["payments:write", "payments.bank:read"] }),
+  asu: bearerFor(TENANT_A, { id: "m-asu", roles: ["ASU"], permissions: ["*"] }),
+  portal: bearerFor(TENANT_A, { id: "m-p", userType: "PORTAL", roles: ["AM"], permissions: ["payments:read", "payments:write", "payments.bank:read", "*"] }),
+  unknownType: bearerFor(TENANT_A, { id: "m-u", userType: "SERVICE", roles: ["AM"], permissions: ["payments:read", "payments:write", "payments.bank:read"] }),
+  crossTenant: bearerFor(TENANT_B, { id: "m-x", roles: ["ASU"], permissions: ["*"] }),
+};
+const R = `/api/direct-debit-runs/${RUN_ID}`;
+const ROUTES = {
+  "GET list": ["GET", "/api/direct-debit-runs", undefined, (j) => j.data.items[0].creditorSnapshot.iban],
+  "GET run": ["GET", R, undefined, (j) => j.data.run.creditorSnapshot.iban],
+  "GET items": ["GET", `${R}/items`, undefined, (j) => j.data.items[0].mandateSnapshot.debtorIban],
+  "GET prepare-status": ["GET", `${R}/prepare-status`],
+  "GET download-pain008": ["GET", `${R}/download-pain008`],
+  "POST create": ["POST", "/api/direct-debit-runs", { runType: "MONTHLY", periodStartDate: "2026-12-01", periodEndDate: "2026-12-31", collectionDate: "2026-12-15" }],
+  "POST prepare": ["POST", `${R}/prepare`],
+  "POST validate": ["POST", `${R}/validate`],
+  "POST approve": ["POST", `${R}/approve`],
+  "POST generate-pain008": ["POST", `${R}/generate-pain008`],
+  "POST mark-submitted": ["POST", `${R}/mark-submitted`],
+  "POST cancel": ["POST", `${R}/cancel`, { reason: "t" }, (j) => j.data.run.creditorSnapshot.iban],
+  "DELETE run": ["DELETE", R],
+  "POST import-pain002": ["POST", `${R}/import-pain002`, { xml: "<Document/>" }],
+};
+const F403 = "FORBIDDEN"; // requireFinanceRead / requireFinanceWrite
+const BANK = "BANK_DATA_PERMISSION_REQUIRED";
+const CRM = "CRM_ONLY";
+const WRITES = ["POST create", "POST validate", "POST approve", "POST mark-submitted", "POST cancel", "DELETE run", "POST import-pain002"];
+const row = (reads, plainWrites, bankWrites) => ({
+  "GET list": reads.list, "GET run": reads.list, "GET items": reads.list, "GET prepare-status": reads.status, "GET download-pain008": reads.download,
+  ...Object.fromEntries(WRITES.map((w) => [w, w === "POST cancel" && plainWrites === "ok" ? reads.cancelView : plainWrites])),
+  "POST prepare": bankWrites, "POST generate-pain008": bankWrites,
+});
+const MATRIX = {
+  readOnly: row({ list: "masked", status: "ok", download: BANK }, F403, F403),
+  readBank: row({ list: "plain", status: "ok", download: "ok" }, F403, F403),
+  writeOnly: row({ list: F403, status: F403, download: F403, cancelView: "masked" }, "ok", BANK),
+  writeBank: row({ list: F403, status: F403, download: F403, cancelView: "plain" }, "ok", "ok"),
+  asu: row({ list: "plain", status: "ok", download: "ok", cancelView: "plain" }, "ok", "ok"),
+  portal: Object.fromEntries(Object.keys(ROUTES).map((k) => [k, CRM])),
+  unknownType: Object.fromEntries(Object.keys(ROUTES).map((k) => [k, CRM])),
+  crossTenant: Object.fromEntries(Object.keys(ROUTES).map((k) => [k, k === "GET list" ? "empty" : k === "POST create" ? "ok" : "notfound"])),
+};
+
+test("EXACT permission matrix: DD-run route x caller", async () => {
+  await withStubs(async () => {
+    const createdSaved = DirectDebitRun.create;
+    const fouSaved = DirectDebitRun.findOneAndUpdate;
+    DirectDebitRun.create = async (doc) => ({ ...doc, _id: RUN_ID, save: async () => {} });
+    // prepare claim: nothing claimable (no job is queued in a unit test); the tenant-scoped findOne then decides
+    DirectDebitRun.findOneAndUpdate = () => q(null);
+    try {
+      const got = {};
+      for (const [caller, auth] of Object.entries(M)) {
+        got[caller] = {};
+        for (const [name, [method, url, body, pick]] of Object.entries(ROUTES)) {
+          const r = await call(method, url, { auth, body });
+          let v;
+          if (r.status === 403) v = r.code;
+          else if (r.status === 401) v = "401";
+          else if (r.status === 404 && caller === "crossTenant") v = "notfound";
+          else if (caller === "crossTenant" && name === "GET list") v = r.json?.data?.items?.length === 0 ? "empty" : "LEAK";
+          else if (pick && r.status === 200) {
+            const value = pick(r.json);
+            v = value === CREDITOR_IBAN || value === DEBTOR_IBAN ? "plain" : value === MASKED_CREDITOR || value === MASKED_DEBTOR ? "masked" : `?${value}`;
+            if (v === "masked") assertNoPlaintext(r, `${caller} ${name}`);
+          } else v = "ok";
+          got[caller][name] = v;
+        }
+      }
+      assert.deepStrictEqual(got, MATRIX);
+    } finally {
+      DirectDebitRun.create = createdSaved;
+      DirectDebitRun.findOneAndUpdate = fouSaved;
+    }
+  });
 });
