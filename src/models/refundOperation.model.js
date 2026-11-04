@@ -11,20 +11,27 @@ const { Schema, Types } = mongoose;
  * definitive provider failure is established. See services/refundOperations.service.js.
  */
 const HistorySchema = new Schema(
-  { state: String, at: { type: Date, default: Date.now }, note: String },
+  { state: String, at: { type: Date, default: Date.now }, note: String, actor: String },
   { _id: false },
 );
 
 const RefundOperationSchema = new Schema(
   {
     tenantId: { type: String, required: true },
-    source: { type: String, required: true, enum: ["crm_refund", "event_cancellation"] },
+    source: { type: String, required: true, enum: ["crm_refund", "event_cancellation", "stripe_observed"] },
     flow: { type: String, required: true }, // A | B | EXT | E | E_CRM | UNLINKED (server-derived)
     mode: { type: String, required: true, enum: ["stripe", "external"] },
     state: {
       type: String,
       required: true,
       enum: ["reserved", "submitting", "succeeded", "failed", "uncertain"],
+    },
+    // Fencing: every transition is a CAS on {state, version[, lease.owner]} and increments
+    // version; only the lease owner may submit to the provider.
+    version: { type: Number, required: true, default: 0 },
+    lease: {
+      type: new Schema({ owner: String, expiresAt: Date }, { _id: false }),
+      default: null,
     },
     paymentId: { type: Types.ObjectId, default: null },
     memberKey: { type: String, default: null }, // authoritative member / app:<id> ledger key

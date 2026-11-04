@@ -25,6 +25,8 @@ import {
   executeOperation,
   listUnresolvedOperations,
   reconcileRefundOperations,
+  recordObservedProviderRefunds,
+  releaseOperationManually,
   registerRefundOperationSource,
   replayOperation,
   startOperation,
@@ -3735,6 +3737,43 @@ export function setApplicationRefundStateProvider(fn) {
 const policyRefusal = (status, code, message, reason) => ({ refuse: true, status, code, message, ...(reason ? { reason } : {}) });
 
 /**
+ * Application credit hold (account PR #41: ApplicationCreditHold, pending_finance_review). A
+ * pending hold refuses every generic refund of that application's money, ALWAYS (not
+ * report-only). Interface: checker(tenantId, applicationId) -> Promise<boolean>. Default: the
+ * #41 helper hasPendingApplicationCreditHold when its module is present; if the module does not
+ * exist yet there is no hold to honour (#38 should merge after #41 for this to be effective).
+ * A checker error fails closed (503).
+ */
+let applicationCreditHoldChecker = null;
+let applicationCreditHoldModuleProbed = false;
+export function setApplicationCreditHoldChecker(fn) {
+  applicationCreditHoldChecker = typeof fn === "function" ? fn : null;
+  applicationCreditHoldModuleProbed = true;
+}
+async function hasPendingApplicationCreditHoldSafe(tenantId, applicationId) {
+  if (!applicationCreditHoldModuleProbed) {
+    applicationCreditHoldModuleProbed = true;
+    try {
+      const mod = await import("./applicationCreditHold.service.js");
+      if (typeof mod.hasPendingApplicationCreditHold === "function") applicationCreditHoldChecker = mod.hasPendingApplicationCreditHold;
+    } catch (err) {
+      const missing = err?.code === "ERR_MODULE_NOT_FOUND" && /applicationCreditHold\.service\.js/.test(String(err?.message || ""));
+      if (!missing) throw err;
+    }
+  }
+  if (!applicationCreditHoldChecker) return false;
+  try {
+    return Boolean(await applicationCreditHoldChecker(tenantId, applicationId));
+  } catch {
+    throw new AppError("The application credit hold state cannot be checked right now", 503, "REFUND_APPLICATION_HOLD_UNAVAILABLE");
+  }
+}
+const pendingHoldRefusal = () => ({
+  ...policyRefusal(409, "REFUND_PENDING_FINANCE_ALLOCATION", "This application's credit is held pending finance review; it cannot be refunded until finance allocates it"),
+  unconditional: true,
+});
+
+/**
  * Server-side flow from trusted records only (stored Payment links, CLAIM-<applicationId> GL,
  * application status from the provider). Never a membership number, email or a body memberId.
  * @returns {{ flow, memberKey, refusal: null | {status, code, message} }}
@@ -3744,6 +3783,9 @@ export async function classifyRefundFlow(parsed, payment, ctx) {
   if (!payment) {
     // Standalone external credit refund: the target's own authoritative 2020/1400 credit decides.
     const memberKey = strOrNull(parsed.memberId) || (strOrNull(parsed.applicationId) ? `app:${strOrNull(parsed.applicationId)}` : null);
+    if (strOrNull(parsed.applicationId) && (await hasPendingApplicationCreditHoldSafe(tenantId, strOrNull(parsed.applicationId)))) {
+      return { flow: "HELD", memberKey, refusal: pendingHoldRefusal() };
+    }
     return { flow: "EXT", memberKey, refusal: null };
   }
   if (payment.ledgerDomain === "events" || ["eventRegistration", "courseRegistration"].includes(payment.purpose)) {
@@ -3757,21 +3799,24 @@ export async function classifyRefundFlow(parsed, payment, ctx) {
   const linkedApp = strOrNull(payment.applicationId);
   const boundApp = strOrNull(payment.applicationBinding);
   if (linkedApp && boundApp && linkedApp !== boundApp) {
-    return { flow: "CONFLICT", memberKey: null, refusal: policyRefusal(409, "REFUND_LINK_CONFLICT", "The payment's application links disagree") };
+    return { flow: "CONFLICT", memberKey: null, refusal: { ...policyRefusal(409, "REFUND_LINK_CONFLICT", "The payment's application links disagree"), unconditional: true } };
   }
   const payApp = linkedApp || boundApp;
+  if (payApp && (await hasPendingApplicationCreditHoldSafe(tenantId, payApp))) {
+    return { flow: "HELD", memberKey: null, refusal: pendingHoldRefusal() };
+  }
   // The payment's ledger receipt must exist (RCP-<paymentId>: 2020 credit on the application key
   // when applicationId is set, else on the member). Money captured without it is inconsistent.
   const GLTransaction = (await import("../models/glTransaction.model.js")).default;
   const receipt = await GLTransaction.findOne({ tenantId, docType: "Receipt", docNo: `RCP-${payment._id}` }).select({ _id: 1 }).lean();
   if (!receipt) {
-    return { flow: "INCONSISTENT", memberKey: null, refusal: policyRefusal(409, "REFUND_INCONSISTENT_NO_LEDGER_RECEIPT", "The payment has no ledger receipt; it cannot be refunded until finance resolves it") };
+    return { flow: "INCONSISTENT", memberKey: null, refusal: { ...policyRefusal(409, "REFUND_INCONSISTENT_NO_LEDGER_RECEIPT", "The payment has no ledger receipt; it cannot be refunded until finance resolves it"), unconditional: true } };
   }
   // Authoritative member transfer = CLAIM-<applicationId> (2020 D application key / 2020 C member),
   // for applicationFee and subscriptionFee alike; Payment.memberId is never written by approval.
   const claimMember = payApp ? await getClaimRecipientMemberIdForApplication(payApp, tenantId) : null;
   if (payMember && claimMember && payMember !== claimMember) {
-    return { flow: "CONFLICT", memberKey: null, refusal: policyRefusal(409, "REFUND_LINK_CONFLICT", "The payment's member link and its application's credit transfer disagree") };
+    return { flow: "CONFLICT", memberKey: null, refusal: { ...policyRefusal(409, "REFUND_LINK_CONFLICT", "The payment's member link and its application's credit transfer disagree"), unconditional: true } };
   }
   if (payMember || claimMember) {
     // Flow B: authoritative member link or transfer (CLAIM journal) exists.
@@ -3807,6 +3852,16 @@ export async function classifyRefundFlow(parsed, payment, ctx) {
   }
   // Flow A: credit still on the application key; cap = min(payment remaining, that credit).
   return { flow: "A", memberKey: `app:${payApp}`, refusal: null };
+}
+
+/** The credit balance postJournalForRefund will debit for this refund (same precedence). */
+export async function refundCreditKey(parsed, payment, tenantId) {
+  const meta = payment?.metadata instanceof Map ? Object.fromEntries(payment.metadata) : payment?.metadata || {};
+  let memberId = strOrNull(parsed?.memberId) || strOrNull(payment?.memberId) || strOrNull(meta.memberId) || strOrNull(meta.member_id);
+  const applicationId = strOrNull(parsed?.applicationId) || strOrNull(payment?.applicationId) || strOrNull(meta.applicationId) || strOrNull(meta.application_id);
+  if (!memberId && applicationId) memberId = await getClaimRecipientMemberIdForApplication(applicationId, tenantId);
+  if (memberId) return memberId;
+  return applicationId ? `app:${applicationId}` : null;
 }
 
 function requestFingerprint(parsed) {
@@ -3931,35 +3986,32 @@ export async function createRefund(input, ctx) {
     tenantId: ctx.tenantId,
   });
 
-  // Flow A / B from trusted records (policy mode decides whether a refusal is enforced).
+  // Flow A / B from trusted records. REFUND_POLICY_MODE gates ONLY the flow decisions that need
+  // policy review; refusals determinable from account-service records alone (no ledger
+  // receipt, conflicting links) and every balance cap below are always enforced.
   const policyMode = refundPolicyMode();
-  const cls = policyMode === "off" ? { flow: payment ? "UNCLASSIFIED" : "EXT", memberKey: null, refusal: null } : await classifyRefundFlow(parsed, payment, ctx);
-  if (cls.flow === "EXT" && !cls.memberKey) cls.memberKey = strOrNull(parsed.memberId);
+  const cls = await classifyRefundFlow(parsed, payment, ctx);
   const policy = { mode: policyMode, flow: cls.flow, wouldRefuse: cls.refusal ? cls.refusal.code : null, ...(cls.refusal?.reason ? { wouldRefuseReason: cls.refusal.reason } : {}) };
   if (cls.refusal) {
     const logger = (await import("../config/logger.js")).default;
-    logger.warn({ tenantId: ctx.tenantId, paymentId: payment ? String(payment._id) : null, flow: cls.flow, code: cls.refusal.code, reason: cls.refusal.reason || null, policyMode }, "Refund policy decision");
-    if (policyMode === "enforce") throw new AppError(cls.refusal.message, cls.refusal.status, cls.refusal.code, { flow: cls.flow, ...(cls.refusal.reason ? { reason: cls.refusal.reason } : {}) });
+    logger.warn({ tenantId: ctx.tenantId, paymentId: payment ? String(payment._id) : null, flow: cls.flow, code: cls.refusal.code, reason: cls.refusal.reason || null, policyMode, unconditional: Boolean(cls.refusal.unconditional) }, "Refund policy decision");
+    if (cls.refusal.unconditional || policyMode === "enforce") {
+      throw new AppError(cls.refusal.message, cls.refusal.status, cls.refusal.code, { flow: cls.flow, ...(cls.refusal.reason ? { reason: cls.refusal.reason } : {}) });
+    }
   }
 
-  // Member credit reservation: always for standalone external credit refunds (the existing
-  // credit rule, made atomic); for flow B only under enforce (the new B credit cap).
+  // Credit-balance cap, ALWAYS enforced: reserve against exactly the balance the refund journal
+  // will debit (postJournalForRefund: the member - body/Payment/metadata member, else the
+  // application's CLAIM recipient - or else the application key). Flow B therefore gets
+  // min(payment remaining, member credit); flow A min(payment remaining, application-key credit).
+  const creditKey = await refundCreditKey(parsed, payment, ctx.tenantId);
   const scope = { tenantId: ctx.tenantId };
-  let memberAvailable = null;
-  if (cls.flow === "EXT" && cls.memberKey) {
-    memberAvailable = String(cls.memberKey).startsWith("app:")
-      ? () => getAvailableCredit2020ForKey(cls.memberKey, journalYear, "membership", scope)
-      : () => getRefundableBalanceForMember(cls.memberKey, journalYear, "membership", scope);
-  } else if (cls.flow === "B" && cls.memberKey && policyMode === "enforce") {
-    // Flow B cap = min(payment remaining [payment reservation], member refundable credit [here]).
-    memberAvailable = () => getRefundableBalanceForMember(cls.memberKey, journalYear, "membership", scope);
-  } else if (cls.flow === "A" && cls.memberKey && policyMode === "enforce") {
-    // Flow A cap = min(payment remaining, credit on the application key).
-    memberAvailable = () => getAvailableCredit2020ForKey(cls.memberKey, journalYear, "membership", scope);
-  } else if (cls.flow === "B" && cls.memberKey) {
-    const available = await getRefundableBalanceForMember(cls.memberKey, journalYear, "membership", scope);
-    if (refundAmount > available) policy.wouldRefuse = policy.wouldRefuse || "REFUND_MEMBER_CREDIT_UNAVAILABLE";
-  }
+  const memberAvailable = creditKey
+    ? String(creditKey).startsWith("app:")
+      ? () => getAvailableCredit2020ForKey(creditKey, journalYear, "membership", scope)
+      : () => getRefundableBalanceForMember(creditKey, journalYear, "membership", scope)
+    : null;
+  cls.memberKey = creditKey;
 
   const piFromRequest = strOrNull(parsed.paymentIntentId);
   const meta = parsed.metadata && Object.keys(parsed.metadata).length ? parsed.metadata : undefined;
@@ -3986,7 +4038,7 @@ export async function createRefund(input, ctx) {
     currency: payment?.currency ?? parsed.currency ?? "eur",
     clientKey,
     fingerprint,
-    memberKey: memberAvailable ? cls.memberKey : null,
+    memberKey: memberAvailable ? creditKey : null,
     memberAvailable,
     stripeParams: parsed.mode === "stripe" && piFromRequest
       ? { payment_intent: piFromRequest, ...(parsed.chargeId ? { charge: parsed.chargeId } : {}), ...(meta ? { metadata: meta } : {}) }
@@ -3996,7 +4048,7 @@ export async function createRefund(input, ctx) {
     createdBy: ctx.userId || ctx.memberId || null,
   });
   if (started.existing) return replayOperation(deps, started.existing, fingerprint);
-  return executeOperation(deps, started.op);
+  return executeOperation(deps, started.op, started.token);
 }
 
 /** CRM finance: unresolved refund operations of the caller's tenant (read-only). */
@@ -4006,15 +4058,58 @@ export async function listRefundOperations(ctx, { limit } = {}) {
 }
 
 /** CRM finance: reconcile unresolved operations. Dry-run unless apply === true. */
-export async function reconcileRefunds(ctx, { apply = false, operationIds, minAgeSeconds } = {}) {
+export async function reconcileRefunds(ctx, { apply = false, operationIds } = {}) {
   requireTenantId(ctx);
   return reconcileRefundOperations(defaultRefundOpsDeps(), {
     tenantId: ctx.tenantId,
     apply: apply === true,
     operationIds: Array.isArray(operationIds) ? operationIds : null,
-    ...(Number.isFinite(Number(minAgeSeconds)) ? { minAgeMs: Math.max(0, Number(minAgeSeconds)) * 1000 } : {}),
+    actor: ctx.userId || null,
   });
 }
+
+/** CRM finance: explicit, audited release of an operation whose execution cannot be established. */
+export async function releaseRefundOperation(ctx, operationId, evidence) {
+  requireTenantId(ctx);
+  const view = await releaseOperationManually(defaultRefundOpsDeps(), { tenantId: ctx.tenantId, operationId, actor: ctx.userId || null, evidence });
+  const logger = (await import("../config/logger.js")).default;
+  logger.warn({ tenantId: ctx.tenantId, operationId: String(operationId), actor: ctx.userId || null, eventType: "RefundOperationReleasedByFinance" }, "Refund operation released by finance");
+  return view;
+}
+
+/** Webhook: record Stripe refunds of this payment that the API did not create. */
+export async function recordObservedStripeRefunds(payment, refunds) {
+  return recordObservedProviderRefunds(defaultRefundOpsDeps(), payment, refunds);
+}
+
+registerRefundOperationSource("stripe_observed", {
+  updatesPaymentStatus: false,
+  buildRefundDoc(op) {
+    return {
+      tenantId: op.tenantId,
+      paymentId: op.paymentId,
+      refundOperationId: op._id,
+      mode: "stripe",
+      amount: op.amount,
+      currency: op.currency,
+      refundDate: new Date(),
+      memo: "Stripe refund made outside the API (recorded from the provider)",
+      metadata: new Map([["reason", "stripe_out_of_band"]]),
+      stripe: { refundId: op.stripeRefundId, ...(op.stripeChargeId ? { chargeId: op.stripeChargeId } : {}), ...(op.stripeParams?.payment_intent ? { paymentIntentId: op.stripeParams.payment_intent } : {}) },
+    };
+  },
+  async postGl(op, refundDoc) {
+    const payment = await Payment.findOne({ _id: op.paymentId, tenantId: op.tenantId }).lean();
+    if (payment && (payment.ledgerDomain === "events" || ["eventRegistration", "courseRegistration"].includes(payment.purpose))) {
+      const { postEventRefundJournalForObserved } = await import("./eventCancellationRefund.service.js");
+      return postEventRefundJournalForObserved(refundDoc, payment);
+    }
+    return applyRefundGlAndUpdateDoc(refundDoc, payment, { tenantId: op.tenantId });
+  },
+  result(op, refundDoc, gl) {
+    return { refundId: op.stripeRefundId, refundDocId: String(refundDoc._id), glPosted: Boolean(gl.glPosted), glDocNo: gl.glDocNo || null, operationId: String(op._id), observed: true };
+  },
+});
 
 /**
  * CoA for the credit leg of a refund (where payout is recognized).

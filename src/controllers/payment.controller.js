@@ -12,6 +12,7 @@ import {
   listRefunds,
   listRefundOperations,
   reconcileRefunds,
+  releaseRefundOperation,
   listByMemberIds,
   associateMemberLinks,
 } from "../services/payments.service.js";
@@ -253,7 +254,18 @@ export async function reconcileRefundOperationsHandler(req, res, next) {
   try {
     const b = req.body || {};
     const ids = Array.isArray(b.operationIds) ? b.operationIds.filter((x) => /^[a-f0-9]{24}$/i.test(String(x))) : undefined;
-    res.success(await reconcileRefunds(req.ctx, { apply: b.apply === true, operationIds: ids, minAgeSeconds: b.minAgeSeconds }));
+    res.success(await reconcileRefunds(req.ctx, { apply: b.apply === true, operationIds: ids }));
+  } catch (e) {
+    next(e);
+  }
+}
+
+/** POST /payments/refund-operations/:operationId/release - explicit, audited finance release. */
+export async function releaseRefundOperationHandler(req, res, next) {
+  try {
+    const id = String(req.params.operationId || "");
+    if (!/^[a-f0-9]{24}$/i.test(id)) throw AppError.badRequest("Invalid operationId");
+    res.success(await releaseRefundOperation(req.ctx, id, req.body?.evidence));
   } catch (e) {
     next(e);
   }

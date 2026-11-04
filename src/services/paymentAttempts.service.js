@@ -393,5 +393,38 @@ export async function listPaymentAttempts(req, q = {}) {
     }),
   );
 
+  await alignCanRefundWithEnforcedOperation(page, items, tenantId);
   return { items, limit, nextCursor, total };
+}
+
+/**
+ * P5: canRefund must never be wider than what POST /payments/refunds ENFORCES (the balance caps
+ * and checks that are always on, independent of REFUND_POLICY_MODE): the membership ledger
+ * receipt RCP-<paymentId> exists, the application links agree, no refund of the payment is in
+ * flight, and the credit balance the refund journal debits (refundCreditKey) still covers the
+ * refundable amount net of in-flight credit reservations. Narrowing only; never reserves.
+ */
+async function alignCanRefundWithEnforcedOperation(page, items, tenantId) {
+  const candidates = items.filter((it) => it.actions?.canRefund === true);
+  if (!candidates.length) return;
+  const { refundCreditKey } = await import("./payments.service.js");
+  const { getAvailableCredit2020ForKey, getRefundableBalanceForMember } = await import("./refundCredit.service.js");
+  const { default: MemberRefundReservation } = await import("../models/memberRefundReservation.model.js");
+  const byId = new Map(page.map((p) => [String(p._id), p]));
+  const year = new Date().getFullYear();
+  for (const it of candidates) {
+    const p = byId.get(it.id);
+    const deny = () => { it.actions.canRefund = false; };
+    if (!p || it.receipt?.docNo !== `RCP-${it.id}`) { deny(); continue; }
+    if (str(p.applicationBinding) && str(p.applicationId) && str(p.applicationBinding) !== str(p.applicationId)) { deny(); continue; }
+    if (Array.isArray(p.refundReservations) && p.refundReservations.length) { deny(); continue; }
+    const key = await refundCreditKey({}, p, tenantId);
+    if (!key) { deny(); continue; }
+    const available = String(key).startsWith("app:")
+      ? await getAvailableCredit2020ForKey(key, year, "membership", { tenantId })
+      : await getRefundableBalanceForMember(key, year, "membership", { tenantId });
+    const held = await MemberRefundReservation.findOne({ tenantId, memberKey: key }).lean();
+    const reserved = (held?.reservations || []).reduce((t, r) => t + (Number(r.amount) || 0), 0);
+    if (!(available - reserved >= Number(it.refundableAmount))) deny();
+  }
 }

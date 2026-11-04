@@ -76,7 +76,9 @@ const fakeStripe = {
   charges_: null,
 };
 fakeStripe.chargesApi = { retrieve: async (id) => { const c = fakeStripe.charges[id]; if (!c) throw new Error("no such charge"); return c; } };
-lifecycle.setLifecycleStripe({ paymentIntents: fakeStripe.paymentIntents, charges: fakeStripe.chargesApi });
+// refunds.list: the refund webhook now enumerates the charge's refunds to record out-of-band
+// ones (P5 #38); these charges carry none.
+lifecycle.setLifecycleStripe({ paymentIntents: fakeStripe.paymentIntents, charges: fakeStripe.chargesApi, refunds: { list: async () => ({ data: [] }) } });
 stripeClient.paymentIntents.retrieve = fakeStripe.paymentIntents.retrieve;
 stripeClient.charges.retrieve = fakeStripe.chargesApi.retrieve;
 

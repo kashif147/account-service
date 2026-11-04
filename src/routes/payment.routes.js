@@ -38,6 +38,7 @@ import {
   listPaymentAttemptsHandler,
   listRefundOperationsHandler,
   reconcileRefundOperationsHandler,
+  releaseRefundOperationHandler,
 } from "../controllers/payment.controller.js";
 import {
   zCreateIntent,
@@ -198,5 +199,6 @@ router.post(
 // reconciliation (read-only provider lookup; dry-run unless {apply:true}) is a finance write.
 router.get("/refund-operations", requireCrmUser, requireFinanceRead, listRefundOperationsHandler);
 router.post("/refund-operations/reconcile", requireCrmUser, requireFinanceWrite, reconcileRefundOperationsHandler);
+router.post("/refund-operations/:operationId/release", requireCrmUser, requireFinanceWrite, releaseRefundOperationHandler);
 
 export default router;
