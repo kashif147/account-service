@@ -94,6 +94,8 @@ import {
 } from "./services/directDebitPrepare.cron.service.js";
 import { startOutboxRelay, stopOutboxRelay } from "./services/outbox.service.js";
 import { registerPaymentLinkWebhookHooks } from "./services/paymentLink.service.js";
+import { setApplicationRefundStateProvider } from "./services/payments.service.js";
+import { applicationRefundStateProvider } from "./services/applicationRefundState.client.js";
 import {
   startAuthorisationExpiryCron,
   stopAuthorisationExpiryCron,
@@ -141,6 +143,9 @@ export async function initializeMessagingMiddleware() {
 startBatchProcessingCron();
 startDirectDebitPrepareCron();
 registerPaymentLinkWebhookHooks();
+// P5 refund flow A: application status from profile-service's signed lookup (no CRM token
+// forwarded). Unconfigured signing key -> "unavailable" -> 503 under REFUND_POLICY_MODE=enforce.
+setApplicationRefundStateProvider(applicationRefundStateProvider);
 if (process.env.NODE_ENV !== "test") {
   startOutboxRelay();
   startAuthorisationExpiryCron();

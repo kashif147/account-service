@@ -1,0 +1,103 @@
+{
+  "contract": "p5-svc-sig",
+  "version": 1,
+  "operation": "application_refund_state",
+  "audience": "profile-service",
+  "caller": "account-service",
+  "maxSkewSeconds": 60,
+  "note": "TEST-ONLY secrets. Shared vectors for profile-service (verifier) and account-service (signer) of GET /api/internal/applications/:applicationId/refund-state; byte-identical in both repos, SHA-256 pinned in each suite. Same p5-svc-sig/1 canonicalization as p5-service-signing.v1.json (first vector reproduces that file's first vector); audience profile-service, idem and body empty (GET, no Idempotency-Key, no body). The operation is bound by method + exact target path, which the verifier allow-lists.",
+  "headers": [
+    "x-svc-version",
+    "x-svc-caller",
+    "x-svc-kid",
+    "x-svc-ts",
+    "x-svc-nonce",
+    "x-svc-sig"
+  ],
+  "vectors": [
+    {
+      "name": "protocol compatibility (p5-service-signing.v1.json vector 'events registration capture', audience account-service)",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-events-0001",
+      "input": {
+        "aud": "account-service",
+        "caller": "events-service",
+        "kid": "ev-2026-11",
+        "method": "POST",
+        "target": "/api/payments/intents/pi_vec_reg_1/capture",
+        "tenant": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "idem": "registration:capture:bbbbbbbbbbbbbbbbbbbbbbbb:pi_vec_reg_1",
+        "ts": "1793000000",
+        "nonce": "Zm9vYmFyYmF6cXV4MTIzNDU2",
+        "body": "{\"binding\":{\"domain\":\"registration\",\"registrationId\":\"bbbbbbbbbbbbbbbbbbbbbbbb\",\"purpose\":\"eventRegistration\"},\"transition\":\"capture\",\"reason\":\"approve\",\"actorUserId\":\"cccccccccccccccccccccccc\"}"
+      },
+      "expect": {
+        "bodySha256": "e907c4625f3b8eb00dae34ec589b22aa31e4eaedaaa9f2a4a20266ea7797ce15",
+        "canonical": "p5-svc-sig/1\naud=15:account-service\ncaller=14:events-service\nkid=10:ev-2026-11\nmethod=4:POST\ntarget=42:/api/payments/intents/pi_vec_reg_1/capture\ntenant=24:aaaaaaaaaaaaaaaaaaaaaaaa\nidem=58:registration:capture:bbbbbbbbbbbbbbbbbbbbbbbb:pi_vec_reg_1\nbody=64:e907c4625f3b8eb00dae34ec589b22aa31e4eaedaaa9f2a4a20266ea7797ce15\nts=10:1793000000\nnonce=24:Zm9vYmFyYmF6cXV4MTIzNDU2",
+        "sig": "lMHPglNMPDGOmqy_rsXS_gwnXGK8yLy72C9P3MqAciw"
+      }
+    },
+    {
+      "name": "account refund-state lookup (ObjectId-shaped application id)",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-account-0001",
+      "input": {
+        "aud": "profile-service",
+        "caller": "account-service",
+        "idem": "",
+        "body": "",
+        "kid": "as-2026-11",
+        "method": "GET",
+        "target": "/api/internal/applications/dddddddddddddddddddddddd/refund-state",
+        "tenant": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "ts": "1793000100",
+        "nonce": "cmVmdW5kLXN0YXRlLTAwMDAx"
+      },
+      "expect": {
+        "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "canonical": "p5-svc-sig/1\naud=15:profile-service\ncaller=15:account-service\nkid=10:as-2026-11\nmethod=3:GET\ntarget=64:/api/internal/applications/dddddddddddddddddddddddd/refund-state\ntenant=24:aaaaaaaaaaaaaaaaaaaaaaaa\nidem=0:\nbody=64:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nts=10:1793000100\nnonce=24:cmVmdW5kLXN0YXRlLTAwMDAx",
+        "sig": "QSC_y039sK2myTsBbaEtklDRGSow0ah67vdDDnmp3nQ"
+      }
+    },
+    {
+      "name": "account refund-state lookup (uuid application id, lowercase method)",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-account-0001",
+      "input": {
+        "aud": "profile-service",
+        "caller": "account-service",
+        "idem": "",
+        "body": "",
+        "kid": "as-2026-11",
+        "method": "get",
+        "target": "/api/internal/applications/3f2b8c1e-9d4a-4b7e-8f00-1a2b3c4d5e6f/refund-state",
+        "tenant": "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "ts": "1793000101",
+        "nonce": "cmVmdW5kLXN0YXRlLTAwMDAy"
+      },
+      "expect": {
+        "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "canonical": "p5-svc-sig/1\naud=15:profile-service\ncaller=15:account-service\nkid=10:as-2026-11\nmethod=3:GET\ntarget=76:/api/internal/applications/3f2b8c1e-9d4a-4b7e-8f00-1a2b3c4d5e6f/refund-state\ntenant=24:bbbbbbbbbbbbbbbbbbbbbbbb\nidem=0:\nbody=64:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nts=10:1793000101\nnonce=24:cmVmdW5kLXN0YXRlLTAwMDAy",
+        "sig": "M7pbriymALVgCujuD7cvAEwaP7kzNWZW8hd_dpRDy2c"
+      }
+    },
+    {
+      "name": "same request, tenant changed (signature must differ)",
+      "secret": "TEST-ONLY-p5-svc-sig-vector-secret-account-0001",
+      "input": {
+        "aud": "profile-service",
+        "caller": "account-service",
+        "idem": "",
+        "body": "",
+        "kid": "as-2026-11",
+        "method": "GET",
+        "target": "/api/internal/applications/dddddddddddddddddddddddd/refund-state",
+        "tenant": "bbbbbbbbbbbbbbbbbbbbbbbb",
+        "ts": "1793000100",
+        "nonce": "cmVmdW5kLXN0YXRlLTAwMDAx"
+      },
+      "expect": {
+        "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "canonical": "p5-svc-sig/1\naud=15:profile-service\ncaller=15:account-service\nkid=10:as-2026-11\nmethod=3:GET\ntarget=64:/api/internal/applications/dddddddddddddddddddddddd/refund-state\ntenant=24:bbbbbbbbbbbbbbbbbbbbbbbb\nidem=0:\nbody=64:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nts=10:1793000100\nnonce=24:cmVmdW5kLXN0YXRlLTAwMDAx",
+        "sig": "uhhBdxxEFk3joFcyGwJNu3gi-CwKEP2hmgL_ugOiBBM"
+      }
+    }
+  ]
+}
