@@ -3595,6 +3595,59 @@ async function loadRefundPayment(parsed, ctx) {
   }).lean();
 }
 
+// P5 refund guard: profile-service application statuses (profile-service constants/enums.js
+// APPLICATION_STATUS). "processed" = approved; the others are not approved.
+const NOT_APPROVED_APPLICATION_STATUSES = new Set(["in-progress", "submitted", "rejected"]);
+
+function refundApplicationUnverified(reason) {
+  return new AppError(
+    "The application state for this payment cannot be verified; refund refused",
+    409,
+    "REFUND_APPLICATION_STATE_UNVERIFIED",
+    { reason },
+  );
+}
+
+async function defaultFetchApplicationStateForRefund(req, applicationId) {
+  const mod = await import("./profileUpstream.client.js");
+  return mod.fetchApplicationStateForRefund(req, applicationId);
+}
+
+/**
+ * A refund of a Payment linked to an application (stored Payment.applicationId /
+ * applicationBinding - never the request body or metadata) is allowed only while that
+ * application is provably NOT approved. The state comes from profile-service, tenant-scoped via
+ * the caller's forwarded identity, and is decided on applicationStatus only (never on email,
+ * display fields or a membership number). Any lookup failure / mismatch fails closed (409),
+ * before any Stripe call or write.
+ */
+export async function assertRefundApplicationNotApproved(payment, ctx, deps = {}) {
+  const linked = payment?.applicationId != null && String(payment.applicationId).trim() !== "" ? String(payment.applicationId).trim() : null;
+  const binding = payment?.applicationBinding != null && String(payment.applicationBinding).trim() !== "" ? String(payment.applicationBinding).trim() : null;
+  if (!linked && !binding) return;
+  if (linked && binding && linked !== binding) throw refundApplicationUnverified("application_link_mismatch");
+  const applicationId = linked || binding;
+  if (!deps.req) throw refundApplicationUnverified("no_forwardable_identity");
+  const fetchState = deps.fetchApplicationState || defaultFetchApplicationStateForRefund;
+  let app;
+  try {
+    app = await fetchState(deps.req, applicationId);
+  } catch {
+    throw refundApplicationUnverified("lookup_failed");
+  }
+  if (!app || String(app.applicationId || "") !== applicationId) throw refundApplicationUnverified("application_not_found");
+  if (app.tenantId && String(app.tenantId) !== String(ctx.tenantId)) throw refundApplicationUnverified("tenant_mismatch");
+  const status = String(app.applicationStatus || "").trim().toLowerCase();
+  if (status === "processed") {
+    throw new AppError(
+      "This payment's application has been approved; refund it from the member's account instead",
+      409,
+      "REFUND_APPLICATION_APPROVED",
+    );
+  }
+  if (!NOT_APPROVED_APPLICATION_STATUSES.has(status)) throw refundApplicationUnverified("unknown_application_status");
+}
+
 function assertPaymentAllowsRefund(payment) {
   if (!["succeeded", "partially_refunded"].includes(payment.status)) {
     throw AppError.badRequest("Payment status does not allow refund", {
@@ -3658,7 +3711,7 @@ function paymentLikeForRefund(parsed, payment) {
   };
 }
 
-export async function createRefund(input, ctx) {
+export async function createRefund(input, ctx, deps = {}) {
   requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   const parsed = zCreateRefund.parse(input);
   const stripe = getStripe();
@@ -3689,6 +3742,7 @@ export async function createRefund(input, ctx) {
       );
     }
     assertPaymentAllowsRefund(payment);
+    await assertRefundApplicationNotApproved(payment, ctx, deps);
   }
 
   const refundAmount =
