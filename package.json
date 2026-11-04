@@ -10,6 +10,7 @@
     "start:staging": "cross-env NODE_ENV=staging node bin/account-service.js",
     "start:prod": "cross-env NODE_ENV=production node bin/account-service.js",
     "unittest": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand",
+    "test:node": "node scripts/test-node-complete.mjs",
     "test:rabbitmq": "node scripts/test-rabbitmq-events.js",
     "rebuild:matbal": "node scripts/rebuild-materialized-balances.js"
   },
