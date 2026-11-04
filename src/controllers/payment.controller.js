@@ -166,7 +166,7 @@ export async function recordExternalPayment(req, res, next) {
 
 export async function createPaymentRefund(req, res, next) {
   try {
-    const resp = await createRefund(req.validated, req.ctx);
+    const resp = await createRefund(req.validated, req.ctx, { req });
     res.success(resp);
   } catch (e) {
     next(e);

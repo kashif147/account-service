@@ -217,3 +217,23 @@ export async function enrichBatchDetailWithProfiles(batch, req) {
     return batch;
   }
 }
+
+/**
+ * Authoritative application state for the refund guard: profile-service
+ * GET /api/applications/:applicationId, forwarding the caller's own gateway/JWT identity and
+ * tenant (profile-service scopes the lookup to that tenant). Returns only the fields the guard
+ * decides on; throws on any upstream failure so the caller can fail closed.
+ * @returns {Promise<{applicationId: string|null, applicationStatus: string|null, tenantId: string|null}|null>}
+ */
+export async function fetchApplicationStateForRefund(req, applicationId) {
+  const url = `${profileBase()}/api/applications/${encodeURIComponent(String(applicationId))}`;
+  const payload = await fetchJson(url, req, { method: "GET", timeoutMs: 15000 });
+  const d = payload?.data;
+  if (!d || typeof d !== "object") return null;
+  const tenantId = d.tenantId ?? d.personalDetails?.tenantId ?? null;
+  return {
+    applicationId: d.applicationId != null ? String(d.applicationId) : null,
+    applicationStatus: d.applicationStatus != null ? String(d.applicationStatus) : null,
+    tenantId: tenantId != null ? String(tenantId) : null,
+  };
+}
