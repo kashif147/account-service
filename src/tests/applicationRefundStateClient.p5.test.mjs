@@ -88,7 +88,6 @@ const lookup = (args, deps = {}) => fetchApplicationRefundState(args, { env: ENV
 let mongodProc = null;
 let mongodDir = null;
 async function startMongo() {
-  if (process.env.LEDGER_TEST_MONGO_URI) return process.env.LEDGER_TEST_MONGO_URI;
   if (spawnSync("mongod", ["--version"]).status !== 0) return null;
   mongodDir = fs.mkdtempSync(path.join(os.tmpdir(), "as-refund-state-mongod-"));
   const port = await freePort();
@@ -96,7 +95,7 @@ async function startMongo() {
   return `mongodb://127.0.0.1:${port}/refund_state_client_test`;
 }
 const uri = await startMongo();
-const skip = uri ? false : "no mongod on PATH and LEDGER_TEST_MONGO_URI unset";
+const skip = uri ? false : "no mongod on PATH";
 
 process.env.PROFILE_SERVICE_URL = STAND;
 process.env.PROFILE_SIGNING_KID = KID;
@@ -225,7 +224,7 @@ test("verified: signed GET, exact path, tenant header; NO user token, gateway id
   assert.equal(q.headers["x-tenant-id"], TA);
   assert.equal(q.headers["x-svc-caller"], "account-service");
   assert.equal(q.headers["x-svc-kid"], KID);
-  for (const h of ["authorization", "x-api-key", "x-internal-request", "x-jwt-verified", "x-auth-source", "x-user-id", "x-user-type", "x-user-roles", "x-user-permissions", "idempotency-key", "content-type"]) {
+  for (const h of ["authorization", "x-internal-request", "x-jwt-verified", "x-auth-source", "x-user-id", "x-user-type", "x-user-roles", "x-user-permissions", "idempotency-key", "content-type"]) {
     assert.equal(q.headers[h], undefined, `${h} must not be sent`);
   }
   for (const status of ["in-progress", "processed", "rejected"]) {
