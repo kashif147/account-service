@@ -25,6 +25,7 @@ import {
   executeOperation,
   listUnresolvedOperations,
   reconcileRefundOperations,
+  postReversalOfJournal,
   recordObservedProviderRefunds,
   releaseOperationManually,
   registerRefundOperationSource,
@@ -3570,7 +3571,7 @@ export async function recordExternal(input, ctx) {
 
 async function sumRefundedForPayment(tenantId, paymentId) {
   const agg = await Refund.aggregate([
-    { $match: { tenantId, paymentId } },
+    { $match: { tenantId, paymentId, reversedAt: { $exists: false } } },
     { $group: { _id: null, total: { $sum: "$amount" } } },
   ]);
   return agg[0]?.total ?? 0;
@@ -3774,7 +3775,7 @@ const pendingHoldRefusal = () => ({
  * application status from the provider). Never a membership number, email or a body memberId.
  * @returns {{ flow, memberKey, refusal: null | {status, code, message} }}
  */
-export async function classifyRefundFlow(parsed, payment, ctx) {
+export async function classifyRefundFlow(parsed, payment, ctx, opts = {}) {
   const tenantId = ctx.tenantId;
   if (!payment) {
     // Standalone external credit refund: the target's own authoritative 2020/1400 credit decides.
@@ -3785,10 +3786,12 @@ export async function classifyRefundFlow(parsed, payment, ctx) {
     return { flow: "EXT", memberKey, refusal: null };
   }
   if (payment.ledgerDomain === "events" || ["eventRegistration", "courseRegistration"].includes(payment.purpose)) {
+    // ALWAYS refused (every mode): this endpoint posts membership refund journals; event / course
+    // money is refunded only through the event accounting path (event cancellation).
     return {
       flow: "E_CRM",
       memberKey: null,
-      refusal: policyRefusal(409, "REFUND_FLOW_UNSUPPORTED", "Event / course payments are refunded through the event cancellation flow"),
+      refusal: { ...policyRefusal(409, "REFUND_FLOW_UNSUPPORTED", "Event / course payments are refunded through the event cancellation flow"), unconditional: true },
     };
   }
   const payMember = strOrNull(payment.memberId);
@@ -3823,7 +3826,9 @@ export async function classifyRefundFlow(parsed, payment, ctx) {
   }
   let state = null;
   try {
-    state = applicationRefundStateProvider ? await applicationRefundStateProvider({ tenantId, applicationId: payApp }) : null;
+    state = opts.applicationState
+      ? await opts.applicationState(payApp)
+      : applicationRefundStateProvider ? await applicationRefundStateProvider({ tenantId, applicationId: payApp }) : null;
   } catch {
     state = null;
   }
@@ -3846,6 +3851,49 @@ export async function classifyRefundFlow(parsed, payment, ctx) {
   return { flow: "A", memberKey: `app:${payApp}`, refusal: null };
 }
 
+/**
+ * Batched, bounded application-state lookups for the attempts grid (same provider and contract
+ * as the refund endpoint). Returns appId -> state | null (null = unavailable: fail closed).
+ */
+export async function lookupApplicationRefundStates(tenantId, applicationIds, { concurrency = 5 } = {}) {
+  const ids = [...new Set((applicationIds || []).filter(Boolean))].slice(0, 200);
+  const out = new Map();
+  if (!applicationRefundStateProvider) {
+    for (const id of ids) out.set(id, null);
+    return out;
+  }
+  let i = 0;
+  const worker = async () => {
+    while (i < ids.length) {
+      const id = ids[i++];
+      try {
+        out.set(id, (await applicationRefundStateProvider({ tenantId, applicationId: id })) || null);
+      } catch {
+        out.set(id, null);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker));
+  return out;
+}
+
+/**
+ * Refundable credit is evaluated per journal year (MaterializedBalance of the refund's year -
+ * the rule assertRefundWithinCredit / getRefundableBalanceForMember / ledger-actions use), while
+ * the year-end and creditors reports treat member credit as cumulative "as of" a date. Which rule
+ * governs refunds is an UNRESOLVED POLICY QUESTION, so credit that exists only in prior years is
+ * neither silently excluded nor exposed: the refund is refused with an explicit code.
+ */
+export async function cumulativeCredit2020(creditKey, tenantId) {
+  const MaterializedBalance = (await import("../models/materializedBalance.model.js")).default;
+  const agg = await MaterializedBalance.aggregate([
+    { $match: { tenantId, memberId: creditKey, accountCode: "2020", ledgerDomain: "membership" } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  const total = Number(agg?.[0]?.total) || 0;
+  return total < 0 ? -total : 0;
+}
+
 /** The credit balance postJournalForRefund will debit for this refund (same precedence). */
 export async function refundCreditKey(parsed, payment, tenantId) {
   const meta = payment?.metadata instanceof Map ? Object.fromEntries(payment.metadata) : payment?.metadata || {};
@@ -3863,6 +3911,18 @@ function requestFingerprint(parsed) {
 // Finishes CRM refunds (also later, from retry / reconciliation): the Refund row fields were
 // captured on the operation; GL uses the same postJournalForRefund as before.
 registerRefundOperationSource("crm_refund", {
+  async postReversalGl(op, refundDoc, refund) {
+    const { postBalancedJournal } = await import("../controllers/journal.controller.js");
+    const GL = (await import("../models/glTransaction.model.js")).default;
+    return postReversalOfJournal({
+      tenantId: op.tenantId,
+      originalDocNo: refundDoc.glDocNo,
+      reversalDocNo: `${refundDoc.glDocNo}-REV`,
+      memo: `Reversal of ${refundDoc.glDocNo}: provider refund ${refund.id} ${refund.status}`,
+      postBalancedJournal,
+      GL,
+    });
+  },
   buildRefundDoc(op) {
     const t = op.refundTemplate || {};
     return {
@@ -4004,6 +4064,20 @@ export async function createRefund(input, ctx) {
       : () => getRefundableBalanceForMember(creditKey, journalYear, "membership", scope)
     : null;
   cls.memberKey = creditKey;
+  if (memberAvailable) {
+    const currentYear = Math.max(0, Number(await memberAvailable()) || 0);
+    if (refundAmount > currentYear) {
+      const allYears = await cumulativeCredit2020(creditKey, ctx.tenantId);
+      if (refundAmount <= allYears) {
+        throw new AppError(
+          "The credit for this refund sits in a prior year; whether prior-year credit is refundable is not yet decided",
+          409,
+          "REFUND_CREDIT_PERIOD_UNRESOLVED",
+          { currentYearCreditCents: currentYear, allYearsCreditCents: allYears, journalYear },
+        );
+      }
+    }
+  }
 
   const piFromRequest = strOrNull(parsed.paymentIntentId);
   const meta = parsed.metadata && Object.keys(parsed.metadata).length ? parsed.metadata : undefined;
@@ -4076,6 +4150,18 @@ export async function recordObservedStripeRefunds(payment, refunds) {
 
 registerRefundOperationSource("stripe_observed", {
   updatesPaymentStatus: false,
+  async postReversalGl(op, refundDoc, refund) {
+    const { postBalancedJournal } = await import("../controllers/journal.controller.js");
+    const GL = (await import("../models/glTransaction.model.js")).default;
+    return postReversalOfJournal({
+      tenantId: op.tenantId,
+      originalDocNo: refundDoc.glDocNo,
+      reversalDocNo: `${refundDoc.glDocNo}-REV`,
+      memo: `Reversal of ${refundDoc.glDocNo}: provider refund ${refund.id} ${refund.status}`,
+      postBalancedJournal,
+      GL,
+    });
+  },
   buildRefundDoc(op) {
     return {
       tenantId: op.tenantId,

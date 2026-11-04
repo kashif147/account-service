@@ -53,14 +53,14 @@ publisher.publish = async () => ({ success: true, eventId: "test" });
 
 // ---- stateful Stripe stub ----
 const { default: stripeClient } = await import("../lib/stripe.js");
-const stripe = { createCalls: 0, listCalls: 0, refunds: [], byKey: new Map(), delayMs: 0, mode: "ok" };
+const stripe = { createCalls: 0, listCalls: 0, refunds: [], byKey: new Map(), delayMs: 0, mode: "ok", status: "succeeded" };
 stripeClient.refunds.create = async (params, opts = {}) => {
   stripe.createCalls += 1;
   const key = opts.idempotencyKey;
   if (key && stripe.byKey.has(key)) return stripe.byKey.get(key);
   if (stripe.delayMs) await new Promise((r) => setTimeout(r, stripe.delayMs));
   if (stripe.mode === "timeout_not_executed") throw Object.assign(new Error("Request timed out (test)"), { type: "StripeConnectionError" });
-  const refund = { id: `re_ops_${stripe.refunds.length + 1}_${crypto.randomBytes(3).toString("hex")}`, charge: "ch_ops", amount: params.amount, payment_intent: params.payment_intent, metadata: { ...(params.metadata || {}) } };
+  const refund = { id: `re_ops_${stripe.refunds.length + 1}_${crypto.randomBytes(3).toString("hex")}`, object: "refund", status: stripe.status, charge: "ch_ops", amount: params.amount, payment_intent: params.payment_intent, metadata: { ...(params.metadata || {}) } };
   stripe.refunds.push(refund);
   if (key) stripe.byKey.set(key, refund);
   if (stripe.mode === "timeout_executed") throw Object.assign(new Error("Request timed out after the refund executed (test)"), { type: "StripeConnectionError" });
@@ -71,6 +71,18 @@ stripeClient.refunds.list = async ({ payment_intent }) => {
   return { data: stripe.refunds.filter((r) => r.payment_intent === payment_intent) };
 };
 stripeClient.charges.retrieve = async () => ({});
+stripeClient.refunds.retrieve = async (id) => {
+  const r = stripe.refunds.find((x) => x.id === id);
+  if (!r) throw Object.assign(new Error("No such refund"), { type: "StripeInvalidRequestError", statusCode: 404 });
+  return { ...r };
+};
+/** Provider-side status change of a stored refund + the webhook Stripe would send for it. */
+async function providerSets(refundId, status, { eventType = "refund.updated", deliver = true } = {}) {
+  const r = stripe.refunds.find((x) => x.id === refundId);
+  r.status = status;
+  if (deliver) await handleRefundEvent({ id: `evt_${refundId}_${status}_${crypto.randomBytes(2).toString("hex")}`, type: eventType, data: { object: { ...r } } });
+  return r;
+}
 
 const { default: Payment } = await import("../models/payment.model.js");
 const { default: Refund } = await import("../models/refund.model.js");
@@ -96,6 +108,7 @@ after(async () => {
 
 beforeEach(() => {
   stripe.mode = "ok";
+  stripe.status = "succeeded";
   stripe.delayMs = 0;
   refundOpsHooks.afterReserve = null;
   refundOpsHooks.afterStripe = null;
@@ -173,6 +186,11 @@ const opsOf = (p) => RefundOperation.find({ tenantId: TA, paymentId: p._id }).le
 if (!skip) {
   await mongoose.connect(uri);
   await Promise.all([Payment.init(), Refund.init(), RefundOperation.init(), MemberRefundReservation.init()]);
+  // Chart of accounts so refund journals actually post (and their reversals can be proven).
+  const { default: CoA } = await import("../models/coa.model.js");
+  for (const [code, type] of [["1200", "Asset"], ["1210", "Asset"], ["1220", "Asset"], ["1400", "Asset"], ["2020", "Liability"], ["4500", "Income"], ["4510", "Income"], ["4520", "Income"], ["5100", "Expense"]]) {
+    await CoA.create({ tenantId: TA, code, description: `acct ${code}`, type });
+  }
 }
 
 // ======================================================= one balance mechanism for every path
@@ -183,6 +201,8 @@ test("coverage: CRM refund racing an event-cancellation refund on one payment ne
     const cancel = { eventId: `msg-${round}`, tenantId: TA, data: { tenantId: TA, eventId: `event-${round}`, refundCandidates: [{ registrationId: `reg-race-${round}`, paymentId: String(p._id), amount: 5000 }] } };
     const [crm, ev] = await Promise.all([refund(body(p.pi, { amount: 3000 })), processEventCancellationRefunds(cancel)]);
     stripe.delayMs = 0;
+    assert.equal(crm.code, "REFUND_FLOW_UNSUPPORTED", "CRM refunds of event payments are refused in every mode");
+    assert.ok(ev.results[0].refundId, "the event accounting path refunds it");
     const rows = await refundRows(p);
     const total = rows.reduce((t, r) => t + r.amount, 0);
     assert.ok(total <= 5000, `round ${round}: refunded ${total} > 5000`);
@@ -577,4 +597,186 @@ test("report mode (default): flow decisions are recorded, the gated ones are not
   assert.equal(op.policy.mode, "report");
   assert.equal(op.policy.flow, "A");
   assert.equal(op.policy.wouldRefuse, "REFUND_APPLICATION_STATE_UNAVAILABLE");
+});
+
+// ======================================================= event / course through the CRM endpoint
+for (const mode of ["report", "enforce"]) {
+  test(`event + course payments via POST /payments/refunds (${mode}): 409 REFUND_FLOW_UNSUPPORTED, no membership journal, no member reservation`, { skip }, async () => {
+    if (mode === "enforce") process.env.REFUND_POLICY_MODE = "enforce";
+    for (const purpose of ["eventRegistration", "courseRegistration"]) {
+      const p = await seed({ purpose, ledgerDomain: "events", registrationId: `reg-${purpose}-${mode}`, memberId: `M-${purpose}-${mode}`, credit: 5000 });
+      const glBefore = await GLTransaction.countDocuments({ tenantId: TA, docType: "Refund" });
+      const before = stripe.createCalls;
+      const r = await refund(body(p.pi, { amount: 1000 }));
+      assert.equal(r.status, 409, r.text);
+      assert.equal(r.code, "REFUND_FLOW_UNSUPPORTED");
+      assert.equal(stripe.createCalls, before);
+      assert.equal(await GLTransaction.countDocuments({ tenantId: TA, docType: "Refund" }), glBefore, "no refund journal of any kind");
+      assert.equal(await MemberRefundReservation.countDocuments({ tenantId: TA, memberKey: `M-${purpose}-${mode}` }), 0);
+      assert.equal((await opsOf(p)).length, 0);
+    }
+  });
+}
+
+// ======================================================= Stripe refund outcomes
+test("outcome: pending -> succeeded via webhook: held and uncommitted while pending, finalized once on success", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-PEND-OK" });
+  stripe.status = "pending";
+  const r = await refund(body(p.pi, { amount: 2000 }));
+  stripe.status = "succeeded";
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.data.status, "pending");
+  const [op] = await opsOf(p);
+  assert.equal(op.state, "provider_pending");
+  assert.equal(reservedOf(await paymentRow(p)), 2000, "reservation held");
+  assert.equal((await refundRows(p)).length, 0, "no Refund row while pending");
+  assert.equal(await GLTransaction.countDocuments({ tenantId: TA, docType: "Refund", docNo: { $regex: "^RFD-" } , "entries.applicationId": "APP-PEND-OK" }), 0, "no GL while pending");
+  await providerSets(op.stripeRefundId, "succeeded");
+  await providerSets(op.stripeRefundId, "succeeded"); // duplicate webhook
+  const after = await RefundOperation.findById(op._id).lean();
+  assert.equal(after.state, "succeeded");
+  assert.equal((await refundRows(p)).length, 1);
+  const row = await paymentRow(p);
+  assert.equal(row.refundCommittedCents, 2000);
+  assert.equal(reservedOf(row), 0);
+});
+
+test("outcome: pending -> failed via webhook: released once, nothing committed or journaled", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-PEND-FAIL" });
+  stripe.status = "pending";
+  await refund(body(p.pi, { amount: 2000 }));
+  stripe.status = "succeeded";
+  const [op] = await opsOf(p);
+  await providerSets(op.stripeRefundId, "failed", { eventType: "refund.failed" });
+  await providerSets(op.stripeRefundId, "failed", { eventType: "refund.updated" }); // duplicate
+  const after = await RefundOperation.findById(op._id).lean();
+  assert.equal(after.state, "failed");
+  assert.equal(after.error.appCode, "REFUND_PROVIDER_FAILED");
+  const row = await paymentRow(p);
+  assert.equal(reservedOf(row), 0);
+  assert.equal(row.refundCommittedCents || 0, 0);
+  assert.equal((await refundRows(p)).length, 0);
+  assert.equal((await refund(body(p.pi, { amount: 5000 }))).status, 200, "the full amount is refundable again");
+});
+
+test("outcome: succeeded then FAILED later: reversing journal (original kept), Refund row marked reversed, counter restored once", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-LATEFAIL" });
+  const r = await refund(body(p.pi, { amount: 2000 }));
+  assert.equal(r.status, 200, r.text);
+  const [op] = await opsOf(p);
+  const [row0] = await refundRows(p);
+  const originalGl = row0.glDocNo ? await GLTransaction.findOne({ tenantId: TA, docNo: row0.glDocNo }).lean() : null;
+  await providerSets(op.stripeRefundId, "failed", { eventType: "charge.refund.updated" });
+  await providerSets(op.stripeRefundId, "failed", { eventType: "refund.failed" }); // duplicate: one effect
+  const after = await RefundOperation.findById(op._id).lean();
+  assert.equal(after.state, "failed");
+  assert.equal(after.error.appCode, "REFUND_PROVIDER_FAILED_AFTER_SUCCESS");
+  const rows = await Refund.find({ tenantId: TA, paymentId: p._id }).lean();
+  assert.equal(rows.length, 1, "the Refund row is kept for history");
+  assert.ok(rows[0].reversedAt);
+  const pay = await paymentRow(p);
+  assert.equal(pay.refundCommittedCents, 0, "restored exactly once");
+  assert.deepEqual(pay.refundReversedRefunds, [op.stripeRefundId]);
+  assert.equal(pay.status, "succeeded");
+  assert.ok(originalGl, `the refund journal was posted (glDocNo ${row0.glDocNo}, glStatus ${row0.glStatus})`);
+  {
+    const still = await GLTransaction.findOne({ tenantId: TA, docNo: row0.glDocNo }).lean();
+    assert.deepEqual(still.entries.map((e) => [e.accountCode, e.dc, e.amount]), originalGl.entries.map((e) => [e.accountCode, e.dc, e.amount]), "original journal unchanged");
+    const rev = await GLTransaction.findOne({ tenantId: TA, docNo: `${row0.glDocNo}-REV` }).lean();
+    assert.ok(rev, "reversing journal posted");
+    assert.deepEqual(rev.entries.map((e) => [e.accountCode, e.dc === "D" ? "C" : "D", e.amount]), originalGl.entries.map((e) => [e.accountCode, e.dc, e.amount]));
+    assert.equal(await GLTransaction.countDocuments({ tenantId: TA, docNo: `${row0.glDocNo}-REV` }), 1);
+  }
+  assert.equal((await refund(body(p.pi, { amount: 5000 }))).status, 200, "the full amount is refundable again");
+});
+
+test("outcome: immediate failed / canceled from refunds.create -> failed, released, 502", { skip }, async () => {
+  for (const status of ["failed", "canceled"]) {
+    const p = await seed({ applicationId: `APP-IMMED-${status}` });
+    stripe.status = status;
+    const r = await refund(body(p.pi, { amount: 2000 }));
+    stripe.status = "succeeded";
+    assert.equal(r.status, 502, r.text);
+    assert.equal(r.code, "REFUND_PROVIDER_FAILED");
+    const [op] = await opsOf(p);
+    assert.equal(op.state, "failed");
+    assert.equal(op.providerStatus, status);
+    assert.equal(reservedOf(await paymentRow(p)), 0);
+    assert.equal((await refundRows(p)).length, 0);
+  }
+});
+
+test("outcome: webhook arriving BEFORE the API response finalizes once; the API still answers 200", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-EARLYWH" });
+  refundOpsHooks.afterStripe = async (op, refund) => {
+    await handleRefundEvent({ id: "evt_early", type: "charge.refund.updated", data: { object: { ...refund } } });
+  };
+  const r = await refund(body(p.pi, { amount: 2000 }));
+  refundOpsHooks.afterStripe = null;
+  assert.equal(r.status, 200, r.text);
+  assert.equal((await refundRows(p)).length, 1);
+  assert.equal((await paymentRow(p)).refundCommittedCents, 2000);
+  assert.equal((await opsOf(p))[0].state, "succeeded");
+});
+
+test("outcome: a client retry racing the success webhook -> one effect", { skip }, async () => {
+  shortLease();
+  const p = await seed({ applicationId: "APP-RACEWH" });
+  const key = `idem-${crypto.randomBytes(5).toString("hex")}`;
+  refundOpsHooks.afterStripe = async () => { throw Object.assign(new Error("simulated crash"), { simulatedCrash: true }); };
+  await refund(body(p.pi, { amount: 2000 }), { headers: { "Idempotency-Key": key } });
+  refundOpsHooks.afterStripe = null;
+  await sleep(250);
+  clearIdempotencyCache();
+  const ours = stripe.refunds.find((x) => x.payment_intent === p.pi);
+  const [retry] = await Promise.all([
+    refund(body(p.pi, { amount: 2000 }), { headers: { "Idempotency-Key": key } }),
+    handleRefundEvent({ id: "evt_race", type: "refund.updated", data: { object: { ...ours } } }),
+  ]);
+  assert.ok([200, 409].includes(retry.status), retry.text);
+  assert.equal(stripe.refunds.filter((x) => x.payment_intent === p.pi).length, 1);
+  assert.equal((await refundRows(p)).length, 1);
+  assert.equal((await paymentRow(p)).refundCommittedCents, 2000);
+});
+
+test("outcome: reconcile polls a pending refund read-only and applies the provider's final status", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-POLL" });
+  stripe.status = "pending";
+  await refund(body(p.pi, { amount: 1500 }));
+  stripe.status = "succeeded";
+  const [op] = await opsOf(p);
+  await providerSets(op.stripeRefundId, "succeeded", { deliver: false }); // webhook lost
+  const dry = await reconcile({ operationIds: [String(op._id)] });
+  assert.equal(dry.data.operations[0].plan, "poll_provider");
+  assert.equal(dry.data.operations[0].providerStatus, "succeeded");
+  assert.equal((await RefundOperation.findById(op._id).lean()).state, "provider_pending", "dry-run writes nothing");
+  await reconcile({ operationIds: [String(op._id)], apply: true });
+  assert.equal((await RefundOperation.findById(op._id).lean()).state, "succeeded");
+  assert.equal((await refundRows(p)).length, 1);
+});
+
+test("outcome: an out-of-band PENDING dashboard refund holds the payment; its later failure releases it", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-DASHPEND" });
+  const dash = { id: "re_dash_pending", object: "refund", amount: 3000, status: "pending", charge: "ch_d", payment_intent: p.pi, metadata: {} };
+  stripe.refunds.push(dash);
+  await handleRefundEvent({ id: "evt_dp1", type: "refund.created", data: { object: { ...dash } } });
+  assert.equal(reservedOf(await paymentRow(p)), 3000);
+  assert.equal((await refund(body(p.pi, { amount: 3000 }))).code, "REFUND_AMOUNT_UNAVAILABLE");
+  await providerSets("re_dash_pending", "failed", { eventType: "refund.failed" });
+  assert.equal(reservedOf(await paymentRow(p)), 0);
+  assert.equal((await refundRows(p)).length, 0);
+});
+
+// ======================================================= per-year credit
+test("per-year credit: credit held only in a PRIOR year -> 409 REFUND_CREDIT_PERIOD_UNRESOLVED (explicit, not a silent cap)", { skip }, async () => {
+  const p = await seed({ applicationId: "APP-PRIORYEAR", credit: 0 });
+  await MaterializedBalance.collection.insertOne({ tenantId: TA, memberId: "app:APP-PRIORYEAR", accountCode: "2020", bucket: "current", year: new Date().getFullYear() - 1, ledgerDomain: "membership", amount: -5000, updatedAt: new Date() });
+  const before = stripe.createCalls;
+  const r = await refund(body(p.pi, { amount: 2000 }));
+  assert.equal(r.status, 409, r.text);
+  assert.equal(r.code, "REFUND_CREDIT_PERIOD_UNRESOLVED");
+  assert.equal(stripe.createCalls, before);
+  // credit neither in this year nor in any prior year: the ordinary cap
+  const q = await seed({ applicationId: "APP-NOCREDIT", credit: 0 });
+  assert.equal((await refund(body(q.pi, { amount: 2000 }))).code, "REFUND_MEMBER_CREDIT_UNAVAILABLE");
 });

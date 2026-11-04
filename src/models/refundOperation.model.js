@@ -24,7 +24,7 @@ const RefundOperationSchema = new Schema(
     state: {
       type: String,
       required: true,
-      enum: ["reserved", "submitting", "succeeded", "failed", "uncertain"],
+      enum: ["reserved", "submitting", "provider_pending", "succeeded", "failed", "uncertain"],
     },
     // Fencing: every transition is a CAS on {state, version[, lease.owner]} and increments
     // version; only the lease owner may submit to the provider.
@@ -44,6 +44,7 @@ const RefundOperationSchema = new Schema(
     stripeIdempotencyKey: { type: String, required: true },
     stripeParams: { type: Schema.Types.Mixed, default: null }, // { payment_intent, charge? } or null
     stripeRefundId: { type: String, default: null },
+    providerStatus: { type: String, default: null }, // last Stripe Refund.status seen
     stripeChargeId: { type: String, default: null },
     refundDocId: { type: Types.ObjectId, default: null },
     refundTemplate: { type: Schema.Types.Mixed, default: null }, // Refund row fields (no ids)

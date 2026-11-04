@@ -170,7 +170,9 @@ export async function handleRefundEvent(event) {
     if (!chargeId) return { ok: true, noop: "no_charge" };
     charge = await stripe().charges.retrieve(chargeId);
   }
-  const piId = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
+  // A refund object names its payment intent itself; the charge is the fallback.
+  const refundPi = obj.object === "refund" ? (typeof obj.payment_intent === "string" ? obj.payment_intent : obj.payment_intent?.id) : null;
+  const piId = refundPi || (typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id);
   if (!piId) return { ok: true, noop: "no_payment_intent" };
   const payment = await Payment.findOne({ "stripe.paymentIntentId": piId }).lean();
   if (!payment) return { ok: false, rejected: "unknown_payment_intent" };
@@ -186,7 +188,9 @@ export async function handleRefundEvent(event) {
     ? [obj]
     : Array.isArray(charge.refunds?.data) && charge.refunds.data.length && charge.refunds.has_more !== true
       ? charge.refunds.data
-      : (await stripe().refunds.list({ charge: charge.id, limit: 100 }))?.data || [];
+      : charge.id
+        ? (await stripe().refunds.list({ charge: charge.id, limit: 100 }))?.data || []
+        : [];
   const { recordObservedStripeRefunds } = await import("./payments.service.js");
   await recordObservedStripeRefunds(payment, refunds);
 

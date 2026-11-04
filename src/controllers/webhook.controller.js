@@ -93,6 +93,8 @@ export async function processStripeEvent(event) {
     case "charge.refunded":
     case "charge.refund.updated":
     case "refund.updated":
+    case "refund.created":
+    case "refund.failed":
       return handleRefundEvent(event);
     case "payment_intent.amount_capturable_updated": {
       const pi = obj;

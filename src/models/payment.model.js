@@ -189,6 +189,8 @@ const PaymentSchema = new Schema(
     refundCommittedCents: { type: Number },
     // RefundOperation ids already counted in refundCommittedCents (exactly-once commit).
     refundCommittedOps: { type: [Schema.Types.ObjectId], default: undefined },
+    // Stripe refund ids whose committed amount was restored after a later provider failure.
+    refundReversedRefunds: { type: [String], default: undefined },
     webhookEventIds: { type: [String], default: [], index: true },
     auditHistory: { type: [PaymentAuditEventSubSchema], default: [] },
   },

@@ -28,7 +28,18 @@ import MemberRefundReservationModel from "../models/memberRefundReservation.mode
 import { getStripe as realGetStripe } from "../lib/stripe.js";
 import { AppError } from "../errors/AppError.js";
 
-export const ACTIVE_STATES = Object.freeze(["reserved", "submitting", "uncertain"]);
+// provider_pending: Stripe accepted the refund but reports it pending / requires_action; the
+// reservations stay held and nothing is committed (no Refund row, no GL) until it succeeds.
+export const ACTIVE_STATES = Object.freeze(["reserved", "submitting", "uncertain", "provider_pending"]);
+const IN_FLIGHT_STATES = Object.freeze(["submitting", "uncertain", "provider_pending"]);
+/** Stripe Refund.status -> our outcome. */
+export function providerRefundOutcome(refund) {
+  const st = String(refund?.status || "succeeded");
+  if (st === "succeeded") return "succeeded";
+  if (st === "pending" || st === "requires_action") return "pending";
+  if (st === "failed" || st === "canceled") return "failed";
+  return "pending"; // unknown future status: never treated as success or as non-execution
+}
 export const REFUNDABLE_PAYMENT_STATUSES = Object.freeze(["succeeded", "partially_refunded"]);
 // Stripe prunes idempotency keys once they are at least 24 hours old; replay is only offered
 // inside a safety margin of that window.
@@ -65,7 +76,7 @@ const opError = (status, code, message, extras = {}) => new AppError(message, st
 
 async function sumRefundRows(deps, tenantId, paymentId) {
   const agg = await deps.Refund.aggregate([
-    { $match: { tenantId, paymentId } },
+    { $match: { tenantId, paymentId, reversedAt: { $exists: false } } },
     { $group: { _id: null, total: { $sum: "$amount" } } },
   ]);
   return Number(agg?.[0]?.total) || 0;
@@ -365,17 +376,7 @@ export async function executeOperation(deps, op, token) {
       return handleProviderFailure(deps, submitting, token, err);
     }
     if (refundOpsHooks.afterStripe) await refundOpsHooks.afterStripe(submitting, refund);
-    const done = await cas(deps, submitting, {
-      from: "submitting",
-      to: "succeeded",
-      owner: token,
-      set: { stripeRefundId: refund.id, stripeChargeId: refund.charge || submitting.stripeParams.charge || null, resolvedAt: new Date(), lease: null },
-    });
-    if (!done) {
-      // Another actor resolved it meanwhile (only possible after this lease expired): it holds the
-      // same Stripe refund (same idempotency key) and finalizes it.
-      throw opError(409, "REFUND_OPERATION_SUPERSEDED", "This refund operation was resolved by reconciliation", { operationId: String(op._id) });
-    }
+    return applyProviderResult(deps, submitting, token, refund);
   } else {
     const done = await cas(deps, op, { from: "reserved", to: "succeeded", owner: token, requireLiveLease: true, set: { resolvedAt: new Date(), lease: null } });
     if (!done) throw opError(409, "REFUND_OPERATION_SUPERSEDED", "This refund operation is no longer owned by this request", { operationId: String(op._id) });
@@ -393,6 +394,154 @@ async function handleProviderFailure(deps, op, token, err) {
   // Outcome unknown: keep every reservation, give up the lease so reconciliation can take over.
   await cas(deps, op, { from: ["submitting", "uncertain"], to: "uncertain", owner: token, set: { error: providerError, lease: null }, note: "provider_outcome_unknown" });
   throw opError(503, "REFUND_OUTCOME_UNCERTAIN", "The refund outcome is not known yet; it is held for reconciliation", { operationId: String(op._id) });
+}
+
+/**
+ * Apply a Refund object returned by Stripe to an operation this actor owns (token), by its
+ * status: succeeded -> finalize once; pending / requires_action -> provider_pending (held, nothing
+ * committed); failed / canceled -> failed + release. If another actor (webhook, reconciler)
+ * changed the operation first, re-read it and return / throw its outcome instead.
+ */
+async function applyProviderResult(deps, op, token, refund, note) {
+  const outcome = providerRefundOutcome(refund);
+  const ids = { stripeRefundId: refund.id, stripeChargeId: (typeof refund.charge === "string" ? refund.charge : null) || op.stripeParams?.charge || null };
+  let done;
+  if (outcome === "succeeded") {
+    done = await cas(deps, op, { from: IN_FLIGHT_STATES, to: "succeeded", owner: token, set: { ...ids, providerStatus: refund.status || "succeeded", resolvedAt: new Date(), lease: null }, note });
+  } else if (outcome === "pending") {
+    done = await cas(deps, op, { from: IN_FLIGHT_STATES, to: "provider_pending", owner: token, set: { ...ids, providerStatus: refund.status, lease: null }, note: note || "provider_pending" });
+  } else {
+    done = await cas(deps, op, { from: IN_FLIGHT_STATES, to: "failed", owner: token, set: { ...ids, providerStatus: refund.status, error: { http: 502, appCode: "REFUND_PROVIDER_FAILED", providerStatus: refund.status }, resolvedAt: new Date(), lease: null }, note: "provider_refund_" + refund.status });
+    if (done) await releaseAll(deps, done);
+  }
+  if (!done) return outcomeOf(deps, op);
+  return outcomeOf(deps, done);
+}
+
+/** The current outcome of an operation as an API result (finalizing a succeeded one). */
+async function outcomeOf(deps, op) {
+  const cur = await deps.RefundOperation.findOne({ _id: op._id, tenantId: op.tenantId }, null, { lean: true });
+  if (!cur) throw opError(404, "REFUND_OPERATION_NOT_FOUND", "Refund operation not found");
+  if (cur.state === "succeeded") return finalizeOperation(deps, cur._id, cur.tenantId);
+  if (cur.state === "provider_pending") {
+    return { status: "pending", providerStatus: cur.providerStatus || "pending", refundId: cur.stripeRefundId, operationId: String(cur._id), pending: true };
+  }
+  if (cur.state === "failed") {
+    const e = cur.error || {};
+    throw opError(e.http || 502, e.appCode || "REFUND_OPERATION_FAILED", "The refund did not complete", { operationId: String(cur._id), providerStatus: cur.providerStatus || null });
+  }
+  throw opError(409, "REFUND_OPERATION_IN_PROGRESS", "Refund operation is still being processed", { operationId: String(cur._id), state: cur.state });
+}
+
+/**
+ * Provider state reported by a webhook / poll for a refund (no ownership: Stripe's statement is
+ * the evidence). Same Stripe refund processed twice -> one effect (every step is a CAS or keyed).
+ */
+export async function applyProviderRefundUpdate(deps, op, refund) {
+  const outcome = providerRefundOutcome(refund);
+  const ids = { stripeRefundId: refund.id, stripeChargeId: typeof refund.charge === "string" ? refund.charge : op.stripeChargeId || null, providerStatus: refund.status || null };
+  if (op.state === "succeeded") {
+    if (outcome === "failed") return compensateFailedAfterSuccess(deps, op, refund);
+    return finalizeOperation(deps, op._id, op.tenantId);
+  }
+  if (op.state === "failed") return "already_failed";
+  const upd = (to, set, note) => deps.RefundOperation.findOneAndUpdate(
+    { _id: op._id, tenantId: op.tenantId, state: op.state, version: op.version },
+    { $set: { state: to, ...set }, $inc: { version: 1 }, $push: { history: { state: to, at: new Date(), note } } },
+    LEAN,
+  );
+  if (outcome === "succeeded") {
+    const done = await upd("succeeded", { ...ids, resolvedAt: new Date(), lease: null }, "provider_succeeded");
+    if (!done) return outcomeOfSafe(deps, op);
+    return finalizeOperation(deps, op._id, op.tenantId);
+  }
+  if (outcome === "pending") {
+    if (op.state === "provider_pending") return "pending";
+    if (op.state === "reserved") return "ignored_not_submitted";
+    const done = await upd("provider_pending", { ...ids, lease: null }, "provider_pending");
+    return done ? "pending" : outcomeOfSafe(deps, op);
+  }
+  const done = await upd("failed", { ...ids, error: { http: 502, appCode: "REFUND_PROVIDER_FAILED", providerStatus: refund.status }, resolvedAt: new Date(), lease: null }, "provider_refund_" + refund.status);
+  if (!done) return outcomeOfSafe(deps, op);
+  await releaseAll(deps, done);
+  return "failed";
+}
+
+async function outcomeOfSafe(deps, op) {
+  try {
+    return await outcomeOf(deps, op);
+  } catch (err) {
+    return String(err?.code || "error");
+  }
+}
+
+/**
+ * A refund that succeeded (and was committed / journaled) later FAILED or was CANCELED at the
+ * provider: the money did not leave. Compensate, keyed by the Stripe refund id (exactly once):
+ * a REVERSING journal (the original is never edited or deleted), the Refund row marked reversed
+ * (kept for history), the payment counter restored once, the operation marked failed.
+ */
+async function compensateFailedAfterSuccess(deps, op, refund) {
+  const handler = sources.get(op.source);
+  const refundDoc = await deps.Refund.findOne({ tenantId: op.tenantId, refundOperationId: op._id }, null, { lean: true });
+  let reversalGlDocNo = refundDoc?.reversalGlDocNo || null;
+  if (refundDoc && refundDoc.glStatus === "posted" && refundDoc.glDocNo && !reversalGlDocNo) {
+    reversalGlDocNo = await handler.postReversalGl(op, refundDoc, refund, deps);
+  }
+  if (refundDoc) {
+    await deps.Refund.updateOne(
+      { _id: refundDoc._id, tenantId: op.tenantId, reversedAt: { $exists: false } },
+      { $set: { reversedAt: new Date(), providerStatus: refund.status, ...(reversalGlDocNo ? { reversalGlDocNo } : {}) } },
+    );
+  }
+  if (op.paymentId) {
+    await deps.Payment.updateOne(
+      { _id: op.paymentId, tenantId: op.tenantId, refundCommittedOps: op._id, refundReversedRefunds: { $ne: refund.id } },
+      { $inc: { refundCommittedCents: -op.amount }, $push: { refundReversedRefunds: refund.id } },
+    );
+    if (handler.updatesPaymentStatus !== false) {
+      const payment = await deps.Payment.findOne({ _id: op.paymentId, tenantId: op.tenantId }, null, { lean: true });
+      const total = await sumRefundRows(deps, op.tenantId, op.paymentId);
+      if (payment) {
+        await deps.Payment.updateOne(
+          { _id: op.paymentId, tenantId: op.tenantId },
+          { $set: { status: total <= 0 ? "succeeded" : total >= Number(payment.amount) ? "refunded" : "partially_refunded" } },
+        );
+      }
+    }
+  }
+  // Only this operation's own reservations (normally already released at finalize).
+  await releaseAll(deps, op);
+  await deps.RefundOperation.findOneAndUpdate(
+    { _id: op._id, tenantId: op.tenantId, state: "succeeded" },
+    {
+      $set: { state: "failed", providerStatus: refund.status, error: { http: 502, appCode: "REFUND_PROVIDER_FAILED_AFTER_SUCCESS", providerStatus: refund.status, reversalGlDocNo } },
+      $inc: { version: 1 },
+      $push: { history: { state: "failed", at: new Date(), note: "provider_failed_after_success" } },
+    },
+    LEAN,
+  );
+  return "reversed";
+}
+
+/** Generic GL reversal: the original journal's entries with D/C swapped (new docNo, idempotent). */
+export async function postReversalOfJournal({ tenantId, originalDocNo, reversalDocNo, memo, postBalancedJournal, GL }) {
+  const original = await GL.findOne({ tenantId, docNo: originalDocNo }).lean();
+  if (!original) return null;
+  const lines = (original.entries || []).map((e) => {
+    const { _id, dc, ...rest } = e;
+    return { ...rest, dc: dc === "D" ? "C" : "D" };
+  });
+  const journal = await postBalancedJournal({
+    date: new Date().toISOString().split("T")[0],
+    tenantId,
+    docType: original.docType || "Refund",
+    docNo: reversalDocNo,
+    memo,
+    lines,
+    operation: "refund_reversed_provider_failed",
+  });
+  return journal?.docNo || reversalDocNo;
 }
 
 /** Idempotent completion of a succeeded operation. Safe to call any number of times. */
@@ -472,16 +621,10 @@ async function resolveClaimed(deps, claimed, token, now = new Date()) {
     } catch (err) {
       return handleProviderFailure(deps, claimed, token, err);
     }
-    const done = await cas(deps, claimed, { from: ["submitting", "uncertain"], to: "succeeded", owner: token, set: { stripeRefundId: refund.id, stripeChargeId: refund.charge || null, resolvedAt: new Date(), lease: null }, note: "resolved_by_idempotent_replay" });
-    if (!done) throw opError(409, "REFUND_OPERATION_SUPERSEDED", "Refund operation changed during resolution");
-    return finalizeOperation(deps, claimed._id, claimed.tenantId);
+    return applyProviderResult(deps, claimed, token, refund, "resolved_by_idempotent_replay");
   }
   const found = await findProviderRefund(deps, claimed);
-  if (found) {
-    const done = await cas(deps, claimed, { from: ["submitting", "uncertain"], to: "succeeded", owner: token, set: { stripeRefundId: found.id, stripeChargeId: found.charge || null, resolvedAt: new Date(), lease: null }, note: "resolved_by_provider_lookup" });
-    if (!done) throw opError(409, "REFUND_OPERATION_SUPERSEDED", "Refund operation changed during resolution");
-    return finalizeOperation(deps, claimed._id, claimed.tenantId);
-  }
+  if (found) return applyProviderResult(deps, claimed, token, found, "resolved_by_provider_lookup");
   await cas(deps, claimed, { from: ["submitting", "uncertain"], to: "uncertain", owner: token, set: { lease: null }, note: "manual_review_required" });
   throw opError(409, "REFUND_OPERATION_NEEDS_REVIEW", "The refund outcome cannot be established automatically; finance review required", { operationId: String(claimed._id) });
 }
@@ -517,33 +660,39 @@ export async function recordObservedProviderRefunds(deps, payment, refunds = [])
   const out = [];
   await initCommitted(deps, payment.tenantId, payment._id); // before any new Refund row exists
   for (const r of refunds) {
-    if (!r?.id || !["succeeded", "pending"].includes(String(r.status || "succeeded"))) continue;
+    if (!r?.id) continue;
     if (!Number.isInteger(Number(r.amount)) || Number(r.amount) <= 0) {
       out.push({ refundId: r.id, result: "skipped_no_amount" }); // cannot be recorded without its amount
       continue;
     }
+    // Our own operation (metadata), or the operation already holding this Stripe refund id.
     const ownOpId = r?.metadata?.refundOperationId;
-    if (ownOpId && mongoose.Types.ObjectId.isValid(ownOpId)) {
-      const op = await deps.RefundOperation.findOne({ _id: ownOpId, tenantId: payment.tenantId }, null, { lean: true });
-      if (op) {
-        out.push({ refundId: r.id, operationId: String(op._id), result: await completeOwnFromObservation(deps, op, r) });
-        continue;
-      }
+    let op = ownOpId && mongoose.Types.ObjectId.isValid(ownOpId)
+      ? await deps.RefundOperation.findOne({ _id: ownOpId, tenantId: payment.tenantId }, null, { lean: true })
+      : null;
+    if (!op) op = await deps.RefundOperation.findOne({ tenantId: payment.tenantId, stripeRefundId: r.id }, null, { lean: true });
+    if (op) {
+      out.push({ refundId: r.id, operationId: String(op._id), result: await applyProviderRefundUpdate(deps, op, r) });
+      continue;
     }
-    const known = await deps.Refund.findOne({ tenantId: payment.tenantId, "stripe.refundId": r.id }, null, { lean: true });
-    const knownOp = known ? null : await deps.RefundOperation.findOne({ tenantId: payment.tenantId, stripeRefundId: r.id }, null, { lean: true });
-    if (known || knownOp) {
+    const outcome = providerRefundOutcome(r);
+    if (outcome === "failed") {
+      out.push({ refundId: r.id, result: "ignored_failed_unknown_refund" });
+      continue;
+    }
+    const legacy = await deps.Refund.findOne({ tenantId: payment.tenantId, "stripe.refundId": r.id }, null, { lean: true });
+    if (legacy) {
       out.push({ refundId: r.id, result: "already_recorded" });
       continue;
     }
-    let op;
+    let created;
     try {
-      const created = await deps.RefundOperation.create({
+      created = await deps.RefundOperation.create({
         tenantId: payment.tenantId,
         source: "stripe_observed",
         flow: "OBSERVED",
         mode: "stripe",
-        state: "succeeded",
+        state: outcome === "succeeded" ? "succeeded" : "provider_pending",
         version: 0,
         paymentId: payment._id,
         memberKey: null,
@@ -554,37 +703,33 @@ export async function recordObservedProviderRefunds(deps, payment, refunds = [])
         stripeParams: { payment_intent: payment.stripe?.paymentIntentId || null },
         stripeRefundId: r.id,
         stripeChargeId: typeof r.charge === "string" ? r.charge : r.charge?.id || null,
+        providerStatus: r.status || "succeeded",
         createdBy: "stripe-webhook",
-        resolvedAt: new Date(),
-        history: [{ state: "succeeded", at: new Date(), note: "observed_out_of_band" }],
+        ...(outcome === "succeeded" ? { resolvedAt: new Date() } : {}),
+        history: [{ state: outcome === "succeeded" ? "succeeded" : "provider_pending", at: new Date(), note: "observed_out_of_band" }],
       });
-      op = typeof created?.toObject === "function" ? created.toObject() : created;
+      created = typeof created?.toObject === "function" ? created.toObject() : created;
     } catch (err) {
       if (!isDup(err)) throw err;
-      op = await deps.RefundOperation.findOne({ tenantId: payment.tenantId, clientKey: `stripe-refund:${r.id}` }, null, { lean: true });
+      const again = await deps.RefundOperation.findOne({ tenantId: payment.tenantId, clientKey: `stripe-refund:${r.id}` }, null, { lean: true });
+      out.push({ refundId: r.id, operationId: String(again._id), result: await applyProviderRefundUpdate(deps, again, r) });
+      continue;
     }
-    out.push({ refundId: r.id, operationId: String(op._id), result: await finalizeOperation(deps, op._id, payment.tenantId) });
+    if (outcome === "pending") {
+      // Money is leaving: hold it against the payment (uncapped - it already happened) until the
+      // provider settles the refund one way or the other.
+      await deps.Payment.updateOne(
+        { _id: payment._id, tenantId: payment.tenantId, "refundReservations.opId": { $ne: created._id } },
+        { $push: { refundReservations: { opId: created._id, amount: created.amount, at: new Date() } } },
+      );
+      out.push({ refundId: r.id, operationId: String(created._id), result: "pending" });
+      continue;
+    }
+    out.push({ refundId: r.id, operationId: String(created._id), result: await finalizeOperation(deps, created._id, payment.tenantId) });
   }
   return out;
 }
 
-async function completeOwnFromObservation(deps, op, refund) {
-  if (op.state === "succeeded") return finalizeOperation(deps, op._id, op.tenantId);
-  if (op.state === "failed") return "operation_failed_but_provider_refunded"; // surfaced for review
-  // The provider shows this operation's refund: definitive evidence of execution. Complete it,
-  // fenced on the version observed here; a live owner finishing concurrently simply wins.
-  const done = await deps.RefundOperation.findOneAndUpdate(
-    { _id: op._id, tenantId: op.tenantId, state: op.state, version: op.version },
-    {
-      $set: { state: "succeeded", stripeRefundId: refund.id, stripeChargeId: typeof refund.charge === "string" ? refund.charge : null, resolvedAt: new Date(), lease: null },
-      $inc: { version: 1 },
-      $push: { history: { state: "succeeded", at: new Date(), note: "resolved_by_webhook" } },
-    },
-    LEAN,
-  );
-  if (!done) return "owner_resolving";
-  return finalizeOperation(deps, op._id, op.tenantId);
-}
 
 // ---------------------------------------------------------------- visibility / reconciliation
 export const OPERATION_LIST_FIELDS = Object.freeze([
@@ -616,6 +761,7 @@ export async function listUnresolvedOperations(deps, tenantId, { limit = 100 } =
 
 function planFor(op, now) {
   if (op.state === "succeeded") return "finalize";
+  if (op.state === "provider_pending") return "poll_provider";
   if (op.lease?.expiresAt && new Date(op.lease.expiresAt) > now) return "leave_owned";
   if (op.state === "reserved") return "release_never_submitted";
   const age = now.getTime() - new Date(op.submittedAt || op.createdAt).getTime();
@@ -642,7 +788,16 @@ export async function reconcileRefundOperations(deps, { tenantId, apply = false,
   for (const op of ops) {
     const row = { operationId: String(op._id), state: op.state, flow: op.flow, amount: op.amount, plan: planFor(op, now) };
     try {
-      if (!apply) {
+      if (row.plan === "poll_provider") {
+        // Read-only retrieve; applying it is a CAS on the operation's version.
+        const r = await deps.getStripe().refunds.retrieve(op.stripeRefundId);
+        row.providerStatus = r?.status || null;
+        if (apply) {
+          const res = await applyProviderRefundUpdate(deps, op, r);
+          row.outcome = typeof res === "string" ? res : res?.pending ? "pending" : "succeeded";
+          row.applied = true;
+        }
+      } else if (!apply) {
         if (row.plan === "replay_idempotent_create" || row.plan === "lookup_or_review") {
           const found = await findProviderRefund(deps, op);
           row.providerRefundFound = Boolean(found);
