@@ -18,13 +18,23 @@
 //   404, 422, 200 with another id / tenant / unknown status -> { unverified, reason: "business" }
 //                                                            => 409 REFUND_APPLICATION_STATE_UNVERIFIED
 //   timeout (3 s), transport error, 5xx, any other status, unparseable 200 body, signer not
-//   configured, PROFILE_SERVICE_URL unset                  -> { unavailable, reason }
+//   configured, PROFILE_SERVICE_URL unset, breaker open (5 s after a timeout / transport error)
+//                                                          -> { unavailable, reason }
 //                                                            => 503 REFUND_APPLICATION_STATE_UNAVAILABLE
 // Logs carry status, outcome and reason only - never headers, signature, nonce or secret.
 import logger from "../config/logger.js";
 import { signatureHeaders, signingConfig } from "../lib/profileRequestSigning.js";
 
 export const DEFAULT_TIMEOUT_MS = 3000;
+// Fail-fast after an outage: a timeout or transport error opens a short breaker during which calls
+// answer "unavailable" (reason circuit_open) without touching the network. The batched attempts
+// lookup (payments.service lookupApplicationRefundStates: up to 200 ids, concurrency 5) is then
+// bounded by ~one timeout (3 s) instead of 200 / 5 x 3 s. It only ever fails CLOSED.
+export const BREAKER_OPEN_MS = 5000;
+let breakerOpenUntil = 0;
+export function resetRefundStateBreaker() {
+  breakerOpenUntil = 0;
+}
 const STATUSES = new Set(["in-progress", "submitted", "processed", "rejected"]);
 const APPLICATION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const TENANT_RE = /^[a-f0-9]{24}$/;
@@ -68,6 +78,10 @@ export async function fetchApplicationRefundState({ tenantId, applicationId } = 
   if (!base) return done(unavailable("not_configured"), { cause: "profile_url" });
   if (!signingConfig(env)) return done(unavailable("not_configured"), { cause: "signing_key" });
 
+  const useBreaker = deps.breaker !== false;
+  const nowMs = () => (deps.now ? deps.now() : Date.now());
+  if (useBreaker && nowMs() < breakerOpenUntil) return done(unavailable("circuit_open"));
+
   const url = `${base}/api/internal/applications/${encodeURIComponent(appId)}/refund-state`;
   let headers;
   try {
@@ -92,6 +106,7 @@ export async function fetchApplicationRefundState({ tenantId, applicationId } = 
   } catch (err) {
     clearTimeout(timer);
     const timedOut = controller.signal.aborted || err?.name === "AbortError" || err?.name === "TimeoutError";
+    if (useBreaker) breakerOpenUntil = Math.max(breakerOpenUntil, nowMs() + BREAKER_OPEN_MS);
     return done(unavailable(timedOut ? "timeout" : "transport"));
   }
   clearTimeout(timer);

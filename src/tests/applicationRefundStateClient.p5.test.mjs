@@ -41,7 +41,7 @@ const KID = "as-test-1";
 const SIGN_SECRET = crypto.randomBytes(32).toString("hex");
 
 const signing = await import("../lib/profileRequestSigning.js");
-const { fetchApplicationRefundState, DEFAULT_TIMEOUT_MS } = await import("../services/applicationRefundState.client.js");
+const { fetchApplicationRefundState, DEFAULT_TIMEOUT_MS, BREAKER_OPEN_MS, resetRefundStateBreaker } = await import("../services/applicationRefundState.client.js");
 
 // ---------------------------------------------------------------- local profile stand-in
 // Verifies what profile-service verifies (independently re-derived from the vector contract's
@@ -211,6 +211,7 @@ test("signer config: unset, short secret or bad kid -> null (never an unsigned o
 beforeEach(() => {
   stand.requests = [];
   stand.respond = null;
+  resetRefundStateBreaker();
 });
 
 test("verified: signed GET, exact path, tenant header; NO user token, gateway identity or internal flag forwarded", async () => {
@@ -283,15 +284,19 @@ test("unavailable: timeout, transport, 5xx, other status, malformed body, signer
   const t0 = Date.now();
   assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-5" }, { timeoutMs: 100 }), { unavailable: true, reason: "timeout" });
   assert.ok(Date.now() - t0 < 350, "bounded by the timeout, not the upstream");
+  resetRefundStateBreaker();
   stand.respond = () => ({ destroy: true });
   assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-5" }), { unavailable: true, reason: "transport" });
+  resetRefundStateBreaker();
   const closed = `http://127.0.0.1:${await freePort()}`;
   assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-5" }, { env: { ...ENV(), PROFILE_SERVICE_URL: closed } }), { unavailable: true, reason: "transport" });
+  resetRefundStateBreaker();
   for (const [status, reason] of [[500, "upstream_5xx"], [502, "upstream_5xx"], [503, "upstream_5xx"], [409, "upstream_status"], [429, "upstream_status"], [400, "upstream_status"], [302, "upstream_status"]]) {
     stand.respond = () => ({ status, body: { success: false, code: "SERVICE_AUTH_STORE_UNAVAILABLE" } });
     const r = await lookup({ tenantId: TA, applicationId: "APP-5" });
-    if (status === 302) assert.equal(r.unavailable, true);
+    if (status === 302) assert.equal(r.unavailable, true); // redirect: "error" -> transport
     else assert.deepEqual(r, { unavailable: true, reason }, String(status));
+    resetRefundStateBreaker();
   }
   for (const body of ["not json", "", "[]", { status: "success" }, { data: null }]) {
     stand.respond = () => ({ status: 200, body });
@@ -301,6 +306,86 @@ test("unavailable: timeout, transport, 5xx, other status, malformed body, signer
   assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-5" }, { env: { PROFILE_SERVICE_URL: STAND } }), { unavailable: true, reason: "not_configured" });
   assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-5" }, { env: { PROFILE_SIGNING_KID: KID, PROFILE_SIGNING_SECRET: SIGN_SECRET } }), { unavailable: true, reason: "not_configured" });
   assert.equal(stand.requests.length, before, "nothing is sent unsigned or to a default URL");
+});
+
+test("breaker: a timeout / transport error fails the next calls fast (circuit_open, nothing sent) for BREAKER_OPEN_MS; 5xx does not open it", async () => {
+  assert.equal(BREAKER_OPEN_MS, 5000);
+  let clock = Date.now();
+  const now = () => clock;
+  stand.respond = () => ({ destroy: true });
+  assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-7" }, { now }), { unavailable: true, reason: "transport" });
+  stand.respond = null;
+  const sent = stand.requests.length;
+  assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-7" }, { now }), { unavailable: true, reason: "circuit_open" });
+  clock += BREAKER_OPEN_MS - 1;
+  assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-7" }, { now }), { unavailable: true, reason: "circuit_open" });
+  assert.equal(stand.requests.length, sent, "nothing sent while open");
+  clock += 2;
+  assert.deepEqual(await lookup({ tenantId: TA, applicationId: "APP-7" }, { now }), { applicationId: "APP-7", tenantId: TA, status: "submitted" });
+  resetRefundStateBreaker();
+  stand.respond = () => ({ status: 503, body: { code: "SERVICE_AUTH_STORE_UNAVAILABLE" } });
+  assert.equal((await lookup({ tenantId: TA, applicationId: "APP-7" })).reason, "upstream_5xx");
+  stand.respond = null;
+  assert.equal((await lookup({ tenantId: TA, applicationId: "APP-7" })).status, "submitted", "5xx leaves the breaker closed");
+});
+
+test("batched attempts lookup (lookupApplicationRefundStates: <=200 ids, concurrency 5) with the real client", async () => {
+  const { lookupApplicationRefundStates, setApplicationRefundStateProvider } = await import("../services/payments.service.js");
+  const { applicationRefundStateProvider } = await import("../services/applicationRefundState.client.js");
+  const saved = { ...process.env };
+  Object.assign(process.env, ENV());
+  setApplicationRefundStateProvider(applicationRefundStateProvider);
+  try {
+    // 250 ids (+ duplicates / empties): capped at 200 unique, each signed once with a fresh nonce,
+    // never more than 5 in flight.
+    let inFlight = 0, maxInFlight = 0;
+    stand.respond = ({ applicationId, tenantId }) => ({ delayMs: 15, status: 200, body: { data: { applicationId, tenantId, status: applicationId.endsWith("7") ? "rejected" : "submitted" } } });
+    const origEmit = standServer.emit.bind(standServer);
+    standServer.emit = (ev, req, res) => {
+      if (ev === "request") { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); res.on("finish", () => inFlight--); }
+      return origEmit(ev, req, res);
+    };
+    const ids = Array.from({ length: 250 }, (_, i) => `APP-B-${i}`);
+    const out = await lookupApplicationRefundStates(TA, [...ids, ids[0], ids[1], null, ""]);
+    standServer.emit = origEmit;
+    assert.equal(out.size, 200);
+    assert.equal(stand.requests.length, 200);
+    assert.ok(maxInFlight <= 5, `max in flight ${maxInFlight}`);
+    assert.equal(new Set(stand.requests.map((q) => q.headers["x-svc-nonce"])).size, 200);
+    assert.ok(stand.requests.every((q) => q.verified && q.headers["x-tenant-id"] === TA && q.headers.authorization === undefined));
+    assert.deepEqual(out.get("APP-B-7"), { applicationId: "APP-B-7", tenantId: TA, status: "rejected" });
+    assert.deepEqual(out.get("APP-B-8"), { applicationId: "APP-B-8", tenantId: TA, status: "submitted" });
+    assert.ok(!out.has("APP-B-210"));
+    // mixed outcomes are per id (auth / business / unavailable never leak into each other)
+    stand.requests = [];
+    stand.respond = ({ applicationId, tenantId }) =>
+      applicationId === "M-AUTH" ? { status: 401, body: { code: "SERVICE_AUTH_INVALID" } }
+      : applicationId === "M-404" ? { status: 404, body: { code: "APPLICATION_NOT_FOUND" } }
+      : applicationId === "M-503" ? { status: 503, body: {} }
+      : { status: 200, body: { data: { applicationId, tenantId, status: "in-progress" } } };
+    const mixed = await lookupApplicationRefundStates(TA, ["M-AUTH", "M-404", "M-503", "M-OK"]);
+    assert.deepEqual(mixed.get("M-AUTH"), { unverified: true, reason: "auth" });
+    assert.deepEqual(mixed.get("M-404"), { unverified: true, reason: "business" });
+    assert.deepEqual(mixed.get("M-503"), { unavailable: true, reason: "upstream_5xx" });
+    assert.deepEqual(mixed.get("M-OK"), { applicationId: "M-OK", tenantId: TA, status: "in-progress" });
+    // profile hanging: every id fails closed and the WHOLE batch is bounded by ~one 3 s timeout
+    // (the first 5 in-flight calls time out, the breaker answers the other 195 immediately)
+    stand.requests = [];
+    stand.respond = () => ({ delayMs: 4000, status: 200, body: {} });
+    const t0 = Date.now();
+    const hung = await lookupApplicationRefundStates(TA, ids.slice(0, 200));
+    const took = Date.now() - t0;
+    assert.equal(hung.size, 200);
+    assert.ok([...hung.values()].every((v) => v && v.unavailable === true), "every id unavailable (fail closed)");
+    assert.equal([...hung.values()].filter((v) => v.reason === "timeout").length, 5);
+    assert.ok(took < DEFAULT_TIMEOUT_MS + 1500, `batch bounded by one timeout (${took} ms)`);
+    assert.equal(stand.requests.length, 5, "only the first in-flight calls were sent");
+  } finally {
+    setApplicationRefundStateProvider(applicationRefundStateProvider);
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+    resetRefundStateBreaker();
+  }
 });
 
 test("client logs carry no signature, nonce, secret or headers", async () => {
@@ -340,6 +425,7 @@ test("enforce: each lookup failure refuses with its distinct code + reason and n
   for (const [name, respond, status, code, reason] of cases) {
     const p = await seedFlowA(`APP-RS-${seq + 1}`);
     stand.respond = respond;
+    resetRefundStateBreaker();
     const before = stripe.createCalls;
     const t0 = Date.now();
     const r = await refund(body(p.pi));
