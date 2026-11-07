@@ -34,6 +34,13 @@
 //   enforce  - a signed request must pass every check; an UNSIGNED request on the internal path
 //              (x-internal-request) is refused. Unsigned user-path (CRM token) requests are left to
 //              the existing chain here; removing that path is the separate S3 (R2) change.
+//
+// Per-operation enforcement: PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS (comma list, read per request)
+// raises the listed operations from report to enforce while the global mode is "report". Only the
+// operations whose sole allowed caller is events-service can be listed (manual_record, manual_post,
+// manual_void, intent_registration); capture and cancel are ignored there because profile-service
+// still sends them unsigned on the internal path (legacy mode) and would be refused. "off" stays the
+// kill switch and a global "enforce" already covers every operation, so the list only acts in report.
 // Logs never contain the signature, nonce, secret, body or headers.
 import mongoose from "mongoose";
 import logger from "../config/logger.js";
@@ -82,9 +89,35 @@ const STATUS = Object.freeze({
   SERVICE_AUTH_STORE_UNAVAILABLE: 503,
 });
 
-export function serviceAuthMode() {
-  const m = String(process.env.PAYMENT_SERVICE_AUTH_MODE || "off").trim().toLowerCase();
+export function serviceAuthMode(env = process.env) {
+  const m = String(env.PAYMENT_SERVICE_AUTH_MODE || "off").trim().toLowerCase();
   return m === "report" || m === "enforce" ? m : "off";
+}
+
+/** Operations PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS may raise to enforce: events-service is the
+ *  only allowed caller of each, so enforcing them cannot refuse another service's legacy call. */
+export const PER_OPERATION_ENFORCEABLE = Object.freeze(["manual_record", "manual_post", "manual_void", "intent_registration"]);
+
+let warnedIgnored = null;
+/** The listed operations that are enforceable on their own; anything else is ignored (warned once). */
+export function enforcedOperations(env = process.env, log = logger) {
+  const listed = String(env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const ignored = listed.filter((op) => !PER_OPERATION_ENFORCEABLE.includes(op));
+  if (ignored.length && warnedIgnored !== ignored.join(",")) {
+    warnedIgnored = ignored.join(",");
+    log.warn({ ignored }, `[service-auth] PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS ignores ${warnedIgnored} (not enforceable per operation)`);
+  }
+  return new Set(listed.filter((op) => PER_OPERATION_ENFORCEABLE.includes(op)));
+}
+
+/** Effective mode for one operation: the global mode, raised to enforce for a listed operation in report. */
+export function serviceAuthModeFor(operation, env = process.env, log = logger) {
+  const mode = serviceAuthMode(env);
+  if (mode === "report" && enforcedOperations(env, log).has(operation)) return "enforce";
+  return mode;
 }
 
 function header(req, name) {
@@ -176,7 +209,7 @@ export function createServiceAuthVerifier(operation, deps = {}) {
   if (!OPERATIONS.includes(operation)) throw new Error(`unknown payment operation ${operation}`);
   const log = deps.logger || logger;
   return async function serviceAuthVerifier(req, res, next) {
-    const mode = serviceAuthMode();
+    const mode = serviceAuthModeFor(operation, process.env, log);
     if (mode === "off") return next();
     let result;
     try {

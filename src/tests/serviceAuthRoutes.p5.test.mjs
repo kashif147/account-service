@@ -251,6 +251,65 @@ test("off: unsigned internal command behaves as today (chain decides)", { skip }
   assert.equal(res.status, 404, res.text.slice(0, 200));
 }));
 
+// Per-operation enforcement on the real router: global report + the four events-only operations.
+function withPerOperation(fn) {
+  return async () => {
+    const prev = [process.env.PAYMENT_SERVICE_AUTH_MODE, process.env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS];
+    process.env.PAYMENT_SERVICE_AUTH_MODE = "report";
+    process.env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS = "manual_record,manual_post,manual_void,intent_registration";
+    try { await fn(); } finally {
+      for (const [k, v] of [["PAYMENT_SERVICE_AUTH_MODE", prev[0]], ["PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS", prev[1]]]) {
+        if (v == null) delete process.env[k]; else process.env[k] = v;
+      }
+    }
+  };
+}
+const RID_PO = "b".repeat(24);
+const internalHeaders = (idem) => ({ "x-internal-request": "true", "x-tenant-id": C.ids.tenantId, "Idempotency-Key": idem });
+const manualBody = (transition, extra = {}) => ({ binding: { domain: "registration", registrationId: RID_PO, purpose: "eventRegistration" }, transition, reason: "reject", actorUserId: "c".repeat(24), ...extra });
+const PER_OP_ROUTES = [
+  ["manual_record", "/api/journal/events/manual-payment", manualBody("manual_record", { amount: 1000, method: "invoice" }), `registration:manual_record:${RID_PO}:new`],
+  ["manual_post", "/api/journal/events/manual-payment/post", manualBody("manual_post", { paymentId: "d".repeat(24) }), `registration:manual_post:${RID_PO}:${"d".repeat(24)}`],
+  ["manual_void", "/api/journal/events/manual-payment/void", manualBody("manual_void", { paymentId: "d".repeat(24) }), `registration:manual_void:${RID_PO}:${"d".repeat(24)}`],
+  ["intent_registration", "/api/payments/intents", { purpose: "eventRegistration", registrationId: RID_PO, amount: 1000, currency: "eur" }, "intent-po-1"],
+];
+
+for (const [op, p, body, idem] of PER_OP_ROUTES) {
+  test(`per-operation enforce (report + list): ${op} unsigned internal -> 401, tampered -> 401, nothing moves`, { skip }, withPerOperation(async () => {
+    const before = MUTATIONS.length;
+    const payments = await Payment.countDocuments({});
+    const missing = await send({ method: "POST", path: p, headers: internalHeaders(idem), body }, { sign: false });
+    assert.equal(missing.status, 401, missing.text.slice(0, 200));
+    assert.equal(missing.code, "SERVICE_AUTH_REQUIRED");
+    const tampered = await send({ method: "POST", path: p, headers: internalHeaders(idem), body }, { signer: { caller: "events-service", kid: "ev-1", secret: EV }, tamper: (s) => { s.raw += " "; } });
+    assert.equal(tampered.status, 401, tampered.text.slice(0, 200));
+    assert.equal(tampered.code, "SERVICE_AUTH_INVALID");
+    const wrong = await send({ method: "POST", path: p, headers: internalHeaders(idem), body }, { signer: { caller: "profile-service", kid: "pr-1", secret: PR } });
+    assert.equal(wrong.status, 403, wrong.text.slice(0, 200));
+    assert.equal(wrong.code, "SERVICE_NOT_ALLOWED");
+    assert.equal(MUTATIONS.length, before);
+    assert.equal(await Payment.countDocuments({}), payments);
+  }));
+}
+
+test("per-operation enforce: a valid events signature passes the verifier on manual_void (chain decides), its replay is 409", { skip }, withPerOperation(async () => {
+  const [, p, body, idem] = PER_OP_ROUTES[2];
+  const nonce = crypto.randomBytes(18).toString("base64url");
+  const first = await send({ method: "POST", path: p, headers: internalHeaders(idem), body }, { signer: { caller: "events-service", kid: "ev-1", secret: EV }, nonce });
+  assert.ok(!String(first.code || "").startsWith("SERVICE_"), first.text.slice(0, 200));
+  assert.ok(first.status >= 400 && first.status < 500, first.text.slice(0, 200)); // the bound-command chain refuses the fake row
+  const replay = await send({ method: "POST", path: p, headers: internalHeaders(idem), body }, { signer: { caller: "events-service", kid: "ev-1", secret: EV }, nonce });
+  assert.equal(replay.status, 409, replay.text.slice(0, 200));
+  assert.equal(replay.code, "SERVICE_AUTH_REPLAY");
+}));
+
+test("per-operation enforce: profile-style unsigned internal capture/cancel are NOT refused (report) - chain decides", { skip }, withPerOperation(async () => {
+  for (const t of ["capture", "cancel"]) {
+    const res = await send({ method: "POST", path: `/api/payments/intents/pi_svcauth_po_${t}/${t}`, headers: { "x-internal-request": "true", "x-tenant-id": C.ids.tenantId, "Idempotency-Key": `application:${t}:x:pi_svcauth_po_${t}` }, body: { reason: "approve" } }, { sign: false });
+    assert.ok(!String(res.code || "").startsWith("SERVICE_"), `${t}: ${res.text.slice(0, 200)}`);
+  }
+}));
+
 for (const c of C.cases) {
   test(`enforce: signed ${c.name} succeeds; fresh-nonce retry replays identically; nonce replay 409; no second mutation`, { skip }, withMode("enforce", async () => {
     const nonce = crypto.randomBytes(18).toString("base64url");
