@@ -476,3 +476,113 @@ test("real pino logger: verifier fields survive into the emitted JSON line (not 
   assert.equal(line.domain, "registration");
   assert.equal(line.msg, "[service-auth] payment command op=capture mode=report result=unsigned outcome=SERVICE_AUTH_REQUIRED caller=none domain=registration internalPath=true");
 });
+
+// ---- Per-operation enforcement (PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS, global mode report) ----
+const { enforcedOperations, serviceAuthModeFor, PER_OPERATION_ENFORCEABLE } = await import("../middlewares/serviceAuth.middleware.js");
+const EVENTS_ONLY = ["manual_record", "manual_post", "manual_void", "intent_registration"];
+
+async function withEnforceOps(list, fn) {
+  const prev = process.env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS;
+  if (list == null) delete process.env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS; else process.env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS = list;
+  try { return await fn(); } finally {
+    if (prev == null) delete process.env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS; else process.env.PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS = prev;
+  }
+}
+const coveredFor = (op) => COVERED.find(([o]) => o === op);
+const signedFor = ([operation, caller, kid, secret, target, body], over = {}, tamper) => {
+  const domain = JSON.parse(body).binding?.domain || "registration";
+  return signedReq({ caller, kid, secret, target, body, idem: `${domain}:${operation}:x:pi_1`, ...over }, tamper);
+};
+
+test("per-operation: only the four events-only operations are enforceable; capture/cancel/unknown are ignored", () => {
+  assert.deepEqual([...PER_OPERATION_ENFORCEABLE].sort(), [...EVENTS_ONLY].sort());
+  const log = captureLogger();
+  const set = enforcedOperations({ PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS: " Manual_Record, capture ,cancel,bogus,intent_registration," }, log);
+  assert.deepEqual([...set].sort(), ["intent_registration", "manual_record"]);
+  assert.equal(log.lines.length, 1);
+  assert.deepEqual(log.lines[0].meta.ignored, ["capture", "cancel", "bogus"]);
+});
+
+test("per-operation: effective mode - raised only from report; off stays the kill switch; enforce stays global", () => {
+  const all = EVENTS_ONLY.join(",");
+  for (const op of EVENTS_ONLY) {
+    assert.equal(serviceAuthModeFor(op, { PAYMENT_SERVICE_AUTH_MODE: "report", PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS: all }), "enforce", op);
+    assert.equal(serviceAuthModeFor(op, { PAYMENT_SERVICE_AUTH_MODE: "off", PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS: all }), "off", op);
+    assert.equal(serviceAuthModeFor(op, { PAYMENT_SERVICE_AUTH_MODE: "report" }), "report", op);
+  }
+  for (const op of ["capture", "cancel"]) {
+    const log = captureLogger();
+    assert.equal(serviceAuthModeFor(op, { PAYMENT_SERVICE_AUTH_MODE: "report", PAYMENT_SERVICE_AUTH_ENFORCE_OPERATIONS: `${all},capture,cancel` }, log), "report", op);
+    assert.equal(serviceAuthModeFor(op, { PAYMENT_SERVICE_AUTH_MODE: "enforce" }), "enforce", op);
+  }
+});
+
+for (const op of EVENTS_ONLY) {
+  const c = coveredFor(op);
+  test(`per-operation enforce: ${op} - valid passes, missing / invalid / replayed are refused`, async () => {
+    await withEnforceOps(EVENTS_ONLY.join(","), async () => {
+      const NonceModel = memoryNonceModel();
+      const valid = signedFor(c);
+      const ok = await runCovered("report", c, valid, { NonceModel });
+      assert.equal(ok.nexted, true, "valid");
+      assert.equal(ok.log.lines[0].meta.mode, "enforce");
+      assert.equal(ok.log.lines[0].meta.result, "valid");
+
+      const missing = await runCovered("report", c, unsignedReq(c[4], c[5]));
+      assert.equal(missing.nexted, false, "missing");
+      assert.equal(missing.res.statusCode, 401);
+      assert.equal(missing.res.body.code, "SERVICE_AUTH_REQUIRED");
+
+      for (const [label, tamper, code, status] of [
+        ["body", (r) => ({ ...r, rawBody: Buffer.from(c[5] + " ") }), "SERVICE_AUTH_INVALID", 401],
+        ["signature", (r) => ({ ...r, headers: { ...r.headers, "x-svc-sig": "A".repeat(43) } }), "SERVICE_AUTH_INVALID", 401],
+        ["stale", (r) => ({ ...r, headers: { ...r.headers, "x-svc-ts": String(NOW - 600) } }), "SERVICE_AUTH_STALE", 401],
+        ["unknown kid", (r) => ({ ...r, headers: { ...r.headers, "x-svc-kid": "nope-9" } }), "SERVICE_AUTH_UNKNOWN_KID", 401],
+        ["wrong caller", null, "SERVICE_NOT_ALLOWED", 403],
+      ]) {
+        const req = label === "wrong caller" ? signedFor(c, { caller: "profile-service", kid: "pr-1", secret: PR_SECRET }) : signedFor(c, {}, tamper);
+        const r = await runCovered("report", c, req);
+        assert.equal(r.nexted, false, `${op} ${label}`);
+        assert.equal(r.res.statusCode, status, `${op} ${label}`);
+        assert.equal(r.res.body.code, code, `${op} ${label}`);
+      }
+
+      const replay = await runCovered("report", c, { ...valid, headers: { ...valid.headers } }, { NonceModel });
+      assert.equal(replay.nexted, false, "replay");
+      assert.equal(replay.res.statusCode, 409);
+      assert.equal(replay.res.body.code, "SERVICE_AUTH_REPLAY");
+    });
+  });
+}
+
+test("per-operation enforce: capture and cancel stay report - profile legacy (unsigned internal + CRM token) and invalid still pass", async () => {
+  await withEnforceOps(`${EVENTS_ONLY.join(",")},capture,cancel`, async () => {
+    for (const c of COVERED.filter(([o]) => o === "capture" || o === "cancel")) {
+      const legacy = unsignedReq(c[4], c[5], { "x-internal-request": "true", authorization: "Bearer crm-token" });
+      const r = await runCovered("report", c, legacy);
+      assert.equal(r.nexted, true, `${c[0]}/${c[1]} legacy`);
+      assert.equal(r.res.statusCode, 200);
+      const l = r.log.lines.find((x) => x.msg.startsWith("[service-auth] payment command"));
+      assert.equal(l.meta.mode, "report");
+      assert.equal(l.meta.result, "unsigned");
+      const bad = await runCovered("report", c, signedFor(c, {}, (x) => ({ ...x, headers: { ...x.headers, "x-svc-sig": "A".repeat(43) } })));
+      assert.equal(bad.nexted, true, `${c[0]}/${c[1]} invalid stays report`);
+    }
+  });
+});
+
+test("per-operation enforce: an unsigned USER-path command (CRM token, no x-internal-request) still reaches the existing chain", async () => {
+  await withEnforceOps(EVENTS_ONLY.join(","), async () => {
+    for (const op of ["manual_record", "manual_post", "manual_void"]) {
+      const c = coveredFor(op);
+      const r = await runCovered("report", c, unsignedReq(c[4], c[5], { authorization: "Bearer x" }));
+      assert.equal(r.nexted, true, op);
+      assert.equal(r.log.lines[0].meta.mode, "enforce");
+      assert.equal(r.log.lines[0].meta.internalPath, false);
+    }
+    // intent create with a user token is outside the signed scope (registrationIntentAuthority governs it).
+    const i = await runCovered("report", coveredFor("intent_registration"), unsignedReq(COVERED[7][4], COVERED[7][5], { authorization: "Bearer x" }));
+    assert.equal(i.nexted, true);
+    assert.equal(i.log.lines.length, 0);
+  });
+});
