@@ -96,6 +96,8 @@ const PORTAL_A = bearer({ userType: "PORTAL", id: "member-a" });
 const PORTAL_B = bearer({ userType: "PORTAL", id: "member-b" });
 const PORTAL_C = bearer({ tenantId: TC, userType: "PORTAL", id: "member-c" });
 const CRM = bearer({ userType: "CRM", id: "staff-1" });
+// P6: attach-registration CRM branch needs the exact events:write business permission.
+const CRM_EVENTS_WRITE = `Bearer ${jwt.sign({ id: "staff-2", sub: "staff-2", tenantId: TA, userType: "CRM", roles: ["MO"], permissions: ["events:write"] }, SECRET, { expiresIn: "1h" })}`;
 
 async function call(method, url, { auth, headers = {}, body } = {}) {
   const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); }); // explicit IPv4 loopback: matches the 127.0.0.1 fetch target
@@ -272,11 +274,19 @@ test("A6 concurrent attaches of one intent to two registrations -> exactly one w
 test("A3/A9/A10 other payer, other tenant, CRM on a member's intent -> 403, nothing written", { skip }, async () => {
   const d = await createPortalIntent();
   const reg = oid(0xa3);
-  for (const auth of [PORTAL_B, PORTAL_C, CRM]) {
+  for (const auth of [PORTAL_B, PORTAL_C]) {
     const r = await call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth, body: attachBody(reg) });
     assert.equal(r.status, 403, `${r.status} ${r.code}`);
     assert.equal(r.code, "NOT_OWNER");
   }
+  // P6: a CRM user without events:write is refused at the route guard ...
+  const crm = await call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth: CRM, body: attachBody(reg) });
+  assert.equal(crm.status, 403, `${crm.status} ${crm.code}`);
+  assert.equal(crm.code, "EVENTS_WRITE_REQUIRED");
+  // ... and WITH events:write the existing object check still refuses a member's intent (unchanged)
+  const crmEv = await call("POST", `/api/payments/intents/${d.paymentIntentId}/attach-registration`, { auth: CRM_EVENTS_WRITE, body: attachBody(reg) });
+  assert.equal(crmEv.status, 403, `${crmEv.status} ${crmEv.code}`);
+  assert.equal(crmEv.code, "NOT_OWNER");
   assert.equal((await row(d.paymentIntentId)).registrationId, undefined);
   // by-stripe: owner only (CRM reads tenant-wide; other tenant cannot see it)
   assert.equal((await call("GET", `/api/payments/by-stripe/${d.paymentIntentId}`, { auth: PORTAL_A })).status, 200);

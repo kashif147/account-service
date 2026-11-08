@@ -222,19 +222,19 @@ test("C07-5 portal JWT cannot read reminder eligibility (bulk + single): 403", a
   });
 });
 
-test("C07-6 CRM user with accounts.reports:read and internal worker both pass the eligibility guard", async () => {
+test("C07-6 (P6) eligibility is internal-only: the internal worker passes; a CRM accounts.reports:read user -> 403 INTERNAL_ONLY", async () => {
   const reportsReader = bearer({ tenantId: TENANT_A, roles: ["MO"], permissions: ["accounts.reports:read"] });
   await withServer(async (base) => {
     const user = await post(base, "/api/internal/members/reminder-eligibility-bulk", {
       headers: { authorization: reportsReader },
       body: { memberIds: [] },
     });
-    assert.equal(user.status, 400); // controller validation, guard passed
+    assert.equal(user.status, 403);
     const worker = await post(base, "/api/internal/members/reminder-eligibility-bulk", {
       headers: { "x-internal-request": "true", "x-tenant-id": TENANT_A },
       body: { memberIds: [] },
     });
-    assert.equal(worker.status, 400);
+    assert.equal(worker.status, 400); // controller validation, guard passed
   });
 });
 

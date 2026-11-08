@@ -1,4 +1,5 @@
 import express from "express";
+import { requireAttachRegistrationAuthority } from "../middlewares/attachRegistrationAuthority.middleware.js";
 import { createServiceAuthVerifier, createIntentRegistrationServiceAuth } from "../middlewares/serviceAuth.middleware.js";
 import { requireRegistrationIntentAuthority } from "../middlewares/registrationIntentAuthority.middleware.js";
 import { forwardedInternalContext } from "../middlewares/context.js";
@@ -151,7 +152,7 @@ router.post(
 // attachRegistrationToPaymentIntent in payments.service.js.
 router.post(
   "/intents/:paymentIntentId/attach-registration",
-  requireInternalOrCrmOrIntentOwner,
+  requireAttachRegistrationAuthority, // P6: CRM needs exact events:write; portal owner / internal unchanged
   idempotency(),
   attachRegistrationToExistingIntent
 );
