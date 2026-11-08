@@ -388,8 +388,9 @@ test("batch / associate-member / refunds list / application latest: portal denie
     assert.equal((await call(m, url, { auth: PORTAL_A1, body })).status, 403, `portal ${url}`);
     assert.equal((await call(m, url, { auth: UNKNOWN_TYPE, body })).status, 403, `unknown ${url}`);
   }
-  // CRM subscription grid aggregation / internal worker
-  passed(await call("POST", "/api/payments/batch", { auth: CRM_MO, body: { memberIds: ["M-A2"] } }), "CRM batch");
+  // CRM subscription grid aggregation / internal worker. P6: a CRM user needs a finance-data read claim.
+  assert.equal((await call("POST", "/api/payments/batch", { auth: CRM_MO, body: { memberIds: ["M-A2"] } })).status, 403, "CRM without finance read");
+  passed(await call("POST", "/api/payments/batch", { auth: CRM_FIN_READ, body: { memberIds: ["M-A2"] } }), "CRM batch (payments:read)");
   passed(await call("POST", "/api/payments/batch", { headers: INTERNAL, body: { memberIds: ["M-A2"] } }), "internal batch");
   // refunds list: finance claim required
   assert.equal((await call("GET", "/api/payments/refunds", { auth: CRM_REPORTS })).status, 403);
@@ -650,4 +651,72 @@ test("P6 attach-registration: portal owner still passes the guard; portal non-ow
     assert.ok(!(internal.status === 403 || internal.status === 401), `internal got ${internal.status} ${internal.code}`);
     assert.equal((await call("POST", "/api/payments/intents/pi_a1/attach-registration", { auth: UNKNOWN_TYPE, body: { registrationId: "r1" } })).code, "CRM_ONLY");
   });
+});
+
+// ================================================================ P6 class C (account)
+const CC_ASU = bearer({ userType: "CRM", id: "staff-asu2", roles: ["ASU"], permissions: ["*"] });
+const CC_APP_READ = bearer({ userType: "CRM", id: "staff-app", roles: ["MO"], permissions: ["application:read"] });
+const CC_ADMIN_READ = bearer({ userType: "CRM", id: "staff-adm", roles: ["AA"], permissions: ["accounts.admin:read"] });
+const CC_IRO = bearer({ userType: "CRM", id: "staff-iro2", roles: ["IRO"], permissions: ["accounts.reports:read"] });
+const CC_PORTAL_FIN = bearer({ userType: "PORTAL", id: "member-a1", roles: ["AM"], permissions: ["payments:read", "payments:write", "application:read"] });
+const CC_AM_PORTALISH = bearer({ userType: "PORTAL", id: "member-a1", roles: ["AM"], permissions: ["payments:write"] });
+
+test("P6 /payments/batch: internal and CRM finance-data read (payments:read / accounts.admin:read / *) pass; CRM without it, IRO (accounts.reports:read), PORTAL, unknown type refused", async () => {
+  const body = { memberIds: ["M-A2"] };
+  for (const [opts, label] of [[{ headers: INTERNAL }, "internal"], [{ auth: CRM_FIN_READ }, "payments:read"], [{ auth: CC_ADMIN_READ }, "accounts.admin:read"], [{ auth: CC_ASU }, "ASU *"]]) passed(await call("POST", "/api/payments/batch", { ...opts, body }), label);
+  for (const [auth, label] of [[CRM_EMPTY, "CRM empty"], [CRM_MO, "CRM profiles:read"], [CC_IRO, "IRO"], [CC_PORTAL_FIN, "PORTAL with finance claims"], [UNKNOWN_TYPE, "unknown type"]])
+    assert.equal((await call("POST", "/api/payments/batch", { auth, body })).status, 403, label);
+});
+
+test("P6 /payments/batch: the response is projected to PAYMENT_BATCH_FIELDS (no Stripe ids, payer, metadata or audit)", async () => {
+  const { PAYMENT_BATCH_FIELDS } = await import("../services/payments.service.js");
+  assert.deepEqual([...PAYMENT_BATCH_FIELDS].sort(), ["_id", "amount", "createdAt", "currency", "memberId", "purpose", "status"]);
+  const full = { _id: "p1", tenantId: TENANT_A, memberId: "M-A2", purpose: "subscriptionFee", amount: 4500, currency: "eur", status: "succeeded", createdAt: "2026-11-01T00:00:00.000Z",
+    stripe: { paymentIntentId: "pi_secretish", customerId: "cus_x" }, payer: { userId: "member-a2", email: "a2@example.test" }, metadata: { k: "v" }, audit: { createdBy: "x" }, applicationId: "app-9" };
+  const orig = Payment.find;
+  let selected = null;
+  Payment.find = () => {
+    const chain = { select: (f) => { selected = f; return chain; }, sort: () => chain, lean: async () => {
+      const keep = String(selected || "").split(/\s+/).filter(Boolean);
+      return [Object.fromEntries(Object.entries(full).filter(([k]) => keep.length === 0 || keep.includes(k)))];
+    } };
+    return chain;
+  };
+  try {
+    const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); });
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/api/payments/batch`, { method: "POST", headers: { "content-type": "application/json", ...INTERNAL }, body: JSON.stringify({ memberIds: ["M-A2"] }) });
+      const j = await r.json();
+      const row = (j.data || [])[0];
+      assert.equal(r.status, 200);
+      assert.deepEqual(Object.keys(row).sort(), ["_id", "amount", "createdAt", "currency", "memberId", "purpose", "status"]);
+      assert.equal(String(selected), PAYMENT_BATCH_FIELDS.join(" "));
+    } finally { await new Promise((r) => server.close(r)); }
+  } finally { Payment.find = orig; }
+});
+
+test("P6 /payments/applications/:id/latest: internal passes (no PDP); CRM needs application:read (PDP); CRM without it, PORTAL, unknown type refused", async () => {
+  const url = "/api/payments/applications/app-1/latest";
+  const before = pdpCalls.length;
+  passed(await call("GET", url, { headers: INTERNAL }), "internal");
+  assert.equal(pdpCalls.length, before, "internal call must not consult the PDP");
+  passed(await call("GET", url, { auth: CC_APP_READ }), "CRM application:read");
+  // ASU: the real PDP permits it by its own-tenant admin rule (user-service tests); this fake PDP only
+  // matches exact resource:action claims, so ASU is not asserted here.
+  assert.ok(pdpCalls.slice(before).includes("application:read"), "CRM path asks the PDP for application:read");
+  for (const [auth, label] of [[CRM_EMPTY, "CRM empty"], [CRM_FIN_READ, "CRM payments:read only"], [PORTAL_A1, "PORTAL"], [UNKNOWN_TYPE, "unknown type"]])
+    assert.equal((await call("GET", url, { auth })).status, 403, label);
+});
+
+test("P6 POST /payments/refunds: CRM finance write passes the guard; PORTAL / unknown type refused CRM_ONLY even with finance role + payments:write; CRM without finance write refused", async () => {
+  const body = { paymentId: "p-none", amount: 100, reason: "test" };
+  for (const [auth, label] of [[CC_AM_PORTALISH, "PORTAL with AM + payments:write"], [UNKNOWN_TYPE, "unknown type"]]) {
+    const r = await call("POST", "/api/payments/refunds", { auth, body });
+    assert.equal(r.status, 403, label);
+    assert.equal(r.code, "CRM_ONLY", label);
+  }
+  assert.equal((await call("POST", "/api/payments/refunds", { auth: CRM_FIN_READ, body })).status, 403, "CRM finance read only");
+  const ok = await call("POST", "/api/payments/refunds", { auth: CRM_FIN_WRITE, body });
+  assert.ok(ok.status !== 401 && !(ok.status === 403 && ["CRM_ONLY", "FORBIDDEN"].includes(ok.code)), `AM finance write got ${ok.status} ${ok.code}`);
+  assert.equal((await call("POST", "/api/payments/refunds", { headers: INTERNAL, body })).status === 200, false, "no internal branch on refunds");
 });

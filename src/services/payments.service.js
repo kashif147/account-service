@@ -4222,6 +4222,14 @@ export async function listRefunds(ctx, options) {
  * @param {Object} options - { status?, purpose? }
  * @returns {Promise<Object[]>} payments (lean)
  */
+/**
+ * P6: POST /payments/batch returns ONLY the fields its sole consumer reads (subscription-service
+ * helpers/serviceClient.js buildPaymentMap + calculateFinancialDetails: _id for de-duplication, memberId,
+ * purpose, amount, createdAt; status/currency for display). Never Stripe ids, payer, card/bank details,
+ * metadata or audit fields.
+ */
+export const PAYMENT_BATCH_FIELDS = Object.freeze(["_id", "memberId", "purpose", "amount", "currency", "status", "createdAt"]);
+
 export async function listByMemberIds(memberIds, ctx, options = {}) {
   requireTenantId(ctx); // fail closed: trusted tenant (req.ctx) required, never a global query
   if (!memberIds || memberIds.length === 0) return [];
@@ -4231,7 +4239,7 @@ export async function listByMemberIds(memberIds, ctx, options = {}) {
   };
   if (options.status) query.status = options.status;
   if (options.purpose) query.purpose = options.purpose;
-  const payments = await Payment.find(query).sort({ createdAt: -1 }).lean();
+  const payments = await Payment.find(query).select(PAYMENT_BATCH_FIELDS.join(" ")).sort({ createdAt: -1 }).lean();
   return payments;
 }
 
