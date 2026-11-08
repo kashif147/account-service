@@ -110,6 +110,11 @@ const PORTAL_A1_BARE = bearer({ userType: "PORTAL", id: "member-a1", roles: ["NO
 const PORTAL_C1 = bearer({ tenantId: TENANT_C, userType: "PORTAL", id: "member-c1", roles: ["MEMBER"], permissions: ["accounts.reports:read"] });
 const CRM_EMPTY = bearer({ userType: "CRM", id: "staff-empty" });
 const CRM_REPORTS = bearer({ userType: "CRM", id: "staff-rep", roles: ["MO"], permissions: ["accounts.reports:read"] });
+// P5: the report routes ask for the code that names what they return (see routes/reports.routes.js).
+const CRM_FIN_REPORTS = bearer({ userType: "CRM", id: "staff-finrep", roles: ["AM"], permissions: ["reporting.finance:read"] });
+const CRM_MEMBER_ACCT = bearer({ userType: "CRM", id: "staff-memacct", roles: ["MO"], permissions: ["accounts.member:read"] });
+const PORTAL_A1_SUCCESSOR = bearer({ userType: "PORTAL", id: "member-a1", roles: ["MEMBER"], permissions: ["accounts.member:read"] });
+const PORTAL_C1_OWN = bearer({ tenantId: TENANT_C, userType: "PORTAL", id: "member-c1", roles: ["MEMBER"], permissions: ["accounts.reports:read"] });
 const CRM_FIN_READ = bearer({ userType: "CRM", id: "staff-fin", roles: ["AA"], permissions: ["payments:read", "accounts.reports:read", "accounts.journals:read"] });
 const CRM_FIN_WRITE = bearer({ userType: "CRM", id: "staff-am", roles: ["AM"], permissions: ["payments:read", "payments:write"] });
 const CRM_MO = bearer({ userType: "CRM", id: "staff-mo", roles: ["MO"], permissions: ["profiles:read"] });
@@ -236,10 +241,25 @@ test("reports: portal member (accounts.reports:read) denied CRM_ONLY on GL / cre
   }
 });
 
-test("reports: CRM + accounts.reports:read passes; CRM without it denied by the PDP", async () => {
-  for (const [m, url] of STAFF_ONLY_REPORTS) {
-    passed(await call(m, url, { auth: CRM_REPORTS }), `CRM reports ${url}`);
-    assert.equal((await call(m, url, { auth: CRM_MO })).status, 403, `CRM MO ${url}`);
+const TENANT_WIDE_REPORTS = STAFF_ONLY_REPORTS.filter(([, u]) => !u.includes("/member/") && !u.includes("/members/"));
+const MEMBER_CRM_REPORTS = STAFF_ONLY_REPORTS.filter(([, u]) => u.includes("/member/") || u.includes("/members/"));
+
+test("P5 report codes: 6 tenant-wide + 5 CRM member-scoped (+ statement / net-balance) = the 13 retired accounts.reports:read routes", () => {
+  assert.equal(TENANT_WIDE_REPORTS.length, 6);
+  assert.equal(MEMBER_CRM_REPORTS.length, 5);
+});
+
+test("P5 tenant-wide finance reports: CRM + reporting.finance:read passes; accounts.reports:read / accounts.member:read / none denied by the PDP", async () => {
+  for (const [m, url] of TENANT_WIDE_REPORTS) {
+    passed(await call(m, url, { auth: CRM_FIN_REPORTS }), `CRM finance reports ${url}`);
+    for (const auth of [CRM_REPORTS, CRM_MEMBER_ACCT, CRM_MO]) assert.equal((await call(m, url, { auth })).status, 403, `${url}`);
+  }
+});
+
+test("P5 CRM member-scoped reports: CRM + accounts.member:read passes; accounts.reports:read / reporting.finance:read / none denied", async () => {
+  for (const [m, url] of MEMBER_CRM_REPORTS) {
+    passed(await call(m, url, { auth: CRM_MEMBER_ACCT }), `CRM member account ${url}`);
+    for (const auth of [CRM_REPORTS, CRM_FIN_REPORTS, CRM_MO]) assert.equal((await call(m, url, { auth })).status, 403, `${url}`);
   }
 });
 
@@ -257,14 +277,50 @@ test("member statement / net-balance: A on own allowed; A on B same tenant and A
   }
 });
 
-test("member statement: CRM + accounts.reports:read passes for any member; CRM without permission denied; unknown type denied", async () => {
-  passed(await call("GET", "/api/reports/member/M-A2/statement", { auth: CRM_REPORTS }), "CRM statement");
-  assert.equal((await call("GET", "/api/reports/member/M-A2/statement", { auth: CRM_MO })).status, 403);
-  assert.equal((await call("GET", "/api/reports/member/M-A1/statement", { auth: UNKNOWN_TYPE })).status, 403);
+test("member statement / net-balance (P5): CRM + accounts.member:read passes for any member; accounts.reports:read or nothing denied; unknown type CRM_ONLY", async () => {
+  for (const kind of ["statement", "net-balance"]) {
+    passed(await call("GET", `/api/reports/member/M-A2/${kind}`, { auth: CRM_MEMBER_ACCT }), `CRM ${kind}`);
+    assert.equal((await call("GET", `/api/reports/member/M-A2/${kind}`, { auth: CRM_REPORTS })).status, 403);
+    assert.equal((await call("GET", `/api/reports/member/M-A2/${kind}`, { auth: CRM_MO })).status, 403);
+    const u = await call("GET", `/api/reports/member/M-A1/${kind}`, { auth: UNKNOWN_TYPE });
+    assert.equal(u.status, 403);
+    assert.equal(u.code, "CRM_ONLY");
+  }
 });
 
-test("member statement: portal own-statement still needs the PDP permission (owner without accounts.reports:read denied)", async () => {
-  assert.equal((await call("GET", "/api/reports/member/M-A1/statement", { auth: PORTAL_A1_BARE })).status, 403);
+test("member statement / net-balance (P5 option b): the PORTAL branch never calls the PDP - own record + existing claim, checked locally", async () => {
+  for (const kind of ["statement", "net-balance"]) {
+    const before = pdpCalls.length;
+    passed(await call("GET", `/api/reports/member/M-A1/${kind}`, { auth: PORTAL_A1 }), `own ${kind} (accounts.reports:read)`);
+    passed(await call("GET", `/api/reports/member/M-A1/${kind}`, { auth: PORTAL_A1_SUCCESSOR }), `own ${kind} (accounts.member:read)`);
+    passed(await call("GET", `/api/reports/member/M-C1/${kind}`, { auth: PORTAL_C1_OWN }), `tenant C member own ${kind}`);
+    assert.equal(pdpCalls.length, before, `${kind}: portal requests must not reach the PDP`);
+  }
+});
+
+test("member statement / net-balance (P5 option b): claim missing -> 403 MEMBER_ACCOUNT_PERMISSION_REQUIRED (own record)", async () => {
+  for (const kind of ["statement", "net-balance"]) {
+    const r = await call("GET", `/api/reports/member/M-A1/${kind}`, { auth: PORTAL_A1_BARE });
+    assert.equal(r.status, 403);
+    assert.equal(r.code, "MEMBER_ACCOUNT_PERMISSION_REQUIRED");
+  }
+});
+
+test("member statement / net-balance (P5 option b): ownership is checked first - cross-member and cross-tenant NOT_OWNER, with or without the claim", async () => {
+  for (const kind of ["statement", "net-balance"]) {
+    for (const [auth, target, label] of [
+      [PORTAL_A1, "M-A2", "A1 -> A2 same tenant"],
+      [PORTAL_A1_SUCCESSOR, "M-A2", "A1 (successor claim) -> A2"],
+      [PORTAL_A1_BARE, "M-A2", "A1 (no claim) -> A2"],
+      [PORTAL_A1, "M-C1", "A1 -> C1 other tenant"],
+      [PORTAL_C1_OWN, "M-A1", "C1 -> A1 other tenant"],
+      [PORTAL_A1, "pc1000000000000000000001", "A1 -> C1 profileId"],
+    ]) {
+      const r = await call("GET", `/api/reports/member/${target}/${kind}`, { auth });
+      assert.equal(r.status, 403, `${kind} ${label}`);
+      assert.equal(r.code, "NOT_OWNER", `${kind} ${label}`);
+    }
+  }
 });
 
 // ---------------- payments ----------------

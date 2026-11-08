@@ -33,6 +33,7 @@ import {
   requireCrmUser,
   requireCrmOrOwnMember,
 } from "../middlewares/callerScope.middleware.js";
+import { createRequireMemberAccountRead } from "../middlewares/memberAccountRead.middleware.js";
 
 const router = express.Router();
 
@@ -41,11 +42,30 @@ const router = express.Router();
 // staff only (requireCrmUser, then the PDP), except a member's own statement / net balance,
 // which the portal reads for the signed-in member (requireCrmOrOwnMember resolves the
 // caller's own membership number from the verified principal).
+//
+// PDP rollout P5 (blockers 1 and 2): accounts.reports:read is retired on these 13 read routes -
+// it becomes a CRM-audience code at P5 (portal statement would break) and is held by MO / IRO
+// outside their P8 targets (tenant-wide finance would open to them). Each route now asks for the
+// code that names what it returns:
+//   tenant-wide finance  (refunds, general-ledger, creditors-list, gl-journal-replication,
+//                         balances/snapshot, balances/as-of)            -> reporting.finance:read (CRM)
+//   one member's account, CRM (member summary, ledger, credit-notes, ledger-actions,
+//                         members/summary-batch)                        -> accounts.member:read (BOTH)
+//   one member's account, CRM or the member themselves (statement, net-balance)
+//                                       -> requireCrmOrOwnMember, then requireMemberAccountRead:
+//                                          CRM -> PDP accounts.member:read; PORTAL -> own record +
+//                                          the existing claim, checked locally (no PDP; option b).
+// Under the legacy evaluator every code here is denied to non-ASU CRM staff by the category rule,
+// exactly as accounts.reports:read is today, so ASU keeps every route and nobody loses access now.
+const requireTenantFinanceReportRead = defaultPolicyMiddleware.requirePermission("reporting.finance", "read");
+const requireMemberAccountReadCrm = defaultPolicyMiddleware.requirePermission("accounts.member", "read");
+const requireMemberAccountRead = createRequireMemberAccountRead({ crmCheck: requireMemberAccountReadCrm });
+
 router.get(
   "/refunds",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireTenantFinanceReportRead,
   refundsListRules,
   validate,
   refundsList
@@ -55,7 +75,7 @@ router.get(
   "/general-ledger",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireTenantFinanceReportRead,
   generalLedgerRules,
   validate,
   generalLedgerTransactions
@@ -65,7 +85,7 @@ router.get(
   "/member/:memberId/statement",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmOrOwnMember,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireMemberAccountRead,
   memberStatement
 );
 
@@ -73,7 +93,7 @@ router.get(
   "/member/:memberId/net-balance",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmOrOwnMember,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireMemberAccountRead,
   memberNetBalanceRules,
   validate,
   memberNetBalance
@@ -83,7 +103,7 @@ router.get(
   "/member/:memberId/summary",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireMemberAccountReadCrm,
   memberNetBalanceRules,
   validate,
   memberSummary
@@ -93,7 +113,7 @@ router.post(
   "/members/summary-batch",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireMemberAccountReadCrm,
   memberSummaryBatch
 );
 
@@ -101,7 +121,7 @@ router.post(
   "/creditors-list",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireTenantFinanceReportRead,
   creditorsList
 );
 
@@ -109,7 +129,7 @@ router.post(
   "/gl-journal-replication",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireTenantFinanceReportRead,
   glJournalReplicationFeed
 );
 
@@ -117,7 +137,7 @@ router.get(
   "/member/:memberId/ledger",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireMemberAccountReadCrm,
   memberLedgerRules,
   validate,
   memberLedger
@@ -127,7 +147,7 @@ router.get(
   "/member/:memberId/credit-notes",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireMemberAccountReadCrm,
   memberCreditNotesRules,
   validate,
   memberCreditNotes
@@ -137,7 +157,7 @@ router.get(
   "/member/:memberId/ledger-actions",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireMemberAccountReadCrm,
   memberLedgerActions,
 );
 
@@ -146,7 +166,7 @@ router.get(
   "/balances/snapshot",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireTenantFinanceReportRead,
   balancesSnapshot
 );
 
@@ -155,7 +175,7 @@ router.get(
   "/balances/as-of",
   ...ensureAuthenticatedWithTenantContext,
   requireCrmUser,
-  defaultPolicyMiddleware.requirePermission("accounts.reports", "read"),
+  requireTenantFinanceReportRead,
   balancesAsOfRules,
   validate,
   balancesAsOf
