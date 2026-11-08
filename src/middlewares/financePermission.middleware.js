@@ -66,6 +66,16 @@ export function requireFinanceRead(req, res, next) {
   );
 }
 
+/**
+ * CRM staff only (verified userType "CRM"), before any finance permission check. PDP P3: mounted on the whole
+ * direct-debit run router, so a PORTAL member or a token with a missing / unknown userType is refused on the
+ * write routes too (requireFinanceWrite itself checks role + permission only, not the caller type).
+ */
+export function requireCrmStaff(req, res, next) {
+  if (callerUserType(req) === "CRM") return next();
+  return next(new AppError("Restricted to CRM staff", 403, "CRM_ONLY"));
+}
+
 /** Finance back-office write (seed, match, approve adjustments). */
 export function requireFinanceWrite(req, res, next) {
   if (canFinanceWrite(req)) return next();
