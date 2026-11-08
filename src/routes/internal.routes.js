@@ -2,10 +2,8 @@ import express from "express";
 import { forwardedInternalContext } from "../middlewares/context.js";
 import { ensureAuthenticated } from "../middlewares/auth.js";
 import { AppError } from "../errors/AppError.js";
-import {
-  requireInternalOrFinanceRead,
-  requireInternalOrFinanceWrite,
-} from "../middlewares/financePermission.middleware.js";
+import { requireInternalOrFinanceWrite } from "../middlewares/financePermission.middleware.js";
+import { requireInternalOnly } from "../middlewares/callerScope.middleware.js";
 import {
   internalWriteOff,
   reminderEligibility,
@@ -26,24 +24,26 @@ function internalAuth(req, res, next) {
 
 router.use(internalAuth);
 
-// Callers: subscription-service (reminder batch build/clear, year-end renewal and
-// reinstatement write-offs) via x-internal-request worker requests, or with a forwarded CRM
-// user identity. A user JWT never inherits the internal grant: user calls need finance
-// read (eligibility snapshots) or finance write (write-off journal posting).
+// P6: the eligibility snapshots and payment-link diagnostics are INTERNAL-ONLY. Their only working caller
+// is subscription-service (helpers/serviceClient.js fetchReminderEligibilityBulk, buildInternalServiceHeaders:
+// x-internal-request + trusted tenant, never a user identity). No UI or user-token caller exists; the former
+// user path admitted accounts.reports:read (IRO, no finance role). A user JWT - with or without a spoofed
+// x-internal-request - is judged as that user (internalAuth) and refused here.
 router.get(
   "/members/:memberId/reminder-eligibility",
-  requireInternalOrFinanceRead,
+  requireInternalOnly,
   reminderEligibility
 );
 router.post(
   "/members/reminder-eligibility-bulk",
-  requireInternalOrFinanceRead,
+  requireInternalOnly,
   reminderEligibilityBulk
 );
+// Write-off journal posting (subscription-service workers; unchanged): internal, or a user with finance write.
 router.post("/members/writeoff", requireInternalOrFinanceWrite, internalWriteOff);
 
-// Payment-link diagnostics: the trusted tenant (req.ctx) only, never a query/body tenant.
-router.get("/payment-links", requireInternalOrFinanceRead, async (req, res, next) => {
+// Payment-link diagnostics (internal-only, P6): the trusted tenant (req.ctx) only, never a query/body tenant.
+router.get("/payment-links", requireInternalOnly, async (req, res, next) => {
   try {
     const tenantId = req.ctx?.tenantId;
     if (!tenantId) return res.appError(AppError.unauthorized("Tenant context required"));

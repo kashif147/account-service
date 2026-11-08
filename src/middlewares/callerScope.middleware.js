@@ -50,6 +50,16 @@ export function requireCrmUser(req, res, next) {
 }
 
 /** Genuine internal S2S call, or CRM staff. PORTAL / unknown denied. */
+/**
+ * P6: genuine service-to-service calls ONLY (x-internal-request with NO user JWT / gateway identity:
+ * internalAuth -> forwardedInternalContext sets ctx.internalRequest; ensureAuthenticated never does). A user
+ * token - CRM, PORTAL, ASU, or a user token that also carries x-internal-request - is refused.
+ */
+export function requireInternalOnly(req, res, next) {
+  if (isTrustedInternalCall(req)) return next();
+  return next(new AppError("This endpoint is restricted to internal service calls", 403, "INTERNAL_ONLY"));
+}
+
 export function requireInternalOrCrm(req, res, next) {
   if (isTrustedInternalCall(req) || isCrmCaller(req)) return next();
   return next(crmOnly());

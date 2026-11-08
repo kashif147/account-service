@@ -570,3 +570,84 @@ test("journal reads: CRM + accounts.journals:read passes authz; CRM without it d
     assert.equal((await call("GET", url, { auth: CRM_MO })).status, 403, `CRM MO ${url}`);
   }
 });
+
+// ================================================================ P6
+// Internal-only reads: reminder-eligibility (GET + bulk POST) and payment-links diagnostics.
+const P6_ASU = bearer({ userType: "CRM", id: "staff-asu", roles: ["ASU"], permissions: ["*"] });
+const P6_IRO = bearer({ userType: "CRM", id: "staff-iro", roles: ["IRO"], permissions: ["accounts.reports:read", "issues-ir:read"] });
+const P6_CRM_EVENTS_WRITE = bearer({ userType: "CRM", id: "staff-ev", roles: ["MO"], permissions: ["events:write"] });
+const P6_CRM_EVENTS_READ = bearer({ userType: "CRM", id: "staff-evr", roles: ["MO"], permissions: ["events:read", "payments:read"] });
+const P6_INTERNAL_ONLY_ROUTES = [
+  ["GET", "/api/internal/members/M-A1/reminder-eligibility"],
+  ["POST", "/api/internal/members/reminder-eligibility-bulk", { memberIds: ["M-A1"] }],
+  ["GET", "/api/internal/payment-links?applicationId=app-1"],
+];
+
+test("P6 internal-only reads: a genuine internal call (x-internal-request, no user identity) passes authz", async () => {
+  for (const [m, url, body] of P6_INTERNAL_ONLY_ROUTES) passed(await call(m, url, { headers: INTERNAL, body }), `internal ${url}`);
+});
+
+test("P6 internal-only reads: every user token is refused INTERNAL_ONLY - finance read, ASU *, IRO (accounts.reports:read), portal, unknown type", async () => {
+  for (const [m, url, body] of P6_INTERNAL_ONLY_ROUTES) {
+    for (const [auth, label] of [[CRM_FIN_READ, "CRM payments:read"], [P6_ASU, "ASU *"], [P6_IRO, "IRO accounts.reports:read"], [PORTAL_A1, "portal"], [UNKNOWN_TYPE, "unknown type"]]) {
+      const r = await call(m, url, { auth, body });
+      assert.equal(r.status, 403, `${label} ${url}`);
+      assert.equal(r.code, "INTERNAL_ONLY", `${label} ${url}`);
+    }
+  }
+});
+
+test("P6 internal-only reads: a forwarded user identity or a spoofed x-internal-request never grants internal access", async () => {
+  for (const [m, url, body] of P6_INTERNAL_ONLY_ROUTES) {
+    // user JWT + spoofed internal header -> judged as the user (internalAuth), refused
+    const spoofBearer = await call(m, url, { auth: P6_ASU, headers: { "x-internal-request": "true", "x-tenant-id": TENANT_A }, body });
+    assert.equal(spoofBearer.status, 403, `bearer+spoof ${url}`);
+    assert.equal(spoofBearer.code, "INTERNAL_ONLY");
+    // gateway-style forwarded identity headers + spoofed internal header -> user path, refused (never internal)
+    const fwd = await call(m, url, {
+      headers: { "x-internal-request": "true", "x-tenant-id": TENANT_A, "x-jwt-verified": "true", "x-auth-source": "gateway", "x-user-id": "staff-asu", "x-user-type": "CRM", "x-user-permissions": JSON.stringify(["*"]), "x-user-roles": JSON.stringify(["ASU"]) },
+      body,
+    });
+    assert.ok(fwd.status === 401 || fwd.status === 403, `forwarded identity ${url}: got ${fwd.status}`);
+    // no identity and no internal header -> 401
+    assert.equal((await call(m, url, { body })).status, 401, `anonymous ${url}`);
+  }
+});
+
+test("P6 internal write-off is unchanged: internal passes; CRM finance write (AM + payments:write) passes; IRO refused", async () => {
+  const url = "/api/internal/members/writeoff";
+  passed(await call("POST", url, { headers: INTERNAL, body: {} }), "internal writeoff");
+  passed(await call("POST", url, { auth: CRM_FIN_WRITE, body: {} }), "AM writeoff");
+  assert.equal((await call("POST", url, { auth: P6_IRO, body: {} })).status, 403);
+});
+
+// attach-registration: CRM needs exact events:write; portal owner / internal unchanged.
+test("P6 attach-registration: CRM without events:write -> 403 EVENTS_WRITE_REQUIRED; CRM events:write and ASU * pass the guard", async () => {
+  await withPayments(async () => {
+    const url = "/api/payments/intents/pi_a1/attach-registration";
+    for (const auth of [CRM_EMPTY, P6_CRM_EVENTS_READ, CRM_FIN_WRITE, P6_IRO]) {
+      const r = await call("POST", url, { auth, body: { registrationId: "r1" } });
+      assert.equal(r.status, 403);
+      assert.equal(r.code, "EVENTS_WRITE_REQUIRED");
+    }
+    for (const auth of [P6_CRM_EVENTS_WRITE, P6_ASU]) {
+      const r = await call("POST", url, { auth, body: { registrationId: "r1" } });
+      assert.ok(!(r.status === 403 && (r.code === "EVENTS_WRITE_REQUIRED" || r.code === "CRM_ONLY" || r.code === "NOT_OWNER")), `allowed caller got ${r.status} ${r.code}`);
+      assert.ok(r.status !== 401);
+    }
+  });
+});
+
+test("P6 attach-registration: portal owner still passes the guard; portal non-owner and other tenant -> NOT_OWNER; internal passes; unknown type CRM_ONLY", async () => {
+  await withPayments(async () => {
+    const own = await call("POST", "/api/payments/intents/pi_a1/attach-registration", { auth: PORTAL_A1, body: { registrationId: "r1" } });
+    assert.ok(!(own.status === 403 && ["NOT_OWNER", "CRM_ONLY", "EVENTS_WRITE_REQUIRED"].includes(own.code)) && own.status !== 401, `owner got ${own.status} ${own.code}`);
+    const other = await call("POST", "/api/payments/intents/pi_a2/attach-registration", { auth: PORTAL_A1, body: { registrationId: "r1" } });
+    assert.equal(other.code, "NOT_OWNER");
+    const cross = await call("POST", "/api/payments/intents/pi_c1/attach-registration", { auth: PORTAL_A1, body: { registrationId: "r1" } });
+    assert.equal(cross.code, "NOT_OWNER");
+    const internal = await call("POST", "/api/payments/intents/pi_a1/attach-registration", { headers: INTERNAL, body: { registrationId: "r1" } });
+    assert.ok(!(internal.status === 403 || internal.status === 401), `internal got ${internal.status} ${internal.code}`);
+    assert.equal((await call("POST", "/api/payments/intents/pi_a1/attach-registration", { auth: UNKNOWN_TYPE, body: { registrationId: "r1" } })).code, "CRM_ONLY");
+  });
+});
