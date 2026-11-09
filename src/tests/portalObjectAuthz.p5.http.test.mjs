@@ -45,12 +45,18 @@ function decode(token) {
 
 // ---- fake PDP ----
 const pdpCalls = [];
+const pdpContexts = [];
 const pdp = http.createServer(async (req, res) => {
   const body = JSON.parse((await readBody(req)) || "{}");
   const claims = decode(body.token);
   const perm = `${body.resource}:${body.action}`;
   pdpCalls.push(perm);
-  const permit = Boolean(claims && (claims.permissions || []).includes(perm));
+  pdpContexts.push({ perm, tenantId: body.context?.tenantId ?? null });
+  // Models the real PDP order for ASU (user-service policyEvaluationService): a context tenant that differs
+  // from the token tenant is DENY TENANT_MISMATCH; otherwise ASU's own-tenant rule PERMITs.
+  const sameTenant = Boolean(claims) && String(body.context?.tenantId ?? claims.tenantId) === String(claims.tenantId);
+  const permit = Boolean(claims) && sameTenant &&
+    ((claims.permissions || []).includes(perm) || (claims.roles || []).includes("ASU"));
   res.setHeader("content-type", "application/json");
   res.end(
     JSON.stringify(
@@ -388,8 +394,9 @@ test("batch / associate-member / refunds list / application latest: portal denie
     assert.equal((await call(m, url, { auth: PORTAL_A1, body })).status, 403, `portal ${url}`);
     assert.equal((await call(m, url, { auth: UNKNOWN_TYPE, body })).status, 403, `unknown ${url}`);
   }
-  // CRM subscription grid aggregation / internal worker
-  passed(await call("POST", "/api/payments/batch", { auth: CRM_MO, body: { memberIds: ["M-A2"] } }), "CRM batch");
+  // CRM subscription grid aggregation / internal worker. P6: a CRM user needs a finance-data read claim.
+  assert.equal((await call("POST", "/api/payments/batch", { auth: CRM_MO, body: { memberIds: ["M-A2"] } })).status, 403, "CRM without finance read");
+  passed(await call("POST", "/api/payments/batch", { auth: CRM_FIN_READ, body: { memberIds: ["M-A2"] } }), "CRM batch (payments:read)");
   passed(await call("POST", "/api/payments/batch", { headers: INTERNAL, body: { memberIds: ["M-A2"] } }), "internal batch");
   // refunds list: finance claim required
   assert.equal((await call("GET", "/api/payments/refunds", { auth: CRM_REPORTS })).status, 403);
@@ -650,4 +657,124 @@ test("P6 attach-registration: portal owner still passes the guard; portal non-ow
     assert.ok(!(internal.status === 403 || internal.status === 401), `internal got ${internal.status} ${internal.code}`);
     assert.equal((await call("POST", "/api/payments/intents/pi_a1/attach-registration", { auth: UNKNOWN_TYPE, body: { registrationId: "r1" } })).code, "CRM_ONLY");
   });
+});
+
+// ================================================================ P6 class C (account)
+const CC_ASU = bearer({ userType: "CRM", id: "staff-asu2", roles: ["ASU"], permissions: ["*"] });
+const CC_APP_READ = bearer({ userType: "CRM", id: "staff-app", roles: ["MO"], permissions: ["application:read"] });
+const CC_ADMIN_READ = bearer({ userType: "CRM", id: "staff-adm", roles: ["AA"], permissions: ["accounts.admin:read"] });
+const CC_IRO = bearer({ userType: "CRM", id: "staff-iro2", roles: ["IRO"], permissions: ["accounts.reports:read"] });
+const CC_PORTAL_FIN = bearer({ userType: "PORTAL", id: "member-a1", roles: ["AM"], permissions: ["payments:read", "payments:write", "application:read"] });
+const CC_AM_PORTALISH = bearer({ userType: "PORTAL", id: "member-a1", roles: ["AM"], permissions: ["payments:write"] });
+
+test("P6 /payments/batch: internal and CRM finance-data read (payments:read / accounts.admin:read / *) pass; CRM without it, IRO (accounts.reports:read), PORTAL, unknown type refused", async () => {
+  const body = { memberIds: ["M-A2"] };
+  for (const [opts, label] of [[{ headers: INTERNAL }, "internal"], [{ auth: CRM_FIN_READ }, "payments:read"], [{ auth: CC_ADMIN_READ }, "accounts.admin:read"], [{ auth: CC_ASU }, "ASU *"]]) passed(await call("POST", "/api/payments/batch", { ...opts, body }), label);
+  for (const [auth, label] of [[CRM_EMPTY, "CRM empty"], [CRM_MO, "CRM profiles:read"], [CC_IRO, "IRO"], [CC_PORTAL_FIN, "PORTAL with finance claims"], [UNKNOWN_TYPE, "unknown type"]])
+    assert.equal((await call("POST", "/api/payments/batch", { auth, body })).status, 403, label);
+});
+
+test("P6 /payments/batch: the response is projected to PAYMENT_BATCH_FIELDS (no Stripe ids, payer, metadata or audit)", async () => {
+  const { PAYMENT_BATCH_FIELDS } = await import("../services/payments.service.js");
+  assert.deepEqual([...PAYMENT_BATCH_FIELDS].sort(), ["_id", "amount", "createdAt", "currency", "memberId", "purpose", "status"]);
+  const full = { _id: "p1", tenantId: TENANT_A, memberId: "M-A2", purpose: "subscriptionFee", amount: 4500, currency: "eur", status: "succeeded", createdAt: "2026-11-01T00:00:00.000Z",
+    stripe: { paymentIntentId: "pi_secretish", customerId: "cus_x" }, payer: { userId: "member-a2", email: "a2@example.test" }, metadata: { k: "v" }, audit: { createdBy: "x" }, applicationId: "app-9" };
+  const orig = Payment.find;
+  let selected = null;
+  Payment.find = () => {
+    const chain = { select: (f) => { selected = f; return chain; }, sort: () => chain, lean: async () => {
+      const keep = String(selected || "").split(/\s+/).filter(Boolean);
+      return [Object.fromEntries(Object.entries(full).filter(([k]) => keep.length === 0 || keep.includes(k)))];
+    } };
+    return chain;
+  };
+  try {
+    const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); });
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/api/payments/batch`, { method: "POST", headers: { "content-type": "application/json", ...INTERNAL }, body: JSON.stringify({ memberIds: ["M-A2"] }) });
+      const j = await r.json();
+      const row = (j.data || [])[0];
+      assert.equal(r.status, 200);
+      assert.deepEqual(Object.keys(row).sort(), ["_id", "amount", "createdAt", "currency", "memberId", "purpose", "status"]);
+      assert.equal(String(selected), PAYMENT_BATCH_FIELDS.join(" "));
+    } finally { await new Promise((r) => server.close(r)); }
+  } finally { Payment.find = orig; }
+});
+
+test("P6 /payments/applications/:id/latest: internal passes (no PDP); CRM needs application:read (PDP); CRM without it, PORTAL, unknown type refused", async () => {
+  const url = "/api/payments/applications/app-1/latest";
+  const before = pdpCalls.length;
+  passed(await call("GET", url, { headers: INTERNAL }), "internal");
+  assert.equal(pdpCalls.length, before, "internal call must not consult the PDP");
+  passed(await call("GET", url, { auth: CC_APP_READ }), "CRM application:read");
+  assert.ok(pdpCalls.slice(before).includes("application:read"), "CRM path asks the PDP for application:read");
+  for (const [auth, label] of [[CRM_EMPTY, "CRM empty"], [CRM_FIN_READ, "CRM payments:read only"], [PORTAL_A1, "PORTAL"], [UNKNOWN_TYPE, "unknown type"]])
+    assert.equal((await call("GET", url, { auth })).status, 403, label);
+});
+
+test("P6 POST /payments/refunds: CRM finance write passes the guard; PORTAL / unknown type refused CRM_ONLY even with finance role + payments:write; CRM without finance write refused", async () => {
+  const body = { paymentId: "p-none", amount: 100, reason: "test" };
+  for (const [auth, label] of [[CC_AM_PORTALISH, "PORTAL with AM + payments:write"], [UNKNOWN_TYPE, "unknown type"]]) {
+    const r = await call("POST", "/api/payments/refunds", { auth, body });
+    assert.equal(r.status, 403, label);
+    assert.equal(r.code, "CRM_ONLY", label);
+  }
+  assert.equal((await call("POST", "/api/payments/refunds", { auth: CRM_FIN_READ, body })).status, 403, "CRM finance read only");
+  const ok = await call("POST", "/api/payments/refunds", { auth: CRM_FIN_WRITE, body });
+  assert.ok(ok.status !== 401 && !(ok.status === 403 && ["CRM_ONLY", "FORBIDDEN"].includes(ok.code)), `AM finance write got ${ok.status} ${ok.code}`);
+  assert.equal((await call("POST", "/api/payments/refunds", { headers: INTERNAL, body })).status === 200, false, "no internal branch on refunds");
+});
+
+test("P6 /payments/applications/:id/latest: ASU passes for its own tenant; another tenant's application is never returned (trusted tenant only)", async () => {
+  const { getStripe } = await import("../lib/stripe.js");
+  const stripe = getStripe();
+  const origRetrieve = stripe.paymentIntents.retrieve;
+  stripe.paymentIntents.retrieve = async () => { throw new Error("stripe stubbed (test)"); }; // refresh is best-effort
+  const APPS = {
+    [`${TENANT_A}|app-a`]: { _id: "pay-app-a", tenantId: TENANT_A, applicationId: "app-a", mode: "stripe", status: "requires_capture", amount: 100, currency: "eur", stripe: { paymentIntentId: "pi_app_a" } },
+    [`${TENANT_C}|app-c`]: { _id: "pay-app-c", tenantId: TENANT_C, applicationId: "app-c", mode: "stripe", status: "requires_capture", amount: 100, currency: "eur", stripe: { paymentIntentId: "pi_app_c" } },
+  };
+  const queried = [];
+  const origFindOne = Payment.findOne, origFindById = Payment.findById;
+  Payment.findOne = (f = {}) => { queried.push(String(f.tenantId)); return q(APPS[`${f.tenantId}|${f.applicationId}`] || null); };
+  Payment.findById = (id) => q(Object.values(APPS).find((d) => d._id === id) || null);
+  // res.notFoundRecord answers 200 { data: null }, so assert on the body, not only the status.
+  const get = async (url, opts) => {
+    const server = await new Promise((res) => { const s = app.listen(0, "127.0.0.1", () => res(s)); });
+    try {
+      const h = { ...(opts.headers || {}), authorization: opts.auth };
+      const r = await fetch(`http://127.0.0.1:${server.address().port}${url}`, { headers: h });
+      let j = null; try { j = await r.json(); } catch {}
+      return { status: r.status, code: j?.code ?? null, id: j?.data?.id ?? null, hasData: j?.data != null };
+    } finally { await new Promise((r) => server.close(r)); }
+  };
+  const ASU_A = bearer({ userType: "CRM", id: "staff-asu-a", roles: ["ASU"], permissions: ["*"] });
+  const ASU_C = bearer({ tenantId: TENANT_C, userType: "CRM", id: "staff-asu-c", roles: ["ASU"], permissions: ["*"] });
+  try {
+    const p0 = pdpContexts.length;
+    const own = await get("/api/payments/applications/app-a/latest", { auth: ASU_A });
+    assert.equal(own.status, 200, `ASU own tenant: ${own.status} ${own.code}`);
+    assert.equal(own.id, "pay-app-a", "ASU own tenant gets its application payment");
+    // Bearer-only (no gateway headers): the middleware sends no tenant and the PDP takes it from the verified
+    // token; behind the gateway it is the token tenant. Either way never a caller-supplied one.
+    assert.deepEqual(pdpContexts.slice(p0).map((c) => c.perm), ["application:read"], "PDP asked application:read");
+    assert.ok(pdpContexts.slice(p0).every((c) => c.tenantId === null || c.tenantId === TENANT_A));
+    assert.deepEqual(queried.splice(0), [TENANT_A]);
+
+    // Same ASU naming tenant C (header + query) for C's application: tenant comes from the verified token only.
+    const p1 = pdpContexts.length;
+    const spoof = await get(`/api/payments/applications/app-c/latest?tenantId=${TENANT_C}`, { auth: ASU_A, headers: { "x-tenant-id": TENANT_C } });
+    assert.equal(spoof.hasData, false, `ASU A -> tenant C application must not return it (got ${spoof.status} ${spoof.code})`);
+    assert.equal(spoof.status, 403);
+    assert.equal(spoof.code, "TENANT_CONTEXT_MISMATCH");
+    assert.ok(pdpContexts.slice(p1).every((c) => c.tenantId !== TENANT_C), "caller-supplied tenant never reaches the PDP");
+    assert.ok(queried.splice(0).every((t) => t === TENANT_A), "lookup scoped to the token tenant");
+
+    // ASU of tenant C cannot read tenant A's application.
+    const cross = await get("/api/payments/applications/app-a/latest", { auth: ASU_C });
+    assert.equal(cross.hasData, false, `ASU C -> tenant A application must not return it (got ${cross.status})`);
+    assert.deepEqual(queried.splice(0), [TENANT_C]);
+  } finally {
+    Payment.findOne = origFindOne; Payment.findById = origFindById; stripe.paymentIntents.retrieve = origRetrieve;
+  }
 });

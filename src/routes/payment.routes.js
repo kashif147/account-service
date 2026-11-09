@@ -16,6 +16,7 @@ import {
   requireInternalOrFinanceWrite,
 } from "../middlewares/financePermission.middleware.js";
 import {
+  isTrustedInternalCall,
   requireCrmUser,
   requireInternalOrCrm,
   requireInternalOrCrmOrIntentOwner,
@@ -118,10 +119,15 @@ router.get(
   requireInternalOrCrmOrIntentOwner,
   getPaymentByStripeId
 );
-// profile-service application approval (CRM) only.
+// profile-service application approval and payment-link issue (CRM, forwarding the approver's identity)
+// or a genuine internal call. P6: a CRM user also needs application:read (PDP); internal is unchanged.
+const requireApplicationReadUnlessInternal = (req, res, next) =>
+  isTrustedInternalCall(req) ? next() : applicationRead(req, res, next);
+const applicationRead = defaultPolicyMiddleware.requirePermission("application", "read");
 router.get(
   "/applications/:applicationId/latest",
   requireInternalOrCrm,
+  requireApplicationReadUnlessInternal,
   getLatestApplicationPayment
 );
 
@@ -159,7 +165,9 @@ router.post(
 
 // Gateway aggregation: list payments by member IDs (subscription service)
 // (CRM subscription grid aggregation, forwarding the CRM user's identity, or a worker.)
-router.post("/batch", requireInternalOrCrm, listPaymentsBatch);
+// P6: a CRM user needs an explicit finance-data read claim (payments:read / accounts.admin:read / *);
+// internal unchanged. The response is projected to PAYMENT_BATCH_FIELDS (payments.service.js).
+router.post("/batch", requireInternalOrFinanceDataRead, listPaymentsBatch);
 
 // CRM finance back-office manual backfill (AssociateMemberModal).
 router.post(
@@ -191,8 +199,10 @@ router.get(
   listPaymentRefunds
 );
 
+// P6: CRM staff only (requireCrmUser) before the finance-write check; no service calls this route.
 router.post(
   "/refunds",
+  requireCrmUser,
   requireFinanceWrite,
   idempotency(),
   zodValidate(zCreateRefund),
